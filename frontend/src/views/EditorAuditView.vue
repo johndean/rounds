@@ -1,11 +1,14 @@
 <script setup lang="ts">
-// Phase 4 / U27 (per-session) and Phase 3 / U20 (standalone variant). IMPLEMENTATION.md §6 Audit tab.
+/**
+ * Audit / Word Track Changes (per-session) — /e/:id/audit
+ * Same surface as the standalone AuditRoute; receives an id prop that adds
+ * a session breadcrumb hop. Delegates to AuditView so the body is shared.
+ */
+import AuditView from './AuditView.vue';
+
 defineProps<{ id: string }>();
 </script>
 
 <template>
-  <div class="scaffolding-banner">
-    SCAFFOLD: EditorAuditView · Phase 4 / U27 — Decisions/Ledger toggle · per-correction cards with WAS/NOW. Session id: <code>{{ id }}</code>
-  </div>
-  <section class="card"><h1>Audit ledger — {{ id }}</h1></section>
+  <AuditView :id="id" />
 </template>
