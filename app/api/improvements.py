@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -176,8 +176,8 @@ async def admin_patch(improvement_id: UUID, payload: AdminPatch, db: DbSession, 
     return await get_improvement(improvement_id, db, user)
 
 
-@router.delete("/{improvement_id}", status_code=204)
-async def delete_improvement(improvement_id: UUID, db: DbSession, user: CurrentUser) -> None:
+@router.delete("/{improvement_id}", status_code=204, response_class=Response)
+async def delete_improvement(improvement_id: UUID, db: DbSession, user: CurrentUser):
     await db.execute(text(
         "UPDATE improvements SET deleted_at = now() WHERE id = :id"
     ), {"id": str(improvement_id)})
@@ -185,3 +185,4 @@ async def delete_improvement(improvement_id: UUID, db: DbSession, user: CurrentU
         "INSERT INTO audit_events (actor_email, kind, summary) VALUES (:a, 'improvement.delete', :s)"
     ), {"a": user.email, "s": f"deleted {improvement_id}"})
     await db.commit()
+    return Response(status_code=204)

@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
@@ -80,13 +80,14 @@ async def add_person(payload: PersonPayload, db: DbSession, user: CurrentUser) -
     return dict(row)
 
 
-@router.delete("/people/{person_id}", status_code=204)
-async def remove_person(person_id: UUID, db: DbSession, user: CurrentUser) -> None:
+@router.delete("/people/{person_id}", status_code=204, response_class=Response)
+async def remove_person(person_id: UUID, db: DbSession, user: CurrentUser):
     await db.execute(text("UPDATE people SET is_active = FALSE WHERE id = :id"), {"id": str(person_id)})
     await db.execute(text(
         "INSERT INTO audit_events (actor_email, kind, summary) VALUES (:a, 'settings.people.remove', :s)"
     ), {"a": user.email, "s": f"deactivated {person_id}"})
     await db.commit()
+    return Response(status_code=204)
 
 
 @router.get("/groups")
