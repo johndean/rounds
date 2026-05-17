@@ -9,6 +9,7 @@
 import { computed } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import { toast } from '@/composables/useToast';
+import { commandPalette } from '@/composables/useCommandPalette';
 import { useAuthStore } from '@/stores/auth';
 
 const route = useRoute();
@@ -30,7 +31,7 @@ const avatarInitials = computed(() => {
   return auth.email.slice(0, 2).toUpperCase();
 });
 
-function onSearch()   { toast.push('Command palette: not yet wired (Phase 2 / U9)', { tone: 'info' }); }
+function onSearch()   { commandPalette.open(); }
 function onFontDown() { toast.push('Font down: not yet wired (Phase 2 / U8)', { tone: 'info' }); }
 function onFontUp()   { toast.push('Font up: not yet wired (Phase 2 / U8)', { tone: 'info' }); }
 function onLogout() {

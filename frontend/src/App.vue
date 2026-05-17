@@ -10,6 +10,9 @@ import { onMounted, computed } from 'vue';
 import { useRoute } from 'vue-router';
 import AppHeader from '@/components/AppHeader.vue';
 import ToastHost from '@/components/overlays/ToastHost.vue';
+import ConfirmHost from '@/components/overlays/ConfirmHost.vue';
+import ModalHost from '@/components/overlays/ModalHost.vue';
+import CommandPalette from '@/components/overlays/CommandPalette.vue';
 import { useAuthStore } from '@/stores/auth';
 
 const auth = useAuthStore();
@@ -31,7 +34,9 @@ onMounted(() => {
     </RouterView>
   </main>
   <ToastHost />
-  <!-- TODO Phase 2 / U9: ConfirmHost, ModalHost, CommandPalette, FindReplaceModal -->
+  <ConfirmHost />
+  <ModalHost />
+  <CommandPalette />
 </template>
 
 <style>
