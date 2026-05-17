@@ -14,9 +14,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api import audit as audit_router
 from app.api import auth as auth_router
+from app.api import diagnostics as diag_router
+from app.api import discrepancies as disc_router
 from app.api import gcs_upload as gcs_router
+from app.api import improvements as improvements_router
+from app.api import segments as segments_router
 from app.api import sessions as sessions_router
+from app.api import settings as settings_router
+from app.api import sop as sop_router
 from app.config import settings
 
 _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -66,6 +73,13 @@ async def health() -> JSONResponse:
 app.include_router(auth_router.router)
 app.include_router(gcs_router.router)
 app.include_router(sessions_router.router)
+app.include_router(segments_router.router)
+app.include_router(disc_router.router)
+app.include_router(sop_router.router)
+app.include_router(audit_router.router)
+app.include_router(improvements_router.router)
+app.include_router(settings_router.router)
+app.include_router(diag_router.router)
 
 
 # ── Static frontend (production) ─────────────────────────────────────────
