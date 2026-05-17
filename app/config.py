@@ -8,6 +8,7 @@ Settings class. Defaults match the audit table verbatim, with two exceptions:
 """
 from typing import Optional
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -79,6 +80,21 @@ class Settings(BaseSettings):
 
     # ── Misc ──────────────────────────────────────────────────────────
     ENVIRONMENT: str = "production"
+
+    # ── Validators ─────────────────────────────────────────────────────
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def _coerce_asyncpg_scheme(cls, v: object) -> object:
+        """
+        Railway's ${{Postgres.DATABASE_URL}} expands to `postgresql://...`
+        (psycopg2-style). The async SQLAlchemy engine + asyncpg driver
+        used by the app requires the `postgresql+asyncpg://` scheme.
+        Normalize here so the env-var value can come from any source.
+        scripts/migrate.py does the reverse conversion for psycopg2.
+        """
+        if isinstance(v, str) and v.startswith("postgresql://"):
+            return "postgresql+asyncpg://" + v[len("postgresql://"):]
+        return v
 
 
 settings = Settings()  # type: ignore[call-arg]

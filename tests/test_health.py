@@ -1,4 +1,6 @@
 """Phase 1 smoke test — /v1/health must return ok."""
+import os
+
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -34,3 +36,30 @@ def test_locked_weights_match_audit():
     assert settings.CELERY_MAX_RETRIES == 3
     assert settings.CELERY_RETRY_BACKOFF_BASE == 60
     assert settings.CELERY_RETRY_JITTER is True
+
+
+def test_database_url_normalizes_to_asyncpg(monkeypatch):
+    """
+    Railway's ${{Postgres.DATABASE_URL}} resolves to `postgresql://` (psycopg2 scheme).
+    The app uses async SQLAlchemy + asyncpg, which needs `postgresql+asyncpg://`.
+    The Settings validator must rewrite the scheme transparently.
+    """
+    monkeypatch.setenv("DATABASE_URL", "postgresql://user:pw@host.railway.internal:5432/railway")
+    # Re-import so Settings re-reads env
+    from importlib import reload
+
+    from app import config as cfg
+    reload(cfg)
+    assert cfg.settings.DATABASE_URL.startswith("postgresql+asyncpg://")
+    assert "host.railway.internal:5432/railway" in cfg.settings.DATABASE_URL
+
+
+def test_database_url_passthrough_when_already_asyncpg(monkeypatch):
+    """If DATABASE_URL already carries the asyncpg scheme, it stays unchanged."""
+    original = "postgresql+asyncpg://user:pw@localhost:5432/rounds"
+    monkeypatch.setenv("DATABASE_URL", original)
+    from importlib import reload
+
+    from app import config as cfg
+    reload(cfg)
+    assert cfg.settings.DATABASE_URL == original
