@@ -151,7 +151,7 @@ export const gcs = {
       '/v1/gcs/upload-url',
       { body: { session_id: sessionId, filename, role }, method: 'POST' },
     ),
-  uploadComplete: (sessionId: string, files: Array<{ gcs_uri: string; role?: string; filename?: string }>) =>
+  uploadComplete: (sessionId: string, files: Array<{ gcs_uri: string; role?: string; filename?: string; content_type?: string; size_bytes?: number; duration_sec?: number }>) =>
     http<{ session_id: string; accepted: string[] }>(
       '/v1/gcs/upload-complete',
       { body: { session_id: sessionId, files }, method: 'POST' },
