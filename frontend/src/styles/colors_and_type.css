@@ -1,0 +1,152 @@
+/* ─────────────────────────────────────────────────────────────────────
+ * colors_and_type.css — Rounds design tokens.
+ * Reconstructed from IMPLEMENTATION.md §4. The pixel-by-pixel canonical
+ * source is the original Transcript Software v4 bundle; values here MUST
+ * match it byte-for-byte. When the prototype bundle is retrieved, replace
+ * this file verbatim and re-run the pixel-diff suite (Phase 10).
+ * ──────────────────────────────────────────────────────────────────── */
+
+/* ── Brand palette ──────────────────────────────────────────────────── */
+:root {
+  --color-navy:        #002855;
+  --color-steel:       #4D6995;
+  --color-green:       #007D61;
+  --color-teal:        #0097A9;
+  --color-blue:        #0861CE;
+  --color-red:         #C54644;
+  --color-amber:       #B75D04;
+  --color-gold:        #B9975B;
+  --color-light-steel: #DDE5ED;
+  --color-warm-light:  #E8E3D2;
+}
+
+/* ── Surface tokens (light) ─────────────────────────────────────────── */
+:root,
+:root[data-theme="light"] {
+  --surface-bg:      #F5F7FA;
+  --surface-card:    #FFFFFF;
+  --surface-muted:   #EEF2F7;
+  --surface-nav:     var(--color-navy);
+
+  --fg1:             #0B1A2E;
+  --fg2:             #4A5C73;
+  --fg-on-dark:      #FFFFFF;
+  --fg-link:         var(--color-blue);
+
+  --border-subtle:   #D5DCE5;
+}
+
+/* ── Surface tokens (dark) ──────────────────────────────────────────── */
+:root[data-theme="dark"] {
+  --surface-bg:      #0B1726;
+  --surface-card:    #132338;
+  --surface-muted:   #1B2C44;
+  --surface-nav:     #050F1C;
+
+  --fg1:             #E8EEF6;
+  --fg2:             #9FB1C9;
+  --fg-on-dark:      #FFFFFF;
+  --fg-link:         #6DA6FF;
+
+  --border-subtle:   #243A57;
+}
+
+/* ── Typography ─────────────────────────────────────────────────────── */
+:root {
+  --font-family: 'ProximaNova', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono:   'Courier New', ui-monospace, SFMono-Regular, monospace;
+  --font-display: 'Instrument Serif', Georgia, serif;  /* Login / marketing only */
+
+  /* Weights */
+  --fw-light:    300;
+  --fw-regular:  400;
+  --fw-medium:   500;
+  --fw-extrabold: 800;
+
+  /* Scale — base 1rem, 1.25 ratio, 0.64rem → 3.815rem */
+  --fs-2xs: 0.64rem;
+  --fs-xs:  0.8rem;
+  --fs-sm:  1rem;
+  --fs-md:  1.25rem;
+  --fs-lg:  1.5625rem;
+  --fs-xl:  1.953rem;
+  --fs-2xl: 2.441rem;
+  --fs-3xl: 3.052rem;
+  --fs-4xl: 3.815rem;
+
+  --lh-tight:   1.15;
+  --lh-normal:  1.45;
+  --lh-relaxed: 1.65;
+
+  --tracking-wide: 0.06em;
+}
+
+/* ── Spacing — base 4px, 1.5× ratio ─────────────────────────────────── */
+:root {
+  --space-0: 0;
+  --space-1: 4px;
+  --space-2: 6px;
+  --space-3: 9px;
+  --space-4: 14px;
+  --space-5: 21px;
+  --space-6: 31px;
+  --space-7: 47px;
+  --space-8: 64px;
+  --space-9: 81px;
+}
+
+/* ── Radii ──────────────────────────────────────────────────────────── */
+:root {
+  --radius-sm:   4px;
+  --radius-md:   8px;
+  --radius-lg:   16px;
+  --radius-pill: 999px;
+}
+
+/* ── Shadows ────────────────────────────────────────────────────────── */
+:root {
+  --shadow-sm: 0 1px 2px rgba(11, 26, 46, 0.06);
+  --shadow-md: 0 2px 6px rgba(11, 26, 46, 0.08), 0 1px 2px rgba(11, 26, 46, 0.04);
+  --shadow-lg: 0 8px 20px rgba(11, 26, 46, 0.12), 0 2px 6px rgba(11, 26, 46, 0.06);
+  --shadow-xl: 0 20px 48px rgba(11, 26, 46, 0.20), 0 6px 16px rgba(11, 26, 46, 0.10);
+}
+
+/* ── Motion ─────────────────────────────────────────────────────────── */
+:root {
+  --motion-fast:    150ms;
+  --motion-normal:  300ms;
+  --motion-slow:    500ms;
+  --motion-easing:  cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* ── Global resets / base body ──────────────────────────────────────── */
+html {
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+  background: var(--surface-bg);
+  color: var(--fg1);
+  font-family: var(--font-family);
+  font-size: 16px;
+  line-height: var(--lh-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--surface-bg);
+  color: var(--fg1);
+  font-family: var(--font-family);
+}
+
+* { box-sizing: border-box; }
+
+a {
+  color: var(--fg-link);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+
+.mono { font-family: var(--font-mono); }
+.uppercase { text-transform: uppercase; letter-spacing: var(--tracking-wide); }

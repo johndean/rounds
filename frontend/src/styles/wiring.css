@@ -1,0 +1,79 @@
+/* ─────────────────────────────────────────────────────────────────────
+ * wiring.css — Overlays (toast / confirm / modal / command palette).
+ * PLACEHOLDER. Canonical source: prototype bundle (~100 LOC).
+ * Replace VERBATIM before Phase 10. See docs/SPEC.md.
+ * ──────────────────────────────────────────────────────────────────── */
+
+.toast-host {
+  position: fixed;
+  bottom: var(--space-5);
+  right: var(--space-5);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  pointer-events: none;
+}
+
+.toast {
+  pointer-events: auto;
+  padding: var(--space-3) var(--space-5);
+  background: var(--surface-card);
+  border-left: 4px solid var(--color-blue);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+  font-size: var(--fs-sm);
+  min-width: 240px;
+  max-width: 420px;
+}
+.toast--success { border-left-color: var(--color-green); }
+.toast--warn    { border-left-color: var(--color-amber); }
+.toast--error   { border-left-color: var(--color-red); }
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(11, 26, 46, 0.4);
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal {
+  background: var(--surface-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xl);
+  padding: var(--space-6);
+  max-width: 640px;
+  width: calc(100% - var(--space-7));
+}
+
+.confirm {
+  background: var(--surface-card);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-xl);
+  padding: var(--space-5);
+  max-width: 460px;
+}
+.confirm__title { font-weight: var(--fw-extrabold); font-size: var(--fs-md); margin-bottom: var(--space-3); }
+.confirm__body  { font-size: var(--fs-sm); color: var(--fg2); margin-bottom: var(--space-5); }
+.confirm__actions { display: flex; gap: var(--space-3); justify-content: flex-end; }
+
+.command-palette {
+  background: var(--surface-card);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-xl);
+  width: 560px;
+  max-width: calc(100vw - var(--space-7));
+  padding: var(--space-3);
+}
+.command-palette__input {
+  width: 100%;
+  padding: var(--space-3);
+  border: none;
+  outline: none;
+  font-size: var(--fs-md);
+  font-family: var(--font-family);
+  background: transparent;
+}

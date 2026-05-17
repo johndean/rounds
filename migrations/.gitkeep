@@ -1,0 +1,3 @@
+# Migrations land here as numbered SQL files: 001_init.sql, 002_sop.sql, ...
+# Applied in order by scripts/migrate.py (Railway pre-deploy command).
+# Phase 5 / U35 creates the first batch.

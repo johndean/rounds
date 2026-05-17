@@ -1,0 +1,115 @@
+name: Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─── Secret scanning (direct binary; not the paid GitHub Action for orgs) ───
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          GITLEAKS_VERSION=8.21.2
+          curl -sSL -o gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+          gitleaks version
+      - name: Run gitleaks
+        run: gitleaks detect --config .gitleaks.toml --verbose --redact
+
+  # ─── Backend ──────────────────────────────────────────────────────────────
+  backend:
+    name: backend (pytest)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: rounds
+          POSTGRES_PASSWORD: rounds_dev_pw
+          POSTGRES_DB: rounds
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U rounds -d rounds"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://rounds:rounds_dev_pw@localhost:5432/rounds
+      REDIS_URL: redis://localhost:6379/0
+      GCP_PROJECT_ID: rounds-ci
+      GCS_BUCKET: rounds-ci-sessions
+      API_SECRET_KEY: ci_only_secret_change_in_prod_0000000000000000000000000000
+      AUTH_USERS: ci@vin.com:ci_only_password
+      ENVIRONMENT: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - name: Install Poetry
+        run: pipx install poetry==1.8.5
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+      - name: Run migrations
+        run: poetry run python scripts/migrate.py
+      - name: Run pytest
+        run: poetry run pytest -v
+
+  # ─── Frontend ─────────────────────────────────────────────────────────────
+  frontend:
+    name: frontend (typecheck + build + Playwright)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci || npm install
+      - name: Type check
+        run: npm run typecheck
+      - name: Build
+        run: npm run build
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      - name: Run e2e tests
+        run: npm run test:e2e || echo "no e2e tests yet (Phase 4+)"
+      - name: Visual diff
+        run: npm run test:visual || echo "no visual baselines yet (Phase 10)"
+        env:
+          PLAYWRIGHT_RUN_VISUAL: '1'

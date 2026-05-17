@@ -1,0 +1,70 @@
+# --- secrets ---
+secrets/
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+seed-admin.sql
+scripts/seed-admin*.sql
+!scripts/seed-admin.sql.example
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+.eggs/
+poetry.lock.bak
+
+# --- node / vite ---
+node_modules/
+frontend/dist/
+frontend/node_modules/
+frontend/.vite/
+frontend/tests/visual/__snapshots__/
+frontend/tests/visual/test-results/
+frontend/playwright-report/
+.parcel-cache/
+.next/
+
+# --- editors / OS ---
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.recommended.json
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- docker / railway ---
+.docker/
+*.pid
+*.log
+logs/
+
+# --- generated / temp ---
+tmp/
+.tmp/
+*.tmp
+out/
+coverage/
+.cache/
+
+# --- pgsql dumps ---
+*.sql.gz
+*.dump

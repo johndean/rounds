@@ -1,0 +1,77 @@
+"""
+Rounds API entry point.
+
+Phase 1 scaffold — only /v1/health is wired so CI + Railway healthchecks pass.
+Domain routers (auth, sessions, gcs_upload, segments, slides, discrepancies,
+sop, audit, improvements, settings, exports, diagnostics, ws) land in
+Phases 5-7 per docs/plans/2026-05-17-001-feat-rounds-bootstrap-plan.md.
+"""
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from app.config import settings
+
+_FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Startup-time sanity checks (audit §10 finding #3 — fail fast on missing creds)
+    if settings.GOOGLE_APPLICATION_CREDENTIALS:
+        creds_path = Path(settings.GOOGLE_APPLICATION_CREDENTIALS)
+        if not creds_path.exists():
+            # Warn loudly but don't crash on dev — production deploy will set GCP_KEY_B64
+            # which scripts/start.sh decodes before this lifespan runs.
+            print(
+                f"[warn] GOOGLE_APPLICATION_CREDENTIALS={creds_path} does not exist. "
+                "GCS / STT / Vertex AI calls will fail at request time.",
+                flush=True,
+            )
+    yield
+
+
+app = FastAPI(
+    title="Rounds API",
+    version="0.0.1",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://rounds.vin",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/v1/health")
+async def health() -> JSONResponse:
+    return JSONResponse({"status": "ok", "version": app.version, "env": settings.ENVIRONMENT})
+
+
+# ── Static frontend (production) ─────────────────────────────────────────
+# Railway: Dockerfile builds frontend/dist and copies it in; mount as SPA fallback.
+if _FRONTEND_DIST.exists():
+    app.mount(
+        "/assets",
+        StaticFiles(directory=_FRONTEND_DIST / "assets"),
+        name="assets",
+    )
+
+    @app.get("/")
+    async def index() -> FileResponse:
+        return FileResponse(_FRONTEND_DIST / "index.html")
+
+    @app.get("/{path:path}")
+    async def spa_fallback(path: str) -> FileResponse:  # noqa: ARG001
+        return FileResponse(_FRONTEND_DIST / "index.html")

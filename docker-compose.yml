@@ -1,0 +1,85 @@
+# Local dev mirror of the Railway production topology.
+# Railway uses the same Dockerfile but its own service config — this file is dev-only.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: rounds
+      POSTGRES_PASSWORD: rounds_dev_pw
+      POSTGRES_DB: rounds
+    ports:
+      - "5432:5432"
+    volumes:
+      - rounds_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rounds -d rounds"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["api"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://rounds:rounds_dev_pw@db:5432/rounds
+      REDIS_URL: redis://redis:6379/0
+      VAULT_ADDR: http://localhost:8200
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-rounds-dev-local}
+      GCS_BUCKET: ${GCS_BUCKET:-rounds-dev-local-sessions}
+      GOOGLE_APPLICATION_CREDENTIALS: /gcp-key.json
+      API_SECRET_KEY: ${API_SECRET_KEY:-dev_only_change_me_in_prod_000000000000000000000000000000}
+      AUTH_USERS: ${AUTH_USERS:-johndean@vin.com:dev_only_password}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      ENVIRONMENT: development
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./secrets/gcp-key.json:/gcp-key.json:ro
+      - ./app:/app/app
+      - ./migrations:/app/migrations
+      - ./scripts:/app/scripts
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["worker"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://rounds:rounds_dev_pw@db:5432/rounds
+      REDIS_URL: redis://redis:6379/0
+      VAULT_ADDR: http://localhost:8200
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-rounds-dev-local}
+      GCS_BUCKET: ${GCS_BUCKET:-rounds-dev-local-sessions}
+      GOOGLE_APPLICATION_CREDENTIALS: /gcp-key.json
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      ENVIRONMENT: development
+    volumes:
+      - ./secrets/gcp-key.json:/gcp-key.json:ro
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  rounds_db_data:

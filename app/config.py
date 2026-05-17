@@ -1,0 +1,84 @@
+"""
+Rounds settings — ports MIC audit §6 environment contract.
+
+The 47-var table from the audit is materialized here as a single Pydantic
+Settings class. Defaults match the audit table verbatim, with two exceptions:
+  • Vault fields are removed (audit §5: scaffold-only; never wired).
+  • VERTEX_AI_GEMINI_API_KEY removed (audit §3.3: vestigial — never read).
+"""
+from typing import Optional
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="ignore",
+    )
+
+    # ── Required ──────────────────────────────────────────────────────
+    DATABASE_URL: str
+    REDIS_URL: str
+    GCP_PROJECT_ID: str = "rounds-dev-local"
+    GCS_BUCKET: str = "rounds-dev-local-sessions"
+    GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = None
+    API_SECRET_KEY: str
+    AUTH_USERS: str  # fails fast if unset (audit §10 finding #7)
+
+    # ── Auth ──────────────────────────────────────────────────────────
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 480
+
+    # ── Rate limiting ─────────────────────────────────────────────────
+    MAX_CONCURRENT_SESSIONS: int = 3
+    MAX_QUEUE_LENGTH: int = 10
+    MAX_UPLOAD_SIZE_MB: int = 2048
+    MAX_VIDEO_DURATION_MINUTES: int = 180
+
+    # ── Processing — LOCKED weights (audit §6) ────────────────────────
+    FRAME_SAMPLE_FPS: int = 2
+    VISUAL_CHANGE_THRESHOLD: float = 8.0
+    ANCHOR_CROSS_VALIDATE_WINDOW: float = 5.0
+    SOFT_WINDOW_EXPANSION: float = 5.0
+    BOUNDARY_MERGE_WINDOW: float = 3.0
+
+    FUSION_WEIGHT_VISUAL: float = 0.5
+    FUSION_WEIGHT_ANCHOR: float = 0.3
+    FUSION_WEIGHT_SEMANTIC: float = 0.2
+    FUSION_BOUNDARY_THRESHOLD: float = 0.35
+
+    ALIGN_WEIGHT_SEMANTIC: float = 0.35
+    ALIGN_WEIGHT_COVERAGE: float = 0.25
+    ALIGN_WEIGHT_TEMPORAL: float = 0.25
+    ALIGN_WEIGHT_SEQUENTIAL: float = 0.15
+    ALIGN_SEQUENTIAL_PENALTY: float = 0.8
+
+    IIL_DRIFT_CONFIDENCE_PENALTY: float = 0.3
+    IIL_DRIFT_REALIGN_WINDOW: float = 20.0
+    IIL_TIER2_DEFAULT_THRESHOLD: float = 0.7
+    IIL_TIER2_MODERATE_THRESHOLD: float = 0.85
+
+    CELERY_MAX_RETRIES: int = 3
+    CELERY_RETRY_BACKOFF_BASE: int = 60
+    CELERY_RETRY_JITTER: bool = True
+    IDEMPOTENCY_KEY_TTL_SECONDS: int = 86400
+
+    # ── Transcription ─────────────────────────────────────────────────
+    TRANSCRIPTION_BACKEND: str = "google_stt_chunked"
+    TRANSCRIPTION_CHUNK_MINUTES: int = 5
+    WHISPER_MODEL_SIZE: str = "base"
+
+    # ── AI ────────────────────────────────────────────────────────────
+    GEMINI_API_KEY: Optional[str] = None
+    GEMINI_CLASSIFY_MODEL: str = "gemini-2.5-flash-lite"
+    VERTEX_AI_CLASSIFY_ENABLED: bool = False
+    VERTEX_AI_LOCATION: str = "us-central1"
+
+    # ── Misc ──────────────────────────────────────────────────────────
+    ENVIRONMENT: str = "production"
+
+
+settings = Settings()  # type: ignore[call-arg]

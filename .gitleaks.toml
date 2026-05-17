@@ -1,0 +1,24 @@
+# Gitleaks config — Rounds.
+# Pattern: direct binary in CI (not the paid GitHub Action for orgs).
+# Allowlist matches placeholder secrets in .env.example and tests/fixtures.
+
+title = "Rounds gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow placeholder secrets in example files and fixtures"
+paths = [
+  '''(?i)\.env\.example$''',
+  '''(?i)scripts/seed-admin\.sql\.example$''',
+  '''(?i)tests/fixtures/.*''',
+  '''(?i)frontend/src/fixtures/.*''',
+  '''(?i)docs/.*\.md$''',
+]
+regexes = [
+  '''dev_only_password''',
+  '''dev_only_change_me_in_prod_[0]+''',
+  '''change_me''',
+  '''rounds_dev_pw''',
+]

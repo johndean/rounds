@@ -1,0 +1,74 @@
+/* ─────────────────────────────────────────────────────────────────────
+ * settings.css — Settings inline forms + sub-pages.
+ * PLACEHOLDER. Canonical source: prototype bundle (~280 LOC).
+ * Replace VERBATIM before Phase 10. See docs/SPEC.md.
+ * ──────────────────────────────────────────────────────────────────── */
+
+.settings {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: var(--space-6);
+  padding: var(--space-5);
+  min-height: calc(100vh - 50px);
+}
+
+.settings__sidebar {
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  align-self: start;
+  position: sticky;
+  top: calc(50px + var(--space-5));
+}
+
+.settings__sidebar a {
+  display: block;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-sm);
+  color: var(--fg2);
+  text-decoration: none;
+}
+.settings__sidebar a.is-active {
+  background: var(--surface-muted);
+  color: var(--fg1);
+  font-weight: var(--fw-medium);
+}
+
+.settings__content {
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-6);
+}
+
+.settings-header__title { font-size: var(--fs-lg); font-weight: var(--fw-extrabold); margin: 0 0 var(--space-2); }
+.settings-header__lead  { font-size: var(--fs-sm); color: var(--fg2); margin: 0 0 var(--space-5); }
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  max-width: 640px;
+}
+.settings-form label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--fs-xs);
+  color: var(--fg2);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+.settings-form input,
+.settings-form select,
+.settings-form textarea {
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-card);
+  color: var(--fg1);
+  font-family: var(--font-family);
+  font-size: var(--fs-sm);
+}

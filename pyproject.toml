@@ -1,0 +1,65 @@
+[tool.poetry]
+name = "rounds"
+version = "0.0.1"
+description = "Rounds — transcript software. Successor to MIC."
+authors = ["John Dean <johndean@vin.com>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+# --- web ---
+fastapi = "^0.115"
+uvicorn = { extras = ["standard"], version = "^0.32" }
+python-multipart = "^0.0.12"
+websockets = "^13.1"
+# --- db ---
+sqlalchemy = { extras = ["asyncio"], version = "^2.0" }
+asyncpg = "^0.30"
+psycopg2-binary = "^2.9"   # migrate.py + Alembic-style sync paths
+pgvector = "^0.3"
+# --- workers ---
+celery = "^5.4"
+redis = "^5.2"
+# --- google ---
+google-cloud-storage = "^2.18"
+google-cloud-speech = "^2.27"
+google-cloud-aiplatform = "^1.71"
+google-genai = "^0.3"      # Gemini Dev API + Vertex AI client
+# --- media ---
+ffmpeg-python = "^0.2"
+# --- auth + config ---
+python-jose = { extras = ["cryptography"], version = "^3.3" }
+passlib = { extras = ["bcrypt"], version = "^1.7" }
+pydantic = "^2.9"
+pydantic-settings = "^2.6"
+# --- exports ---
+python-docx = "^1.1"
+srt = "^3.5"
+# --- email ---
+httpx = "^0.27"            # Resend SMTP via HTTP API
+# --- observability ---
+structlog = "^24.4"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+pytest-asyncio = "^0.24"
+pytest-cov = "^6.0"
+ruff = "^0.8"
+mypy = "^1.13"
+
+[build-system]
+requires = ["poetry-core>=1.8.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

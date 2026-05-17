@@ -1,0 +1,128 @@
+/* ─────────────────────────────────────────────────────────────────────
+ * app.css — Structural styles. PLACEHOLDER.
+ * Canonical source: Transcript Software v4 bundle (~3000 LOC, IMPLEMENTATION.md §18).
+ * Replace this file VERBATIM from the prototype bundle before Phase 10
+ * pixel-diff verification can pass. See docs/SPEC.md for retrieval notes.
+ *
+ * Minimal styles below exist only so the Phase 1 scaffold renders at all.
+ * ──────────────────────────────────────────────────────────────────── */
+
+/* TopBar — IMPLEMENTATION.md §3 */
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  height: 50px;
+  background: var(--color-navy);
+  color: var(--fg-on-dark);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-5);
+  gap: var(--space-5);
+}
+
+.app-header__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+}
+
+.app-header__build-pill {
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.12);
+  color: var(--fg-on-dark);
+}
+
+.app-header__nav {
+  display: flex;
+  gap: var(--space-5);
+  margin-left: var(--space-5);
+}
+
+.app-header__nav a {
+  color: var(--fg-on-dark);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-wide);
+  font-weight: var(--fw-medium);
+  text-decoration: none;
+  opacity: 0.85;
+  transition: opacity var(--motion-fast) var(--motion-easing);
+}
+.app-header__nav a:hover,
+.app-header__nav a.is-active { opacity: 1; }
+
+.app-header__right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* Page wrappers */
+.page {
+  width: 100%;
+  min-height: calc(100vh - 50px);
+  padding: var(--space-5);
+}
+
+/* Cards / primitives — minimal placeholder */
+.card {
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+  box-shadow: var(--shadow-sm);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-card);
+  color: var(--fg1);
+  font-family: var(--font-family);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--motion-easing);
+}
+.btn:hover { background: var(--surface-muted); }
+.btn--primary {
+  background: var(--color-navy);
+  color: var(--fg-on-dark);
+  border-color: var(--color-navy);
+}
+.btn--primary:hover { background: var(--color-steel); }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-3);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-muted);
+  font-size: var(--fs-xs);
+  color: var(--fg2);
+}
+
+.scaffolding-banner {
+  background: var(--color-warm-light);
+  border: 1px dashed var(--color-amber);
+  color: var(--fg1);
+  padding: var(--space-3) var(--space-5);
+  margin: var(--space-5);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+}
