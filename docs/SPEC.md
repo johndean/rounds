@@ -29,11 +29,26 @@ The bundle contains 4 CSS files we need verbatim per the build plan (Key Technic
 
 The 16 JSX files in the bundle (`components.jsx`, `wiring.jsx`, `data.jsx`, `editor.jsx`, etc.) are the **port source** for Vue SFCs in Phases 2-4. Without the bundle we are inferring behavior from `IMPLEMENTATION.md` prose alone, which works for structure but not for exact CSS class names, exact JSX prop shapes, or exact fixture values in `data.jsx`.
 
-### Retrieval options
+### Retrieval attempts (2026-05-17)
 
-1. **User manual download.** Open the design URL in a browser, download the bundle (`Save Page As…` or use the Anthropic design viewer's download), unzip into `tmp/prototype/`, then run `cp tmp/prototype/*.{css,jsx,html} frontend/src/styles/` (CSS) and `tmp/prototype/*.jsx` → `tmp/port-source/*.jsx` for Phase 2-4 porting reference.
-2. **Programmatic fetch with a higher size budget.** A non-Claude HTTP client (curl, browser, gh CLI) can fetch the bundle and unpack it. This avoids the 10 MB Claude-side limit but still requires the user to authenticate with `api.anthropic.com` if the URL is auth-gated.
-3. **Per-file fetch.** Try fetching individual files in the bundle (`?open_file=app.css`, `?open_file=components.jsx`, etc.) — each is likely under the 10 MB ceiling. This is the cleanest agent-driven path.
+| Approach | URL | Result |
+|---|---|---|
+| Base bundle fetch | `…/h/S_rIYpJehhJHtk_vXKpUbQ?open_file=Transcript+Software+v4.html` | **HTTP 200 but exceeds 10 MB Claude-side limit** — body discarded. |
+| Per-file query param | `…/h/S_rIYpJehhJHtk_vXKpUbQ?open_file=app.css` (and `wiring.css`, `settings.css`, `colors_and_type.css`) | **HTTP 404** — `?open_file=` is a viewer UI hint, not a file router. |
+| Path-based | `…/h/S_rIYpJehhJHtk_vXKpUbQ/app.css` (and `/`) | **HTTP 404** — viewer SPA, no static path serving. |
+
+Conclusion: the design URL serves a JS-rendered viewer; raw file contents are not directly reachable via WebFetch. **Agent-driven retrieval blocked.**
+
+### Manual retrieval (recommended)
+
+1. Open the design URL in a browser: <https://api.anthropic.com/v1/design/h/S_rIYpJehhJHtk_vXKpUbQ?open_file=Transcript+Software+v4.html>
+2. Use the design viewer's built-in download / export, OR view each file in the viewer's file picker (sidebar lists every file in the bundle) and copy the contents out one file at a time, OR open browser DevTools → Network tab while the viewer loads, capture the raw responses for each `.css` / `.jsx` / `.html` file.
+3. Drop the recovered files into a tmp folder, then:
+   - `cp tmp/colors_and_type.css frontend/src/styles/colors_and_type.css`  (replaces the reconstructed version)
+   - `cp tmp/app.css frontend/src/styles/app.css`  (replaces placeholder)
+   - `cp tmp/wiring.css frontend/src/styles/wiring.css`  (replaces placeholder)
+   - `cp tmp/settings.css frontend/src/styles/settings.css`  (replaces placeholder)
+   - Save JSX modules to `tmp/port-source/*.jsx` — they are **read-only references** for Phase 2-4 Vue SFC port work (do not import them; they're the source we're porting from).
 
 Until the bundle is in-repo, Phase 10 pixel-diff verification will not pass. The plan's other phases can proceed independently.
 
