@@ -7,11 +7,15 @@
  * SCAFFOLD: minimal layout to verify Phase 1 wiring. Pixel parity comes in Phase 2 / U8.
  */
 import { computed } from 'vue';
-import { RouterLink, useRoute } from 'vue-router';
+import { RouterLink, useRoute, useRouter } from 'vue-router';
 import { toast } from '@/composables/useToast';
+import { useAuthStore } from '@/stores/auth';
 
 const route = useRoute();
-const buildId = computed(() => `v0.0.1-rounds-bootstrap`);
+const router = useRouter();
+const auth = useAuthStore();
+
+const buildId = computed(() => 'v0.0.1-rounds');
 
 const navLinks = [
   { to: '/dashboard',     label: 'Dashboard' },
@@ -21,17 +25,26 @@ const navLinks = [
   { to: '/settings',      label: 'Settings' },
 ];
 
+const avatarInitials = computed(() => {
+  if (!auth.email) return '?';
+  return auth.email.slice(0, 2).toUpperCase();
+});
+
 function onSearch()   { toast.push('Command palette: not yet wired (Phase 2 / U9)', { tone: 'info' }); }
 function onFontDown() { toast.push('Font down: not yet wired (Phase 2 / U8)', { tone: 'info' }); }
 function onFontUp()   { toast.push('Font up: not yet wired (Phase 2 / U8)', { tone: 'info' }); }
-function onLogout()   { toast.push('Logout: not yet wired (Phase 5 backend / Phase 8 wiring)', { tone: 'warn' }); }
+function onLogout() {
+  auth.logout();
+  toast.push('Signed out', { tone: 'success' });
+  router.push('/login');
+}
 </script>
 
 <template>
   <header class="app-header" data-test-id="app-header">
     <div class="app-header__brand">
       <span>VIN</span>
-      <span class="mono uppercase">TRANSCRIPT.SOFTWARE</span>
+      <span class="mono uppercase">ROUNDS</span>
       <span class="app-header__build-pill mono">{{ buildId }}</span>
     </div>
 
@@ -49,7 +62,25 @@ function onLogout()   { toast.push('Logout: not yet wired (Phase 5 backend / Pha
       <button class="btn" data-test-id="topbar-font-down" @click="onFontDown" aria-label="Decrease font size">A−</button>
       <button class="btn" data-test-id="topbar-font-up"   @click="onFontUp"   aria-label="Increase font size">A+</button>
       <span class="chip mono">nominal</span>
-      <button class="btn" data-test-id="topbar-logout" @click="onLogout">Logout</button>
+      <span v-if="auth.email" class="app-header__avatar" :title="auth.email">{{ avatarInitials }}</span>
+      <button v-if="auth.isAuthenticated" class="btn" data-test-id="topbar-logout" @click="onLogout">Logout</button>
     </div>
   </header>
 </template>
+
+<style scoped>
+.app-header__avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--color-gold);
+  color: var(--color-navy);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: var(--fw-extrabold);
+  text-transform: uppercase;
+}
+</style>

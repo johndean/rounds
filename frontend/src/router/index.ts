@@ -3,6 +3,7 @@
  *
  * | Hash              | View                  |
  * | ----------------- | --------------------- |
+ * | #/login           | LoginView (public)    |
  * | #/dashboard       | DashboardView         |
  * | #/sessions        | SessionsView          |
  * | #/s/:id           | SessionDetailView     |
@@ -18,11 +19,13 @@
  * | #/gcs             | GcsView               |
  */
 import { createRouter, createWebHashHistory } from 'vue-router';
+import { useAuthStore } from '@/stores/auth';
 
 export const router = createRouter({
   history: createWebHashHistory(),
   routes: [
     { path: '/', redirect: '/dashboard' },
+    { path: '/login',               component: () => import('@/views/LoginView.vue'),           name: 'login',  meta: { public: true } },
     { path: '/dashboard',           component: () => import('@/views/DashboardView.vue'),       name: 'dashboard' },
     { path: '/sessions',            component: () => import('@/views/SessionsView.vue'),        name: 'sessions' },
     { path: '/s/:id',               component: () => import('@/views/SessionDetailView.vue'),   name: 'session-detail', props: true },
@@ -38,4 +41,17 @@ export const router = createRouter({
     { path: '/gcs',                 component: () => import('@/views/GcsView.vue'),             name: 'gcs' },
     { path: '/:catchAll(.*)',       redirect: '/dashboard' },
   ],
+});
+
+router.beforeEach((to, _from, next) => {
+  if (to.meta.public) {
+    next();
+    return;
+  }
+  const auth = useAuthStore();
+  if (auth.isAuthenticated) {
+    next();
+    return;
+  }
+  next({ name: 'login', query: { next: to.fullPath } });
 });
