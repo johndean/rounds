@@ -15,6 +15,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import auth as auth_router
+from app.api import gcs_upload as gcs_router
+from app.api import sessions as sessions_router
 from app.config import settings
 
 _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -62,6 +64,8 @@ async def health() -> JSONResponse:
 
 # ─── Sub-routers ────────────────────────────────────────────────────────
 app.include_router(auth_router.router)
+app.include_router(gcs_router.router)
+app.include_router(sessions_router.router)
 
 
 # ── Static frontend (production) ─────────────────────────────────────────
