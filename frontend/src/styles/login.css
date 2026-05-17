@@ -1,0 +1,122 @@
+/* VIN Transcript Software — Login screen */
+.login {
+  position: relative;
+  min-height: 100vh;
+  display: flex; align-items: center; justify-content: center;
+  padding: 40px 24px;
+  background: linear-gradient(135deg, #001A4A 0%, #002855 50%, #003A70 100%);
+}
+.login__bg {
+  position: absolute; inset: 0;
+  background-image:
+    repeating-linear-gradient(-30deg, rgba(255,255,255,0.025) 0, rgba(255,255,255,0.025) 1px, transparent 1px, transparent 14px),
+    radial-gradient(ellipse at 25% 30%, rgba(185,151,91,0.10) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 70%, rgba(77,105,149,0.18) 0%, transparent 50%);
+  pointer-events: none;
+}
+.login__card {
+  position: relative; z-index: 1;
+  width: 100%; max-width: 460px;
+  background: var(--surface-card);
+  border-radius: 16px;
+  padding: 40px 44px 36px;
+  box-shadow: 0 30px 80px rgba(0,0,0,0.30), 0 12px 32px rgba(0,0,0,0.18);
+  display: flex; flex-direction: column;
+  gap: 14px;
+}
+.login__brand {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 10px;
+}
+.login__brand img { height: 34px; }
+.login__brand-text { display: flex; flex-direction: column; }
+.login__brand-name {
+  font-size: 13px; font-weight: 500; letter-spacing: .08em;
+  color: var(--color-navy); line-height: 1.1;
+}
+.login__brand-name strong { font-weight: 800; }
+.login__brand-sub {
+  font-size: 11px; color: var(--fg2); margin-top: 2px;
+}
+.login__title {
+  margin: 0; font-size: 26px; font-weight: 800;
+  color: var(--color-navy); line-height: 1.15;
+}
+.login__pill {
+  display: inline-block; align-self: flex-start;
+  padding: 4px 12px; border-radius: 999px;
+  background: rgba(185,151,91,0.16); color: var(--color-gold);
+  border: 1px solid rgba(185,151,91,0.4);
+  font-family: var(--font-mono); font-size: 10px; font-weight: 800;
+  letter-spacing: .14em;
+}
+.login__lead {
+  margin: 0 0 6px;
+  font-size: 13px; color: var(--fg2); line-height: 1.6;
+}
+.login__label {
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 12px; font-weight: 700; color: var(--color-navy);
+  letter-spacing: .02em;
+}
+.login__input {
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: #F4F6F9;
+  font-family: inherit; font-size: 14.5px;
+  color: var(--fg1); outline: none;
+  transition: border-color var(--duration-fast) var(--easing-out), box-shadow var(--duration-fast) var(--easing-out);
+}
+.login__input:focus {
+  background: #fff;
+  border-color: var(--color-navy);
+  box-shadow: 0 0 0 3px rgba(0,40,85,0.14);
+}
+.login__row {
+  display: flex; justify-content: space-between; align-items: center;
+  font-size: 12px; color: var(--fg2);
+}
+.login__remember {
+  display: inline-flex; align-items: center; gap: 7px;
+}
+.login__forgot {
+  color: var(--color-blue); text-decoration: none;
+}
+.login__forgot:hover { text-decoration: underline; }
+.login__submit {
+  margin-top: 4px;
+  padding: 13px 16px;
+  background: var(--color-navy); color: #fff;
+  border: none; border-radius: 10px;
+  font-family: inherit; font-size: 15px; font-weight: 700;
+  cursor: pointer;
+  transition: background-color var(--duration-fast) var(--easing-out);
+}
+.login__submit:hover:not(:disabled) { background: var(--color-navy-deep); }
+.login__submit:disabled { opacity: 0.6; cursor: wait; }
+.login__sso {
+  display: flex; align-items: center; gap: 10px;
+  margin-top: 4px;
+  position: relative;
+}
+.login__sso::before, .login__sso::after {
+  content: ""; flex: 1; height: 1px; background: var(--border-subtle);
+}
+.login__sso-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 14px;
+  background: transparent; border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  font-family: inherit; font-size: 13px; font-weight: 600;
+  color: var(--color-navy); cursor: pointer;
+}
+.login__sso-btn:hover { background: var(--surface-muted); }
+.login__foot {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  margin-top: 12px;
+  font-size: 11px; color: var(--fg2);
+}
+.login__foot code { font-family: var(--font-mono); }
+.login__foot a { color: var(--fg2); text-decoration: none; }
+.login__foot a:hover { color: var(--color-blue); text-decoration: underline; }

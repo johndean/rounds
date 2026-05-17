@@ -1,141 +1,108 @@
 <script setup lang="ts">
 /**
- * Login screen. Per memory feedback_cevin_internal_design.md:
- *   "internal app pages follow MIC's dark-topbar + sans-serif pattern,
- *    not Login's Instrument Serif aesthetic"
- * So Login uses Instrument Serif (--font-display), internal pages use ProximaNova.
+ * Login route — /login
+ * Pixel-by-pixel Vue port of tmp/port-source/login.jsx (87 lines).
+ * Same class names, same data-test-ids, same DOM tree.
+ * Mock signIn replaced with real authStore.login → POST /v1/auth/login.
  */
 import { ref } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRouter, useRoute } from 'vue-router';
 import { useAuthStore } from '@/stores/auth';
+import { toast } from '@/composables/useToast';
 
 const auth = useAuthStore();
 const router = useRouter();
+const route = useRoute();
 
 const email = ref('');
-const password = ref('');
+const pw = ref('');
+const busy = ref(false);
 
-async function submit(): Promise<void> {
-  const ok = await auth.login(email.value, password.value);
-  if (ok) {
-    const target = (router.currentRoute.value.query.next as string) || '/dashboard';
-    router.replace(target);
+async function signIn(e?: Event): Promise<void> {
+  e?.preventDefault();
+  if (!email.value || !pw.value) {
+    toast.push('Email and password required', { tone: 'warn' });
+    return;
   }
+  busy.value = true;
+  const ok = await auth.login(email.value, pw.value);
+  busy.value = false;
+  if (!ok) {
+    toast.push(auth.error ?? 'Sign in failed', { tone: 'error' });
+    return;
+  }
+  toast.push(`Welcome back, ${email.value.split('@')[0]}`, { tone: 'success' });
+  const target = (route.query.next as string) || '/dashboard';
+  router.replace(target);
 }
+
+function forgot(e: Event): void {
+  e.preventDefault();
+  toast.push('Password reset — email sent', { tone: 'success' });
+}
+function statusLink(e: Event): void { e.preventDefault(); toast.push('Status page (mock)'); }
+function privacyLink(e: Event): void { e.preventDefault(); toast.push('Privacy policy (mock)'); }
 </script>
 
 <template>
-  <div class="login-shell">
-    <form class="login-card" @submit.prevent="submit" data-test-id="login-form">
-      <h1 class="login-title">Rounds</h1>
-      <p class="login-lead">Sign in to continue</p>
+  <main class="login" data-screen-label="Login">
+    <div class="login__bg" aria-hidden="true" />
+    <form class="login__card" @submit="signIn">
+      <div class="login__brand">
+        <img src="/assets/VIN.svg" alt="VIN" />
+        <div class="login__brand-text">
+          <div class="login__brand-name">TRANSCRIPT<strong>.SOFTWARE</strong></div>
+          <div class="login__brand-sub">VIN Transcript Operations Console</div>
+        </div>
+      </div>
 
-      <label class="login-field">
-        <span>Email</span>
+      <h1 class="login__title">Sign in</h1>
+      <span class="login__pill">v4.0.0 · OPERATOR CONSOLE</span>
+      <p class="login__lead">
+        Audit-traceable transcription workflow for VIN continuing-education sessions · SOP-gated review · append-only correction lineage.
+      </p>
+
+      <label class="login__label">
+        Email
         <input
-          v-model.trim="email"
+          v-model="email"
           type="email"
-          autocomplete="username"
-          required
+          class="login__input"
+          placeholder="you@vin.com"
           autofocus
           data-test-id="login-email"
         />
       </label>
 
-      <label class="login-field">
-        <span>Password</span>
+      <label class="login__label">
+        Password
         <input
-          v-model="password"
+          v-model="pw"
           type="password"
-          autocomplete="current-password"
-          required
+          class="login__input"
+          placeholder="••••••••••••"
           data-test-id="login-password"
         />
       </label>
 
-      <p v-if="auth.error" class="login-error" data-test-id="login-error">{{ auth.error }}</p>
+      <div class="login__row">
+        <label class="login__remember">
+          <input type="checkbox" checked /> Keep me signed in for 8 hours
+        </label>
+        <a href="#/login" class="login__forgot" @click="forgot">Forgot password?</a>
+      </div>
 
-      <button
-        type="submit"
-        class="btn btn--primary login-submit"
-        :disabled="auth.isLoading || !email || !password"
-        data-test-id="login-submit"
-      >
-        {{ auth.isLoading ? 'Signing in…' : 'Sign in' }}
+      <button type="submit" class="login__submit" :disabled="busy" data-test-id="login-submit">
+        {{ busy ? 'Signing in…' : 'Sign in' }}
       </button>
 
-      <p class="login-foot">
-        <span class="mono">rounds.vin</span> · <span>v0.0.1</span>
-      </p>
+      <div class="login__foot">
+        <span>Build <code>v4.0.0-ssot-r2</code></span>
+        <span>·</span>
+        <span><a href="#/" @click="statusLink">System status: nominal</a></span>
+        <span>·</span>
+        <span><a href="#/" @click="privacyLink">Privacy</a></span>
+      </div>
     </form>
-  </div>
+  </main>
 </template>
-
-<style scoped>
-.login-shell {
-  min-height: calc(100vh - 50px);
-  display: grid;
-  place-items: center;
-  background: linear-gradient(180deg, var(--surface-bg) 0%, var(--surface-muted) 100%);
-  padding: var(--space-5);
-}
-.login-card {
-  background: var(--surface-card);
-  padding: var(--space-7) var(--space-7);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-xl);
-  width: 100%;
-  max-width: 420px;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-}
-.login-title {
-  margin: 0;
-  font-family: var(--font-display);
-  font-weight: 400;
-  font-size: var(--fs-3xl);
-  color: var(--color-navy);
-  letter-spacing: 0.01em;
-}
-.login-lead { margin: 0 0 var(--space-4); color: var(--fg2); font-size: var(--fs-md); }
-.login-field { display: flex; flex-direction: column; gap: var(--space-1); }
-.login-field span {
-  font-size: var(--fs-xs);
-  text-transform: uppercase;
-  letter-spacing: var(--tracking-wide);
-  color: var(--fg2);
-}
-.login-field input {
-  padding: var(--space-3) var(--space-4);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  font-family: var(--font-family);
-  font-size: var(--fs-sm);
-  background: var(--surface-card);
-  color: var(--fg1);
-}
-.login-field input:focus {
-  outline: none;
-  border-color: var(--color-blue);
-  box-shadow: 0 0 0 3px rgba(8, 97, 206, 0.18);
-}
-.login-error {
-  margin: 0;
-  padding: var(--space-3);
-  background: rgba(197, 70, 68, 0.08);
-  border-left: 3px solid var(--color-red);
-  color: var(--color-red);
-  font-size: var(--fs-xs);
-  border-radius: var(--radius-sm);
-}
-.login-submit { padding: var(--space-3); font-size: var(--fs-md); justify-content: center; }
-.login-submit:disabled { opacity: 0.55; cursor: not-allowed; }
-.login-foot {
-  margin: 0;
-  text-align: center;
-  color: var(--fg2);
-  font-size: var(--fs-2xs);
-  opacity: 0.7;
-}
-</style>
