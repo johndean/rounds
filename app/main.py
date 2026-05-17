@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api import auth as auth_router
 from app.config import settings
 
 _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -57,6 +58,10 @@ app.add_middleware(
 @app.get("/v1/health")
 async def health() -> JSONResponse:
     return JSONResponse({"status": "ok", "version": app.version, "env": settings.ENVIRONMENT})
+
+
+# ─── Sub-routers ────────────────────────────────────────────────────────
+app.include_router(auth_router.router)
 
 
 # ── Static frontend (production) ─────────────────────────────────────────

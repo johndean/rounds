@@ -1,0 +1,24 @@
+-- scripts/seed-admin.sql.example
+--
+-- Seed the bootstrap admin user. The real scripts/seed-admin.sql is gitignored
+-- because it embeds working credentials; copy this file to seed-admin.sql and
+-- fill in the placeholders before running.
+--
+-- Apply with:  psql "$DATABASE_URL" -f scripts/seed-admin.sql
+--
+-- Or via Railway:
+--   railway connect Postgres
+--   \i scripts/seed-admin.sql
+--
+-- Note: AUTH_USERS env var is the authoritative source for who can log in.
+-- This SQL also writes a `people` row so the Settings → Team & Roles surface
+-- has a real entry to render. Login itself does NOT consult `people`.
+
+INSERT INTO people (email, name, role, avatar_color, is_active)
+VALUES
+    ('johndean@vin.com', 'John Dean', 'Superadmin', '#B9975B', TRUE)
+ON CONFLICT (email) DO UPDATE
+    SET name = EXCLUDED.name,
+        role = EXCLUDED.role,
+        avatar_color = EXCLUDED.avatar_color,
+        is_active = TRUE;
