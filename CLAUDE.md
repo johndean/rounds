@@ -23,7 +23,12 @@ The frontend is a **faithful Vue port of the React prototype**. Source of truth 
 | [`docs/plans/2026-05-17-001-feat-rounds-bootstrap-plan.md`](./docs/plans/2026-05-17-001-feat-rounds-bootstrap-plan.md) | Build plan — 10 phases, ~70 implementation units. Updated as phases land. |
 | [`docs/SPEC.md`](./docs/SPEC.md) | Open dependencies + decisions log. |
 
-The Vue HTML at `docs/port-source/Transcript Software v4 - Vue.html` is an experimental Vue 3 port shipped alongside the React source. **It is NOT authoritative** — use the React JSX as the porting reference. The Vue HTML can be served at [https://rounds.vin/prototype.html](https://rounds.vin/prototype.html) for visual diffing.
+**THE REACT JSX IS THE SINGLE SOURCE OF TRUTH.** Per direct user directive (2026-05-17): "the react version is 100% accurate and is SSOT." When porting any view:
+- Open the corresponding `docs/port-source/<name>.jsx` file.
+- That React component's class names, DOM tree, data-test-ids, fixture shapes, behaviors are the spec.
+- Port everything to Vue verbatim — no skips, no simplifications, no "the Vue HTML does it differently so I'll match that."
+
+The Vue HTML at `docs/port-source/Transcript Software v4 - Vue.html` is an experimental Vue 3 port shipped alongside the React source. **DO NOT use it as a porting source.** Treat it as outdated/inaccurate. The gap analysis at [`docs/port-source-gap-analysis.md`](./docs/port-source-gap-analysis.md) documented its omissions — those omissions confirmed why React is the only authority. The Vue HTML can be served at [https://rounds.vin/prototype.html](https://rounds.vin/prototype.html) as a rough visual aid only.
 
 ## Porting rules (when converting a .jsx file to .vue)
 
