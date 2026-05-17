@@ -1,0 +1,88 @@
+# CLAUDE.md — Rounds project guidance
+
+This file is loaded by Claude Code when working in this repo. Keep it tight and authoritative.
+
+## What this repo is
+
+**Rounds** = transcript software for VIN, successor to MIC. Domain: [rounds.vin](https://rounds.vin).
+
+| Layer | Status | Notes |
+|---|---|---|
+| Backend (FastAPI + SQLAlchemy + Celery + GCS/STT/Gemini/Vertex) | **Production-clean** | Ported 1:1 from the MIC `MIC-AUDIT.md` reference. 32 routes live. |
+| Plumbing (auth/api client/router/stores/composables) | **Production-clean** | Type-safe, JWT-injected, hash-routed. |
+| Frontend views | **In progress — pixel-by-pixel React→Vue port from `docs/port-source/`** | Login + chrome ported. Dashboard / Sessions / SessionDetail / Editor / SOP / Audit / Improvements / Upload / Viewer / Processing / Settings / TweaksPanel pending. |
+
+The frontend is a **faithful Vue port of the React prototype**. Source of truth for layout, class names, and DOM structure is `docs/port-source/*.jsx`. Source of truth for styling is `frontend/src/styles/*.css` (copied verbatim from the prototype's `app.css` / `colors_and_type.css` / `wiring.css` / `settings.css` / `login.css`).
+
+## Authoritative spec files
+
+| File | Purpose |
+|---|---|
+| [`docs/IMPLEMENTATION.md`](./docs/IMPLEMENTATION.md) | Transcript Software v4 zero-gap reference (v4.0.0-ssot-r2) — prose description of every route/component/state. |
+| [`docs/port-source/`](./docs/port-source/) | The React prototype source — 16 JSX files + 5 CSS files + HTML entry + fonts/assets. **Authoritative for layout + class names.** When porting a view, read the corresponding `.jsx` first. |
+| [`docs/plans/2026-05-17-001-feat-rounds-bootstrap-plan.md`](./docs/plans/2026-05-17-001-feat-rounds-bootstrap-plan.md) | Build plan — 10 phases, ~70 implementation units. Updated as phases land. |
+| [`docs/SPEC.md`](./docs/SPEC.md) | Open dependencies + decisions log. |
+
+The Vue HTML at `docs/port-source/Transcript Software v4 - Vue.html` is an experimental Vue 3 port shipped alongside the React source. **It is NOT authoritative** — use the React JSX as the porting reference. The Vue HTML can be served at [https://rounds.vin/prototype.html](https://rounds.vin/prototype.html) for visual diffing.
+
+## Porting rules (when converting a .jsx file to .vue)
+
+1. **Read the JSX first.** Open `docs/port-source/<name>.jsx`. Note the exact class names, DOM structure, data-test-id attributes, and prop shapes.
+2. **Match class names exactly** so the bundled `app.css` styles apply unchanged.
+3. **Preserve `data-test-id`** attributes for Playwright + DX continuity.
+4. **Replace mock state with real backend** — fixtures in `data.jsx` map to live endpoints in `frontend/src/services/api.ts`. The mock `toast.push` / `confirm.open` / `modal.open` calls map to my composables. The mock `wired.*` namespace maps to my `services/wired.ts`.
+5. **No scaffolding banners. No "placeholder" comments. No "TODO Phase X".** If a section can't be ported faithfully, port what's ported well and leave the rest of the surface absent — don't fake it.
+6. **Test paint by visual diff** against `https://rounds.vin/prototype.html` (the Vue HTML reference) and the React HTML at `docs/port-source/Transcript Software v4.html`.
+
+## Backend boundaries (do NOT change without explicit user authorization)
+
+- **Locked processing weights** (`FUSION_*`, `ALIGN_*`, `IIL_*`, `CELERY_*`) — see [`app/config.py`](./app/config.py) + pinning test [`tests/test_health.py::test_locked_weights_match_audit`](./tests/test_health.py).
+- **R7 invariant** — `/v1/gcs/upload-complete` rejects any `gcs_uri` outside `gs://<bucket>/sessions/<id>/`. See [`app/services/gcs.py::find_out_of_scope_uri`](./app/services/gcs.py) + [`tests/test_gcs_scope.py`](./tests/test_gcs_scope.py).
+- **AUTH_USERS** is plaintext in env (known debt — same posture as MIC audit §10 finding #7). Hashed-at-rest migration is a future plan.
+
+## Production infrastructure (currently sharing MIC's data plane)
+
+`GCP_PROJECT_ID`, `GCS_BUCKET`, `GCP_KEY_B64`, `GEMINI_API_KEY`, `SMTP_*`, `AUTH_USERS` were all copied verbatim from MIC's Railway env. Uploads land in `video-pipeline-uploads-mic`, Gemini bills MIC's quota, SMTP sends as `mic@design.veterinary.support`. Database + Redis are isolated (Rounds has its own Postgres + Redis plugins). If you need to provision Rounds-specific GCP / Gemini / SMTP, see [`docs/SPEC.md`](./docs/SPEC.md) for the migration steps — but require explicit user authorization first.
+
+## Conventions
+
+- **Two-remote git:** `origin=vin-swe/rounds` (dev), `production=johndean/rounds` (Railway auto-deploy). Push to both on every commit.
+- **Conventional commits:** `feat(scope):`, `fix(scope):`, `perf(scope):`, `docs(scope):`, `refactor(scope):`.
+- **Co-author tag** on commits: `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`.
+- **CSS class naming:** BEM-ish from the prototype (`.app-header__brand`, `.editor__statusbar`, etc.). Don't invent new class names — use what's already in `app.css`.
+- **Component naming:** Vue SFC `PascalCase`, one component per file. Shared in `components/shared/`, route views in `views/`, route-specific sub-components in `components/<route>/`.
+- **Internal-page aesthetic:** dark topbar + ProximaNova sans-serif. Login uses Instrument Serif via `login.css`.
+- **No `useRouter`/`useRoute` unused imports** — vue-tsc rejects them (TS6133). Same for any unused composable.
+- **204 endpoints** must use `response_class=Response` + return `Response(status_code=204)`. FastAPI 0.115 rejects `-> None` annotations with 204.
+
+## Live URLs
+
+- **Production:** [`https://rounds.vin`](https://rounds.vin) and [`https://api-production-c198.up.railway.app`](https://api-production-c198.up.railway.app)
+- **Visual reference:** [`https://rounds.vin/prototype.html`](https://rounds.vin/prototype.html) — the Vue HTML reference build for side-by-side diffing
+- **API docs:** [`https://rounds.vin/docs`](https://rounds.vin/docs) — FastAPI auto-generated Swagger UI
+- **OpenAPI:** [`https://rounds.vin/openapi.json`](https://rounds.vin/openapi.json) — full route catalog
+
+## Common operations
+
+```bash
+# Run the production deploy poller until terminal
+cd /c/Users/JohnDean/rounds && railway service status --all --json
+
+# Trigger a fresh deploy when git push doesn't seem to register
+railway environment edit --json <<'JSON'
+{"services":{"e1b3da55-...":{"variables":{"ROUNDS_DEPLOY_TRIGGER":{"value":"YYYY-MM-DD-N"}}}}}
+JSON
+
+# Local frontend build (fast smoke test of TS + Vite)
+cd frontend && npm run build
+
+# Tail the live deploy log
+railway logs --service api --deployment --lines 100
+```
+
+## Railway service IDs (Rounds project `5741583d-47dd-4697-9732-d7744e82f215`)
+
+- api: `e1b3da55-8789-4326-9362-b5a8e7c409cc`
+- worker: `22ecca2b-5b8f-4757-ba94-ec1f2cd90e39`
+- Postgres: `3eab9a85-562f-4c8a-86a6-fb4ccb027578`
+- Redis: `639d68f5-35d4-4479-b0d1-1b16c95e3108`

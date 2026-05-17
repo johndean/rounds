@@ -1,12 +1,50 @@
 # Plan: Rounds (rounds.vin) — Pixel-by-Pixel Port of Transcript Software v4
 
 **Type:** feat
-**Status:** active
+**Status:** active (frontend port in progress)
 **Created:** 2026-05-17
 **Target repos:** `vin-swe/rounds` (dev origin), `johndean/rounds` (production — Railway auto-deploy)
 **Working directory:** `C:\Users\JohnDean\rounds` (mirror po-vin layout)
-**Domain:** rounds.vin
+**Domain:** [rounds.vin](https://rounds.vin) — LIVE
 **Stack:** Vue 3 + TypeScript + Vite (frontend) · FastAPI + Postgres+pgvector + Redis + Celery (backend) · GCS + Cloud STT + Gemini + Vertex AI (services) · Railway (hosting)
+
+---
+
+## 0. Progress Log (latest at top)
+
+### 2026-05-17 — Frontend pixel-port begins (commit `fed52c8`)
+- User delivered React prototype source to `C:\Users\JohnDean\Desktop\ROUNDS\` (16 JSX + 5 CSS + 2 HTML + assets/fonts) → moved to [`docs/port-source/`](../port-source/) (1 MB, tracked).
+- Replaced placeholder CSS with the real prototype CSS: `app.css` (124 KB), `colors_and_type.css`, `wiring.css`, `settings.css`, `login.css`.
+- ProximaNova fonts (woff + ttf, weights 300/400/500/800) mirrored to `frontend/public/fonts/` and `public/assets/fonts/`.
+- VIN logos (VIN.svg, VIN-light.svg, CE.svg) + icon assets in `frontend/public/assets/`.
+- Faithful Vue ports landed: [`LoginView.vue`](../../frontend/src/views/LoginView.vue) ← `login.jsx`, [`App.vue`](../../frontend/src/App.vue) ← `app.jsx`, [`AppHeader.vue`](../../frontend/src/components/AppHeader.vue) ← `components.jsx::AppHeader`. Shared primitives [`Icon.vue`](../../frontend/src/components/shared/Icon.vue), [`Avatar.vue`](../../frontend/src/components/shared/Avatar.vue) extracted.
+- `prototype.html` (Vue 3 reference build) served at https://rounds.vin/prototype.html for side-by-side visual diffing during the port.
+- **Remaining views**: Dashboard, Sessions, SessionDetail, Editor (84 KB JSX — biggest surface), SOP, Audit, Improvements, Upload, Viewer, Processing, Settings (64 KB JSX), TweaksPanel. Plus `wiring.jsx` composables (Find&Replace, segment-edit modal, audit log API additions) and `data.jsx` → `fixtures/*.ts`.
+
+### 2026-05-17 — Production live + 8 commits (`438e8be` → `fed52c8`)
+- Production URL: https://rounds.vin + https://api-production-c198.up.railway.app
+- Railway project `5741583d-47dd-4697-9732-d7744e82f215` — api + worker + Postgres + Redis all SUCCESS.
+- **32 backend routes live** (auth · sessions · segments · sop · audit · discrepancies · improvements · settings · gcs · diagnostics + /v1/health). End-to-end verified: `johndean@vin.com` login → JWT → `/v1/auth/me` → `/v1/sessions` roundtrip works.
+- Migrations 001–007 applied on Railway Postgres (incl. `CREATE EXTENSION vector` — pgvector binaries are present, contrary to the original plan §10 assumption).
+- DNS for rounds.vin / www.rounds.vin CNAME'd to api-production-c198.up.railway.app; SSL auto-provisioned.
+- **MIC credential reuse**: `GCP_PROJECT_ID`, `GCS_BUCKET`, `GCP_KEY_B64`, `GEMINI_API_KEY`, `SMTP_*`, `AUTH_USERS` are copied verbatim from MIC's Railway project. Rounds shares MIC's data plane (uploads land in `video-pipeline-uploads-mic`, Gemini bills MIC's quota). Database + Redis are isolated. Future plan: provision Rounds-specific GCP resources when ready.
+- **Known debt to address**: `AUTH_USERS` + `API_SECRET_KEY` should be rotated — password was exposed in the build conversation transcript.
+
+### 2026-05-17 — Bootstrap commits
+- `438e8be` Phase 1 bootstrap (50 files): pyproject + Dockerfile + docker-compose + Vite scaffold + scripts/migrate.py + 13 placeholder routes + CI workflow + railway.json.
+- `ff21680` DSN normalizer (`postgresql://` → `postgresql+asyncpg://`).
+- `77bd49a` + `3c61e36` tsconfig fix for Railway frontend build.
+- `1fb34e7` Phase 5 backend foundation (auth.py + db.py + 7 migrations + seed admin example + auth tests).
+- `f8238ed` Lock file + SPEC.md sync.
+- `341ddbd` GCS upload with R7 invariant + sessions stub + tests.
+- `ec83c21` Phase 7 routers (segments, sop, improvements, settings, audit, discrepancies, diagnostics).
+- `f3226f2` Frontend Phase 8 part 1 (login + api client + auth store + router guard).
+- `3d9d254` FastAPI 204 fix + celery_app + Phase 8 part 2 (DashboardView + SessionsView + ImprovementsView hydration).
+- `46551b7` Phase 2 overlays (Confirm + Modal + CommandPalette with ⌘K).
+- `e471b58` README + seed-demo-data.sql.
+- `5130a86` Phase 8 part 3 (SessionDetail + SOP + Settings hydration).
+- `8493cce` Phase 8 part 4 (Upload chain + minimum Editor with inline edit).
+- `fed52c8` Pixel-port begins: login + chrome.
 
 ---
 
