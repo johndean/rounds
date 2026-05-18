@@ -132,14 +132,18 @@ def learn_iil_task(self, session_id: str) -> dict:
     Update instructor_profiles + session_patterns based on this session.
     Non-fatal — failure NEVER marks session as failed.
 
-    1. Resolve instructor from session_speakers (primary role) or session.presenter.
-    2. Upsert instructor_profiles row.
-    3. Insert session_instructor_map.
-    4. Sample 3 simple patterns: filler_rate, segment_count_bucket, slide_count_bucket.
+    Phase 7f: replaces the simple bucketing with real feature extraction
+    via app/iil/adaptive_learning.py. Now computes:
+      - rolling-average filler_rate across all sessions for the instructor
+      - rolling-average compression_ratio across all segments
+      - discovered filler_words list (frequency > 3%)
+    Patterns table still holds the bucket labels for UI/dashboards.
     """
+    import json
     from sqlalchemy import create_engine, text
 
     from app.config import settings
+    from app.iil.adaptive_learning import update_instructor_profile
 
     sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
     engine = create_engine(sync_url)
@@ -173,30 +177,98 @@ def learn_iil_task(self, session_id: str) -> dict:
                 {"sid": session_id},
             ).fetchone()
 
+            # Phase 7f — pull this session's normalize audit (tier1/2 removed
+            # lists + compression ratios) so adaptive_learning can compute
+            # real features.
+            norm_rows = conn.execute(
+                text(
+                    """
+                    SELECT nr.validation_results, s.text
+                      FROM normalization_results nr
+                      JOIN segments s ON s.id = nr.segment_id
+                     WHERE nr.session_id = CAST(:sid AS uuid)
+                    """
+                ),
+                {"sid": session_id},
+            ).fetchall()
+
         instructor_name = (speaker[0] if speaker else sess[0]) or "Unknown"
         instructor_creds = speaker[1] if speaker else None
         instructor_bio = speaker[2] if speaker else None
         duration_min = (sess[1] or 0) // 60
 
+        # Build engine inputs
+        session_patterns: list[dict] = []
+        normalization_stats: list[dict] = []
+        for vr, raw_text in norm_rows:
+            audit = vr if isinstance(vr, dict) else (json.loads(vr) if vr else {})
+            session_patterns.append({
+                "tier1_removed": audit.get("tier1_removed", []),
+                "tier2_removed": audit.get("tier2_removed", []),
+            })
+            normalization_stats.append({
+                "filler_count":      audit.get("filler_count", 0),
+                "compression_ratio": audit.get("compression", 1.0),
+                "raw_text":          raw_text or "",
+            })
+
         with engine.begin() as conn:
+            # Upsert profile row first to get current_profile
             row = conn.execute(
                 text(
                     """
                     INSERT INTO instructor_profiles (name, credentials, bio, avg_session_min, sample_count)
-                    VALUES (:n, :c, :b, :d, 1)
+                    VALUES (:n, :c, :b, :d, 0)
                     ON CONFLICT (name) DO UPDATE
-                      SET credentials      = COALESCE(instructor_profiles.credentials, EXCLUDED.credentials),
-                          bio              = COALESCE(instructor_profiles.bio, EXCLUDED.bio),
-                          avg_session_min  = ((instructor_profiles.avg_session_min * instructor_profiles.sample_count) + EXCLUDED.avg_session_min)
-                                              / (instructor_profiles.sample_count + 1),
-                          sample_count     = instructor_profiles.sample_count + 1,
-                          updated_at       = now()
-                    RETURNING id
+                      SET credentials = COALESCE(instructor_profiles.credentials, EXCLUDED.credentials),
+                          bio         = COALESCE(instructor_profiles.bio, EXCLUDED.bio),
+                          updated_at  = now()
+                    RETURNING id, filler_words, avg_filler_rate, avg_compression_ratio, sample_count
                     """
                 ),
                 {"n": instructor_name, "c": instructor_creds, "b": instructor_bio, "d": int(duration_min)},
             ).fetchone()
             instructor_id = row[0] if row else None
+            current_profile = {
+                "filler_words":         list(row[1] or []) if row else [],
+                "avg_filler_rate":      row[2] if row else 0.0,
+                "avg_compression_ratio": row[3] if row else 1.0,
+                "sessions_processed":   row[4] if row else 0,
+            }
+
+            # Run feature extraction
+            update = update_instructor_profile(
+                session_id=session_id,
+                instructor_id=str(instructor_id) if instructor_id else "",
+                session_patterns=session_patterns,
+                normalization_stats=normalization_stats,
+                current_profile=current_profile,
+            )
+
+            # Persist computed features
+            conn.execute(
+                text(
+                    """
+                    UPDATE instructor_profiles
+                       SET filler_words          = CAST(:fw AS jsonb),
+                           avg_filler_rate       = :fr,
+                           avg_compression_ratio = :cr,
+                           sample_count          = :sc,
+                           avg_session_min       = ((COALESCE(avg_session_min, 0) * :prior_n) + :d) / :sc,
+                           updated_at            = now()
+                     WHERE id = :iid
+                    """
+                ),
+                {
+                    "fw":       json.dumps(update.filler_words),
+                    "fr":       update.avg_filler_rate,
+                    "cr":       update.avg_compression_ratio,
+                    "sc":       update.sessions_processed,
+                    "prior_n":  current_profile["sessions_processed"],
+                    "d":        int(duration_min),
+                    "iid":      instructor_id,
+                },
+            )
 
             if instructor_id:
                 conn.execute(
@@ -209,20 +281,30 @@ def learn_iil_task(self, session_id: str) -> dict:
                               matched_by    = EXCLUDED.matched_by
                         """
                     ),
-                    {"sid": session_id, "iid": str(instructor_id), "mb": "manifest" if speaker else "presenter_field"},
+                    {"sid": session_id, "iid": str(instructor_id),
+                     "mb": "manifest" if speaker else "presenter_field"},
                 )
 
-            # Patterns (simple buckets for now; real classifier in 6q+1)
+            # session_patterns table — still capture bucket labels for UI
             patterns = []
             seg_count = sess[2] or 0
             if seg_count:
-                patterns.append(("density_low" if seg_count < 30 else "density_med" if seg_count < 80 else "density_high", 1))
+                patterns.append(("density_low" if seg_count < 30
+                                  else "density_med" if seg_count < 80
+                                  else "density_high", 1))
             slide_count = slide_count_row[0] if slide_count_row else 0
             if slide_count:
                 patterns.append((f"slides_{min(50, (slide_count // 10) * 10)}", 1))
             kp_count = kp_count_row[0] if kp_count_row else 0
             if kp_count:
                 patterns.append(("kp_dense" if kp_count > 10 else "kp_sparse", 1))
+            # Phase 7f — also record measured filler_rate as a numeric pattern
+            patterns.append((
+                "filler_high" if update.avg_filler_rate > 0.05
+                else "filler_med" if update.avg_filler_rate > 0.02
+                else "filler_low",
+                1,
+            ))
 
             for pattern_name, freq in patterns:
                 conn.execute(
@@ -239,12 +321,17 @@ def learn_iil_task(self, session_id: str) -> dict:
 
         logger.info(
             f"learn_iil: session={session_id} instructor={instructor_name} "
-            f"patterns={len(patterns)}"
+            f"filler_rate={update.avg_filler_rate:.4f} "
+            f"compression={update.avg_compression_ratio:.4f} "
+            f"new_fillers={len(update.filler_words) - len(current_profile['filler_words'])}"
         )
         return {
-            "session_id":    session_id,
-            "instructor":    instructor_name,
-            "patterns":      len(patterns),
+            "session_id":          session_id,
+            "instructor":          instructor_name,
+            "avg_filler_rate":     update.avg_filler_rate,
+            "avg_compression":     update.avg_compression_ratio,
+            "filler_words":        update.filler_words,
+            "sessions_processed":  update.sessions_processed,
         }
 
     except Exception as exc:  # noqa: BLE001
