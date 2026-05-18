@@ -1,7 +1,20 @@
 # Plan: Rounds → Full MIC Pipeline Parity (Zero-Gap)
 
 **Type:** feat
-**Status:** complete — all 17 phases shipped 2026-05-18
+**Status:** parity-1 complete (6a-6q shipped 2026-05-18); parity-2 sweep in progress (7a-7h closing residual 🟠 + 🟡 gaps)
+
+## Parity-2 sweep — close residual gaps from re-audit
+
+| Phase | Closes |
+|---|---|
+| 7a  | 4-rule deterministic segmenter + content-hash idempotency for segments |
+| 7b  | Pre-ready gate with named GATE_1-5 + validation_results writes |
+| 7c  | LLM-based normalize (Gemini per-segment with template config) |
+| 7d  | AI MODE direct WS progress + metrics_update + slide_progress events |
+| 7e  | CMS macro layer in artifact_transformer (++N*+ → HTML + Wistia bundle) |
+| 7f  | IIL feature extraction (replaces simple bucketing) |
+| 7g  | SOP auto-advancement + stage assignee notifications |
+| 7h  | Minors: request_id envelope, selected_pages slide variant, frontend prompt templates CRUD |
 **Created:** 2026-05-18
 **Predecessor:** [`2026-05-17-001-feat-rounds-bootstrap-plan.md`](./2026-05-17-001-feat-rounds-bootstrap-plan.md) (Phases 1-10 complete; ingest stub shipped)
 **Scope:** Close every gap surfaced by the audit on 2026-05-18. Reach MIC SSOT parity on upload → ingest → render path.

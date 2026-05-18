@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ def validate_and_repair(
     source_text: str,
     normalized_text: str,
     filler_words: list[str],
-    repair_fn: Optional[callable] = None,
+    repair_fn: Optional[Callable[[str, str, str], str]] = None,
 ) -> tuple[str, ValidationResult]:
     """
     Run validate() once. If failed and `repair_fn` provided, call it with the

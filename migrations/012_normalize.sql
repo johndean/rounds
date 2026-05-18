@@ -5,10 +5,8 @@
 
 ALTER TABLE templates ADD COLUMN IF NOT EXISTS filler_words JSONB NOT NULL DEFAULT '[]'::jsonb;
 
--- Backfill filler_words for the seed templates (idempotent).
-UPDATE templates SET filler_words = CAST(:fw AS jsonb)
-  WHERE id = 'lecture_v1' AND filler_words = '[]'::jsonb;
--- Postgres doesn't bind ":fw" in raw SQL — inline literal arrays per template:
+-- Backfill filler_words for the seed templates (idempotent). Per-template
+-- literal JSONB arrays since psycopg2 doesn't bind in raw SQL.
 UPDATE templates SET filler_words = '["um","uh","er","ah","hm","mm"]'::jsonb
   WHERE id = 'lecture_v1' AND filler_words = '[]'::jsonb;
 UPDATE templates SET filler_words = '["um","uh","you know","basically"]'::jsonb
