@@ -105,30 +105,51 @@ async def create_session(payload: SessionIn, db: DbSession, user: CurrentUser) -
     Create a session row + the matching `session_templates` row that carries
     the pipeline routing chosen on Upload. The two writes happen in the same
     transaction so `ingest_task` always finds a config row.
+
+    Code collision handling: a prior failed/abandoned session leaves a row
+    with the same code. Frontend genCode() now appends a 4-char random
+    suffix to make collisions astronomically unlikely — but if one still
+    happens (e.g. legacy clients without the suffix), surface it as a clean
+    409 CONFLICT envelope rather than letting the IntegrityError bubble up
+    as a 500.
     """
     import json
 
     from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
 
-    row = (
-        await db.execute(
-            text(
-                """
-                INSERT INTO sessions (code, title, presenter, duration_sec, attendee_count, taxonomy, status)
-                VALUES (:code, :title, :presenter, :duration_sec, :attendee_count, CAST(:taxonomy AS jsonb), 'uploading')
-                RETURNING id, code, title, presenter, status, duration_sec, word_count, segment_count, attendee_count, taxonomy
-                """
-            ),
-            {
-                "code": payload.code,
-                "title": payload.title,
-                "presenter": payload.presenter,
-                "duration_sec": payload.duration_sec,
-                "attendee_count": payload.attendee_count,
-                "taxonomy": '["' + '","'.join(payload.taxonomy) + '"]' if payload.taxonomy else '[]',
-            },
-        )
-    ).mappings().one()
+    from app.middleware.envelope import ConflictError
+
+    try:
+        row = (
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO sessions (code, title, presenter, duration_sec, attendee_count, taxonomy, status)
+                    VALUES (:code, :title, :presenter, :duration_sec, :attendee_count, CAST(:taxonomy AS jsonb), 'uploading')
+                    RETURNING id, code, title, presenter, status, duration_sec, word_count, segment_count, attendee_count, taxonomy
+                    """
+                ),
+                {
+                    "code": payload.code,
+                    "title": payload.title,
+                    "presenter": payload.presenter,
+                    "duration_sec": payload.duration_sec,
+                    "attendee_count": payload.attendee_count,
+                    "taxonomy": '["' + '","'.join(payload.taxonomy) + '"]' if payload.taxonomy else '[]',
+                },
+            )
+        ).mappings().one()
+    except IntegrityError as exc:
+        await db.rollback()
+        # Detect the specific sessions_code_key UNIQUE constraint violation.
+        msg = str(exc.orig).lower() if getattr(exc, "orig", None) else str(exc).lower()
+        if "sessions_code_key" in msg or ("code" in msg and "duplicate" in msg):
+            raise ConflictError(
+                message="A session with that code already exists. Retry — the upload form generates a fresh code on each submit.",
+                details={"code": payload.code, "constraint": "sessions_code_key"},
+            ) from exc
+        raise
 
     # Pipeline config — fall back to defaults if not supplied (legacy clients).
     cfg = payload.pipeline_config or PipelineConfig()

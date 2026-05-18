@@ -45,7 +45,7 @@ onMounted(async () => {
 // ── Form state ────────────────────────────────────────────────────────
 const pipeline = ref('direct');
 const aiMode = ref('transcript');
-const model = ref('gemini-25-pro');
+const model = ref('gemini-2.5-pro');
 const style = ref('lecture');
 const styleOpen = ref(false);
 const iilOpen = ref(false);
@@ -146,14 +146,20 @@ function genCode(): string {
   const mm = String(d.getMonth() + 1).padStart(2, '0');
   const dd = String(d.getDate()).padStart(2, '0');
   const stem = (attached.value[0]?.file.name || 'session').split('.')[0]!.slice(0, 24);
-  return `${mm}${dd}${yy}_${stem.replace(/[^A-Za-z0-9_-]/g, '_')}`;
+  const clean = stem.replace(/[^A-Za-z0-9_-]/g, '_');
+  // 4-char random suffix so re-uploads of the same file on the same day
+  // never collide with a prior session (especially if the prior one failed
+  // mid-upload — its DB row stays even though the upload didn't complete).
+  const suffix = Math.random().toString(36).slice(2, 6);
+  return `${mm}${dd}${yy}_${clean}_${suffix}`;
 }
 
 function buildPipelineConfig(): PipelineConfig {
   // Map UploadView form refs → backend PipelineConfig contract.
   // pipeline:  'direct' | 'enhanced'  (matches backend enum exactly)
   // ai_mode:   form value passes through
-  // ai_model:  model picker → strip 'gemini-' / 'gpt-' prefix already canonical
+  // ai_model:  values are canonical (gemini-2.5-pro / gemini-2.5-flash / etc) —
+  //            matches backend defaults + Settings seed, no translation needed.
   // template_id: derived from `style` (lecture / training / technical / podcast / sales / custom)
   const styleToTemplate: Record<string, string> = {
     lecture:           'lecture_v1',
@@ -163,16 +169,10 @@ function buildPipelineConfig(): PipelineConfig {
     sales:             'sales_v1',
     'custom-define':   'lecture_v1',  // fallback when 'Custom' style chosen
   };
-  const modelMap: Record<string, string> = {
-    'gemini-25-pro':    'gemini-2.5-pro',
-    'gemini-25-flash':  'gemini-2.5-flash',
-    'gpt-5':            'gpt-5',
-    'claude-opus':      'claude-opus-4-5',
-  };
   return {
     ai_pipeline:   pipeline.value === 'direct' ? 'direct' : 'enhanced',
     ai_mode:       aiMode.value,
-    ai_model:      modelMap[model.value] ?? model.value,
+    ai_model:      model.value,
     prompt_mode:   aiMode.value,
     custom_prompt: aiMode.value === 'custom-prompt' ? customPromptDefault : null,
     stt_backend:   stt.value,
@@ -421,10 +421,11 @@ Verbatim-minus-fillers · preserve drug names · annotate uncertainty.`;
             <Icon name="globe" :size="12" /> AI Model
           </label>
           <select v-model="model" class="upload-field__select">
-            <option value="gemini-25-pro">Gemini 2.5 Pro (recommended)</option>
-            <option value="gemini-25-flash">Gemini 2.5 Flash (faster, lower quality)</option>
+            <option value="gemini-2.5-pro">Gemini 2.5 Pro (recommended)</option>
+            <option value="gemini-2.5-flash">Gemini 2.5 Flash (faster, lower quality)</option>
+            <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash Lite (cheapest)</option>
             <option value="gpt-5">GPT-5</option>
-            <option value="claude-opus">Claude Opus 4.5</option>
+            <option value="claude-opus-4-5">Claude Opus 4.5</option>
           </select>
         </div>
 
