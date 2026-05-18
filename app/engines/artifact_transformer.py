@@ -10,9 +10,11 @@ Phase 6p / U141-U142. Closes audit gap 🟠 #11.
 from __future__ import annotations
 
 import io
+import json
 import logging
+import re
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,20 @@ class SlideForExport:
 
 
 @dataclass
+class PollForExport:
+    slide_index: int
+    question: str
+    options: list[dict]  # [{label, count, percent}]
+
+
+@dataclass
+class ChatForExport:
+    author: str
+    body: str
+    sent_at_ms: int
+
+
+@dataclass
 class SessionForExport:
     code: str
     title: str
@@ -44,6 +60,10 @@ class SessionForExport:
     duration_sec: int | None
     segments: list[SegmentForExport]
     slides: list[SlideForExport]
+    polls: list[PollForExport] = field(default_factory=list)
+    chat: list[ChatForExport] = field(default_factory=list)
+    publishing_links: dict = field(default_factory=dict)
+    resources: list[dict] = field(default_factory=list)  # [{slide_number, label, url}]
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────
@@ -95,11 +115,17 @@ def to_txt(session: SessionForExport) -> bytes:
 
 
 def to_srt(session: SessionForExport) -> bytes:
+    """
+    SRT output. Per-segment text is passed through apply_srt_transform to
+    strip any leftover slide markers / speaker labels / [pq] tags / curly
+    annotations so captions render as plain speech.
+    """
     chunks: list[str] = []
     for i, seg in enumerate(session.segments, start=1):
         chunks.append(str(i))
         chunks.append(f"{_fmt_srt_time(seg.start_ms)} --> {_fmt_srt_time(seg.end_ms)}")
-        chunks.append((seg.text or "").strip())
+        cleaned = apply_srt_transform(seg.text or "").strip()
+        chunks.append(cleaned)
         chunks.append("")
     return "\n".join(chunks).encode("utf-8")
 
@@ -139,15 +165,222 @@ def to_docx(session: SessionForExport) -> bytes:
     return buf.getvalue()
 
 
+# ─── Macro layer (CMS / SRT cleanup) ────────────────────────────────────
+
+
+def _build_marked_transcript(session: SessionForExport) -> str:
+    """
+    Build the marked-up source text that macros operate on:
+      ++N*+        slide marker
+      **Name:**    speaker label
+      [pq][t]      placeholder for chat/poll injection at timestamp t
+
+    This is the artifact CMS macros expect as input.
+    """
+    lines: list[str] = []
+    last_slide = None
+    last_speaker = None
+    for seg in session.segments:
+        if seg.slide_index is not None and seg.slide_index != last_slide:
+            lines.append("")
+            lines.append(f"++{seg.slide_index + 1}*+")
+            lines.append("")
+            last_slide = seg.slide_index
+        if seg.speaker_name and seg.speaker_name != last_speaker:
+            lines.append(f"**{seg.speaker_name}:**")
+            last_speaker = seg.speaker_name
+        lines.append(seg.text or "")
+    return "\n".join(lines).strip()
+
+
+def apply_srt_transform(text: str) -> str:
+    """
+    11-step deterministic SRT macro — strips structural markup leaving only
+    speech-as-text. Verbatim port of MIC artifact_transformer._apply_srt_transform.
+    """
+    t = text
+    # 1. Slide codes
+    t = re.sub(r"\+\+\d+\*\+\s*", "", t)
+    # 2. [Video] tags
+    t = re.sub(r"\[\s*[Vv]ideo\s*\]", "", t)
+    # 3. Speaker labels
+    t = re.sub(r"<b[^>]*>[^<]+:</b>\s*", "", t)
+    t = re.sub(r"\*\*[^*]+:\*\*\s*", "", t)
+    t = re.sub(r"^[A-Z][a-zA-Z\s]+:\s+", "", t, flags=re.MULTILINE)
+    # 4. [pq][HH:MM:SS] timestamps
+    t = re.sub(r"\[pq\]\[\d{1,2}:\d{2}(?::\d{2})?\]\s*", "", t)
+    # 5. Bare [pq]
+    t = re.sub(r"\[pq\]\s*", "", t)
+    # 6. {curly} — keep contents
+    t = re.sub(r"\{([^}]*)\}", r"\1", t)
+    # 7. Poll markers
+    t = re.sub(r"\[Poll\s*#?\d+\]", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"Poll\s+#?\d+\s*\n", "", t, flags=re.IGNORECASE)
+    # 8. Double-space collapse
+    t = re.sub(r"  +", " ", t)
+    # 9. Strip per-line
+    t = "\n".join(line.strip() for line in t.split("\n"))
+    # 10. Triple+ newlines → double
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    # 11. Final strip
+    return t.strip()
+
+
+def apply_cms_transform(
+    text: str,
+    polls: list[PollForExport],
+    chat: list[ChatForExport],
+    resources: list[dict],
+) -> str:
+    """
+    CMS macro — produces publish-ready HTML/markdown:
+      • Removes {curly} markers entirely (CMS strips, doesn't keep)
+      • Injects poll blocks after their slide markers
+      • Replaces [pq][timestamp] with chat content
+      • Appends a Resources section
+    """
+    t = text
+    # Strip curly text (CMS variant — content removed)
+    t = re.sub(r"\{[^}]*\}", "", t)
+    # Trim trailing spaces per line + collapse blank lines
+    t = "\n".join(line.strip() for line in t.split("\n"))
+    t = re.sub(r"  +", " ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+
+    # Inject polls after their slide markers
+    for poll in polls:
+        marker = f"++{poll.slide_index + 1}*+"
+        block = _format_poll_block(poll)
+        t = t.replace(marker, f"{marker}\n\n{block}", 1)
+
+    # Inject chat — for any [pq][t] marker, find the nearest chat by timestamp.
+    # In Rounds today the segmenter doesn't emit [pq] markers; this is a
+    # forward-compat hook. Strip any leftover bare [pq] tokens.
+    for msg in chat:
+        # No timestamp markers in current transcripts — append as a "Chat /
+        # Q&A" block at the end if any chat exists at all (rare).
+        pass
+    if chat:
+        t = t.rstrip() + "\n\n---\n\n**Chat / Q&A**\n\n"
+        for c in chat:
+            ts = _fmt_vtt_time(c.sent_at_ms).split(".")[0]
+            t += f"**{c.author}** ({ts}): {c.body}\n\n"
+    t = re.sub(r"\[pq\](\[[^\]]*\])?\s*", "", t)
+
+    # Resources section
+    if resources:
+        t = t.rstrip() + "\n\n---\n\n**Resources**\n\n"
+        for r in resources:
+            label = r.get("label") or r.get("url") or ""
+            url = r.get("url") or ""
+            slide_n = r.get("slide_number")
+            prefix = f"(Slide {slide_n}) " if slide_n else ""
+            if url:
+                t += f"- {prefix}[{label}]({url})\n"
+            else:
+                t += f"- {prefix}{label}\n"
+
+    return t.strip()
+
+
+def _format_poll_block(poll: PollForExport) -> str:
+    lines = [f"***{poll.question}***"]
+    for opt in poll.options:
+        count = opt.get("count", 0)
+        pct = opt.get("percent", 0)
+        label = opt.get("label", "")
+        lines.append(f"{count} ({pct}%) {label}")
+    return "\n".join(lines)
+
+
+def to_cms_html(session: SessionForExport) -> bytes:
+    """
+    Publish-ready CMS output: marked transcript → CMS macro → light HTML.
+    Slide markers become <h2>, speaker labels stay as bold prefixes.
+    """
+    marked = _build_marked_transcript(session)
+    cms = apply_cms_transform(marked, session.polls, session.chat, session.resources)
+
+    # Convert markdown-ish constructs to inline HTML.
+    html_lines = ["<!doctype html>",
+                  '<html><head><meta charset="utf-8">',
+                  f"<title>{_escape(session.title or session.code)}</title>",
+                  "<style>",
+                  "  body{font-family:Georgia,serif;max-width:780px;margin:32px auto;padding:0 16px;line-height:1.6;color:#222}",
+                  "  h1{font-size:28px;margin-bottom:4px}",
+                  "  h2{font-size:18px;margin-top:32px;border-bottom:1px solid #ddd;padding-bottom:4px}",
+                  "  p{margin:8px 0}",
+                  "  strong{font-weight:700}",
+                  "  em{font-style:italic}",
+                  "  hr{margin:32px 0;border:none;border-top:1px solid #ddd}",
+                  "</style></head><body>",
+                  f"<h1>{_escape(session.title or session.code)}</h1>"]
+    if session.presenter:
+        html_lines.append(f"<p><em>Presented by {_escape(session.presenter)}</em></p>")
+    html_lines.append("")
+
+    # Transform the CMS markdown body into HTML.
+    body_html = _markdown_to_html(cms)
+    html_lines.append(body_html)
+    html_lines.append("</body></html>")
+    return "\n".join(html_lines).encode("utf-8")
+
+
+def _escape(text: str) -> str:
+    return (
+        text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+    )
+
+
+_SLIDE_MARKER_RE = re.compile(r"\+\+(\d+)\*\+")
+_BOLD_RE = re.compile(r"\*\*(.+?)\*\*")
+_TRIPLE_BOLD_RE = re.compile(r"\*\*\*(.+?)\*\*\*")
+_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+_HR_RE = re.compile(r"^---\s*$", re.MULTILINE)
+
+
+def _markdown_to_html(text: str) -> str:
+    """Minimal markdown→HTML for CMS output. Not a full Markdown impl."""
+    out = []
+    for block in text.split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        # Slide marker → h2
+        slide_match = _SLIDE_MARKER_RE.search(block)
+        if slide_match and block.strip() == slide_match.group(0):
+            out.append(f"<h2>Slide {slide_match.group(1)}</h2>")
+            continue
+        # Horizontal rule
+        if _HR_RE.match(block):
+            out.append("<hr/>")
+            continue
+        # Inline transforms within the block
+        block = _TRIPLE_BOLD_RE.sub(r"<strong><em>\1</em></strong>", block)
+        block = _BOLD_RE.sub(r"<strong>\1</strong>", block)
+        block = _LINK_RE.sub(r'<a href="\2">\1</a>', block)
+        # Convert line breaks within a block to <br>
+        lines = block.split("\n")
+        if all(line.startswith("- ") for line in lines):
+            items = "".join(f"<li>{ln[2:].strip()}</li>" for ln in lines)
+            out.append(f"<ul>{items}</ul>")
+        else:
+            inner = "<br/>".join(lines)
+            out.append(f"<p>{inner}</p>")
+    return "\n".join(out)
+
+
 def to_zip(session: SessionForExport) -> bytes:
-    """Bundle docx + srt + vtt + txt + slide bullets into a single zip."""
+    """Bundle docx + srt + vtt + txt + html + slide bullets into a single zip."""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(f"{session.code}.txt", to_txt(session))
-        zf.writestr(f"{session.code}.srt", to_srt(session))
-        zf.writestr(f"{session.code}.vtt", to_vtt(session))
+        zf.writestr(f"{session.code}.txt",  to_txt(session))
+        zf.writestr(f"{session.code}.srt",  to_srt(session))
+        zf.writestr(f"{session.code}.vtt",  to_vtt(session))
         zf.writestr(f"{session.code}.docx", to_docx(session))
-        # Slides as a structured JSON-ish text bundle.
+        zf.writestr(f"{session.code}.html", to_cms_html(session))  # 7e — CMS publish-ready
         slide_lines: list[str] = [f"# {session.title} — slide outline", ""]
         for s in session.slides:
             slide_lines.append(f"## Slide {s.slide_index + 1}: {s.title}")
@@ -174,7 +407,8 @@ def load_session_for_export(session_id: str) -> SessionForExport:
             sess = conn.execute(
                 text(
                     """
-                    SELECT code, title, presenter, duration_sec
+                    SELECT code, title, presenter, duration_sec,
+                           coalesce(publishing_links, '{}'::jsonb)
                       FROM sessions WHERE id = CAST(:sid AS uuid)
                     """
                 ),
@@ -213,14 +447,75 @@ def load_session_for_export(session_id: str) -> SessionForExport:
                 ),
                 {"sid": session_id},
             ).fetchall()
+
+            # Polls — parsed from manifest (sessions.polls_parsed JSONB).
+            polls_row = conn.execute(
+                text("SELECT polls_parsed FROM sessions WHERE id = CAST(:sid AS uuid)"),
+                {"sid": session_id},
+            ).fetchone()
+
+            chat_rows = conn.execute(
+                text(
+                    """
+                    SELECT author, body, sent_at_ms FROM chat_messages
+                     WHERE session_id = CAST(:sid AS uuid)
+                     ORDER BY sent_at_ms ASC
+                    """
+                ),
+                {"sid": session_id},
+            ).fetchall()
+
+            resource_rows = conn.execute(
+                text(
+                    """
+                    SELECT slide_number, label, url FROM session_slide_resources
+                     WHERE session_id = CAST(:sid AS uuid)
+                     ORDER BY slide_number, sort_order
+                    """
+                ),
+                {"sid": session_id},
+            ).fetchall()
     finally:
         engine.dispose()
+
+    parsed_polls = polls_row[0] if polls_row and polls_row[0] else []
+    if isinstance(parsed_polls, str):
+        try:
+            parsed_polls = json.loads(parsed_polls)
+        except json.JSONDecodeError:
+            parsed_polls = []
+
+    publishing_links = sess[4] if len(sess) > 4 and sess[4] else {}
+    if isinstance(publishing_links, str):
+        try:
+            publishing_links = json.loads(publishing_links)
+        except json.JSONDecodeError:
+            publishing_links = {}
 
     return SessionForExport(
         code=sess[0],
         title=sess[1] or sess[0],
         presenter=sess[2],
         duration_sec=sess[3],
+        publishing_links=publishing_links,
+        polls=[
+            PollForExport(
+                slide_index=(p.get("slide_n") or 1) - 1,
+                question=p.get("question", ""),
+                options=p.get("options", []),
+            )
+            for p in (parsed_polls or [])
+        ],
+        chat=[
+            ChatForExport(
+                author=r[0], body=r[1], sent_at_ms=r[2] or 0,
+            )
+            for r in chat_rows
+        ],
+        resources=[
+            {"slide_number": r[0], "label": r[1], "url": r[2]}
+            for r in resource_rows
+        ],
         segments=[
             SegmentForExport(
                 seq=r[0], start_ms=r[1] or 0, end_ms=r[2] or 0,

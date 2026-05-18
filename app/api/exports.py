@@ -25,6 +25,7 @@ _KIND_TO_MIME = {
     "srt":  "application/x-subrip; charset=utf-8",
     "vtt":  "text/vtt; charset=utf-8",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "html": "text/html; charset=utf-8",
     "zip":  "application/zip",
 }
 
@@ -45,6 +46,7 @@ async def export_session(
 
     from app.engines.artifact_transformer import (
         load_session_for_export,
+        to_cms_html,
         to_docx,
         to_srt,
         to_txt,
@@ -65,6 +67,8 @@ async def export_session(
         body = to_vtt(sess)
     elif fmt == "docx":
         body = to_docx(sess)
+    elif fmt == "html":
+        body = to_cms_html(sess)
     else:
         body = to_zip(sess)
 
