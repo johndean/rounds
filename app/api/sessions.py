@@ -19,6 +19,13 @@ from app.db import DbSession
 
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
 
+# Admin allowlist for destructive session ops (port from MIC `app/api/sessions.py:51-52`).
+# `johndean@vin.com` is the seeded admin. SESSION_TRASH_ALLOWED gates soft-delete;
+# restore + permanent purge require strict `ADMIN_EMAIL` only (one-person blast radius).
+# Could move to `org_settings.session_trash_allowed_emails` in a follow-up phase.
+ADMIN_EMAIL = "johndean@vin.com"
+SESSION_TRASH_ALLOWED = {ADMIN_EMAIL, "carlab@vin.com"}
+
 
 # ─── Pydantic schemas ──────────────────────────────────────────────────
 class PipelineConfig(BaseModel):
@@ -186,6 +193,48 @@ class PipelineConfigOut(PipelineConfig):
     auto_detected_confidence: Optional[float] = None
 
 
+# ─── Soft-deleted lifecycle (Phase 3 — port from MIC sessions.py:161-1687) ──
+@router.get("/deleted")
+async def list_deleted_sessions(db: DbSession, _user: CurrentUser) -> list[dict]:
+    """
+    Admin-only listing of soft-deleted sessions (deleted_at IS NOT NULL,
+    within 30-day recovery window). Backs Settings → Deleted Sessions.
+    Rows older than 30 days are hidden from this view but the DB row remains
+    until permanent purge so the audit ledger can still join.
+
+    Must be declared BEFORE `GET /{session_id}` so the literal path wins.
+    """
+    if not hasattr(_user, "email") or _user.email != ADMIN_EMAIL:
+        raise HTTPException(status_code=403, detail="Only admin can view deleted sessions")
+
+    from sqlalchemy import text
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT id, code, title, presenter, status, created_at, deleted_at
+                  FROM sessions
+                 WHERE deleted_at IS NOT NULL
+                   AND deleted_at >= now() - interval '30 days'
+                 ORDER BY deleted_at DESC
+                """
+            )
+        )
+    ).mappings().all()
+    return [
+        {
+            "session_id": str(r["id"]),
+            "code":       r["code"],
+            "title":      r["title"],
+            "presenter":  r["presenter"],
+            "status":     r["status"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "deleted_at": r["deleted_at"].isoformat() if r["deleted_at"] else None,
+        }
+        for r in rows
+    ]
+
+
 @router.get("/{session_id}/audit-log")
 async def get_audit_log(session_id: UUID, db: DbSession, _u: CurrentUser) -> list[dict]:
     """Returns the append-only state-transition log written by the state machine."""
@@ -250,10 +299,13 @@ async def delete_session(session_id: UUID, db: DbSession, _user: CurrentUser) ->
     """
     Soft-delete a session. Sets `deleted_at`; data preserved for 30 days.
 
-    Mirrors MIC `DELETE /v1/sessions/{id}` semantics. Permission gating is
-    intentionally absent for parity with Rounds Phase-A — every authenticated
-    user can soft-delete; restore lives under Settings → Deleted Sessions.
+    Admin-gated (Phase 3 port from MIC `sessions.py:1529`): only emails in
+    SESSION_TRASH_ALLOWED can soft-delete. Restore + permanent purge are
+    strictly ADMIN_EMAIL only.
     """
+    if not hasattr(_user, "email") or _user.email not in SESSION_TRASH_ALLOWED:
+        raise HTTPException(status_code=403, detail="Only admin can delete sessions")
+
     from sqlalchemy import text
 
     row = (
@@ -287,6 +339,93 @@ async def delete_session(session_id: UUID, db: DbSession, _user: CurrentUser) ->
         logging.getLogger(__name__).warning(f"delete_session: release_slot failed: {exc}")
 
     return {"session_id": str(session_id), "deleted": True}
+
+
+@router.post("/{session_id}/restore")
+async def restore_session(session_id: UUID, db: DbSession, _user: CurrentUser) -> dict:
+    """
+    Restore a soft-deleted session — clears `deleted_at`. Admin-only.
+    Port of MIC `app/api/sessions.py:1570-1606`.
+    """
+    if not hasattr(_user, "email") or _user.email != ADMIN_EMAIL:
+        raise HTTPException(status_code=403, detail="Only admin can restore sessions")
+
+    from sqlalchemy import text
+    row = (
+        await db.execute(
+            text("SELECT id, deleted_at FROM sessions WHERE id = :id"),
+            {"id": str(session_id)},
+        )
+    ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if row["deleted_at"] is None:
+        from app.middleware.envelope import ConflictError
+        raise ConflictError(message="Session is not deleted")
+
+    await db.execute(
+        text("UPDATE sessions SET deleted_at = NULL, updated_at = now() WHERE id = :id"),
+        {"id": str(session_id)},
+    )
+    await db.commit()
+    return {"session_id": str(session_id), "restored": True}
+
+
+@router.delete("/{session_id}/permanent")
+async def permanent_delete_session(session_id: UUID, db: DbSession, _user: CurrentUser) -> dict:
+    """
+    Hard-delete a session and all its child rows. Must be soft-deleted first
+    so the operator has had a chance to reconsider. Admin-only. Irreversible.
+
+    Manual cascade: some child tables lack `ON DELETE CASCADE` on their FK.
+    We delete in dependency order, then the parent. Port of MIC
+    `app/api/sessions.py:1612-1687` adapted to the Rounds schema.
+    """
+    if not hasattr(_user, "email") or _user.email != ADMIN_EMAIL:
+        raise HTTPException(status_code=403, detail="Only admin can permanently delete sessions")
+
+    from sqlalchemy import text
+    row = (
+        await db.execute(
+            text("SELECT id, deleted_at FROM sessions WHERE id = :id"),
+            {"id": str(session_id)},
+        )
+    ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if row["deleted_at"] is None:
+        from app.middleware.envelope import ConflictError
+        raise ConflictError(message="Session must be soft-deleted before permanent deletion")
+
+    # Rounds schema declares `ON DELETE CASCADE` on every child FK referencing
+    # `sessions(id)` (segments → words also cascades), so a single DELETE on
+    # the parent row reaps the entire dependency tree. The MIC port used a
+    # manual cascade because MIC's schema lacks CASCADE; that workaround is
+    # unnecessary here. Keep `audit_events.session_id` (ON DELETE SET NULL,
+    # migration 004) so historical events survive for forensic queries.
+    try:
+        await db.execute(
+            text("DELETE FROM sessions WHERE id = CAST(:sid AS uuid)"),
+            {"sid": str(session_id)},
+        )
+        await db.commit()
+    except Exception as exc:  # noqa: BLE001
+        await db.rollback()
+        import logging
+        logging.getLogger(__name__).error(
+            f"permanent_delete_session({session_id}) cascade failed: {exc}", exc_info=True
+        )
+        raise HTTPException(status_code=500, detail=f"Cascade delete failed: {exc.__class__.__name__}")
+
+    # Release the rate-limit slot just in case it wasn't released on soft-delete.
+    try:
+        from app.middleware.rate_limit import release_slot
+        release_slot(_user.email if hasattr(_user, "email") else None, str(session_id))
+    except Exception as exc:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning(f"permanent_delete: release_slot failed: {exc}")
+
+    return {"session_id": str(session_id), "permanently_deleted": True}
 
 
 @router.get("/{session_id}/failure-reason")

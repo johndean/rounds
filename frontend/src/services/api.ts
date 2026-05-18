@@ -76,6 +76,16 @@ export interface SessionFailureReason {
   log_tail: Array<Record<string, unknown>>;
 }
 
+export interface DeletedSessionRow {
+  session_id: string;
+  code: string;
+  title: string;
+  presenter: string | null;
+  status: string;
+  created_at: string | null;
+  deleted_at: string | null;
+}
+
 export const sessions = {
   list: (filters: SessionFilters = {}) =>
     http<SessionSummary[]>(`/v1/sessions${_q({ ...filters })}`),
@@ -85,6 +95,12 @@ export const sessions = {
     http<SessionSummary>('/v1/sessions', { body: payload, method: 'POST' }),
   remove: (id: string) =>
     http<{ session_id: string; deleted: boolean }>(`/v1/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  listDeleted: () =>
+    http<DeletedSessionRow[]>('/v1/sessions/deleted'),
+  restore: (id: string) =>
+    http<{ session_id: string; restored: boolean }>(`/v1/sessions/${encodeURIComponent(id)}/restore`, { method: 'POST' }),
+  permanentDelete: (id: string) =>
+    http<{ session_id: string; permanently_deleted: boolean }>(`/v1/sessions/${encodeURIComponent(id)}/permanent`, { method: 'DELETE' }),
   failureReason: (id: string) =>
     http<SessionFailureReason>(`/v1/sessions/${encodeURIComponent(id)}/failure-reason`),
   pipelineConfig: (id: string) =>
