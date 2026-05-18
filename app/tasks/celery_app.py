@@ -38,6 +38,8 @@ celery_app = Celery(
         "app.tasks.anchor_task",
         "app.tasks.normalize",
         "app.tasks.fusion",
+        "app.tasks.lcs_discrepancies",
+        "app.tasks.classify_task",
     ],
 )
 
