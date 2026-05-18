@@ -30,8 +30,6 @@ const SETTINGS_SECTIONS = [
   'export', 'prompts', 'manifest', 'email', 'diagnostics', 'deleted',
 ];
 
-const EDITOR_TABS = ['ai', 'stt', 'disc', 'audit'] as const;
-
 test.describe('route smoke', () => {
   for (const r of ROUTES) {
     test(`${r.label} (${r.hash}) loads with .${r.mustHaveClass.replace('.', '')}`, async ({ page }) => {
