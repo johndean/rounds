@@ -135,6 +135,106 @@ export const sessions = {
     http(`/v1/sessions/${encodeURIComponent(id)}/add/manifest${mode ? `?mode=${mode}` : ''}`, { body, method: 'POST' }),
 };
 
+// ─── Corrections (Phase 4 — append-only ledger with undo/redo pointer) ──
+export interface CorrectionRow {
+  correction_id: string;
+  sequence_number: number;
+  action_id: string;
+  segment_id: string;
+  correction_type:
+    | 'slide_reassignment' | 'text_edit' | 'split' | 'merge' | 'mark_ok'
+    | 'chat_insert' | 'chat_edit' | 'chat_remove'
+    | 'poll_insert' | 'poll_remove'
+    | 'speaker_reassignment';
+  old_slide_id: string | null;
+  new_slide_id: string | null;
+  old_text: string | null;
+  new_text: string | null;
+  applied_at: string | null;
+  applied_by: string;
+  active: boolean;
+}
+
+export interface CorrectionApplied {
+  correction_id: string;
+  sequence_number: number;
+  action_id: string;
+  segment_id: string;
+  correction_type: CorrectionRow['correction_type'];
+  old_slide_id: string | null;
+  new_slide_id: string | null;
+  old_text: string | null;
+  new_text: string | null;
+  applied_at: string | null;
+  applied_by: string;
+  resolved_discrepancy_id: string | null;
+}
+
+export interface FindReplaceResult {
+  session_id: string;
+  find: string;
+  replace: string;
+  case_sensitive: boolean;
+  matches: Array<{ segment_id: string; old_text: string; new_text: string; match_count: number }>;
+  total_matches: number;
+  segment_count: number;
+  applied: boolean;
+  action_id: string | null;
+  corrections: CorrectionApplied[];
+}
+
+export const corrections = {
+  apply: (
+    sessionId: string,
+    body: {
+      segment_id: string;
+      correction_type: CorrectionRow['correction_type'];
+      old_slide_id?: string | null;
+      new_slide_id?: string | null;
+      old_text?: string | null;
+      new_text?: string | null;
+      action_id?: string | null;
+    },
+  ) =>
+    http<CorrectionApplied>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/corrections`,
+      { body, method: 'POST' },
+    ),
+  list: (sessionId: string) =>
+    http<{ session_id: string; current_pointer: number; corrections: CorrectionRow[] }>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/corrections`,
+    ),
+  undo: (sessionId: string) =>
+    http<{ session_id: string; pointer: number; action?: string }>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/corrections/undo`,
+      { method: 'POST' },
+    ),
+  redo: (sessionId: string) =>
+    http<{ session_id: string; pointer: number; action?: string }>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/corrections/redo`,
+      { method: 'POST' },
+    ),
+  findReplace: (
+    sessionId: string,
+    body: { find: string; replace: string; case_sensitive?: boolean; dry_run?: boolean },
+  ) =>
+    http<FindReplaceResult>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/find-replace`,
+      { body, method: 'POST' },
+    ),
+  reviewQueue: (sessionId: string) =>
+    http<{
+      session_id: string;
+      count: number;
+      items: Array<{
+        segment_id: string; alignment_id: string; status: string;
+        confidence: number | null; drift_flag: boolean; uncertain_flag: boolean;
+        slide_id: string | null; priority_score: number;
+      }>;
+    }>(`/v1/sessions/${encodeURIComponent(sessionId)}/review-queue`),
+};
+
+
 // ─── Segments ────────────────────────────────────────────────────────────
 export interface SegmentRow {
   id: string;
