@@ -19,22 +19,11 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from typing import Optional
 
 from app.tasks.celery_app import RoundsTask, celery_app
 
 logger = logging.getLogger(__name__)
-
-
-# Tier word sets — match UploadView's docs labels.
-_TIER1 = ["um", "uh", "er", "ah", "hm", "mm"]
-_TIER2 = ["you know", "basically", "like", "right", "essentially", "kind of", "sort of"]
-_TIER3_PATTERNS = [
-    r"what i'm saying is\s*",
-    r"the thing is\s*",
-    r"what we're going to do is\s*",
-]
 
 
 @celery_app.task(
@@ -146,6 +135,10 @@ def normalize_task(self, session_id: str) -> dict:
 
         # ── Per-segment normalize via 3-tier engine (RULE 0-8) ─────────────
         from app.iil.normalization import normalize as iil_normalize
+        from app.iil.validation import validate_and_repair
+
+        # Filler-word list from template (MIC §6) — used by validator + tier removal.
+        filler_words_list = list(cfg_row[8] or []) if cfg_row[8] is not None else []
 
         results: list[tuple] = []
         for seg_id, seg_text, slide_id, stt_words in seg_rows:
@@ -160,16 +153,33 @@ def normalize_task(self, session_id: str) -> dict:
                 slide_context=slide_context,
                 iil_config=effective_iil_cfg,
             )
+
+            # 🟠 #16 — Wire validate_and_repair into the normalize pipeline.
+            # MIC §6: normalization output passes 4 checks; failures trigger
+            # one repair attempt then accept the best-effort output.
+            source_text = (seg_text or "").strip()
+            final_text, vresult = validate_and_repair(
+                source_text=source_text,
+                normalized_text=r.normalized_text,
+                filler_words=filler_words_list,
+                repair_fn=None,  # LLM-repair not wired here; in-stream rules only.
+            )
+
             audit = {
-                "passed":           True,
-                "filler_count":     r.filler_count,
-                "compression":      r.compression_ratio,
-                "tier1_removed":    r.tier1_removed,
-                "tier2_removed":    r.tier2_removed,
-                "tier2_kept":       r.tier2_kept,
-                "tier3_compressed": r.tier3_compressed,
+                "passed":            vresult.passed,
+                "word_count_ratio":  round(vresult.word_count_ratio, 3),
+                "token_overlap":     round(vresult.token_overlap, 3),
+                "filler_remaining":  vresult.filler_remaining,
+                "missing_terminology": vresult.missing_terminology,
+                "repaired":          vresult.repaired,
+                "filler_count":      r.filler_count,
+                "compression":       r.compression_ratio,
+                "tier1_removed":     r.tier1_removed,
+                "tier2_removed":     r.tier2_removed,
+                "tier2_kept":        r.tier2_kept,
+                "tier3_compressed":  r.tier3_compressed,
             }
-            results.append((str(seg_id), r.normalized_text, audit))
+            results.append((str(seg_id), final_text, audit))
 
         # ── Write normalization_results + update segments.text ───────────
         # Updating segments.text means downstream consumers (editor, exports)
@@ -248,42 +258,6 @@ def _effective_tiers(iil_config: dict, filler_policy: str) -> tuple[bool, bool, 
     if filler_policy == "medium":
         return cfg1, cfg2, False
     return cfg1, cfg2, cfg3  # strict — all 3 allowed
-
-
-def _normalize_text(text: str, tier1: bool, tier2: bool, tier3: bool, filler_words: list[str]) -> str:
-    """
-    Apply tier-based filler removal + sentence cleanup.
-    Pure regex — no LLM call. The LLM-based path lives in ai_process enhanced.
-    """
-    if not text:
-        return text
-    out = text
-
-    if tier1:
-        for w in _TIER1:
-            out = re.sub(rf"(?<![A-Za-z]){re.escape(w)}[,.!?]?\s*", "", out, flags=re.IGNORECASE)
-
-    if tier2:
-        for w in _TIER2:
-            out = re.sub(rf"(?<![A-Za-z]){re.escape(w)}[,.!?]?\s*", "", out, flags=re.IGNORECASE)
-
-    if tier3:
-        for pattern in _TIER3_PATTERNS:
-            out = re.sub(pattern, "", out, flags=re.IGNORECASE)
-
-    # Filler list from template (in addition to tiers)
-    for w in filler_words:
-        if w.lower() not in (t.lower() for t in _TIER1 + _TIER2):  # already handled
-            out = re.sub(rf"(?<![A-Za-z]){re.escape(w)}[,.!?]?\s*", "", out, flags=re.IGNORECASE)
-
-    # Whitespace cleanup + sentence capitalization
-    out = re.sub(r"\s+", " ", out).strip()
-    if out and out[0].islower():
-        out = out[0].upper() + out[1:]
-
-    # Strip stranded punctuation at start
-    out = re.sub(r"^[,.\s]+", "", out)
-    return out
 
 
 def _next_or_stub(session_id: str) -> None:

@@ -62,7 +62,7 @@ def anchor_task(self, session_id: str) -> dict:
                 rows = conn.execute(
                     text(
                         """
-                        SELECT text, end_ms
+                        SELECT text, start_ms, end_ms
                           FROM segments
                          WHERE session_id = CAST(:sid AS uuid)
                          ORDER BY seq ASC
@@ -79,15 +79,25 @@ def anchor_task(self, session_id: str) -> dict:
             )
 
         # Compute semantic shifts at boundaries (end_ms / 1000 = seconds).
-        segments = [(r[0] or "", (r[1] or 0) / 1000.0) for r in rows]
-        semantic_shifts = compute_semantic_shifts(segments)
+        segments_for_shifts = [(r[0] or "", (r[2] or 0) / 1000.0) for r in rows]
+        semantic_shifts = compute_semantic_shifts(segments_for_shifts)
 
         # Visual signals from frame_task (may be empty if frame_task not run).
         visual_signals = load_visual_signals_from_redis(session_id)
         visual_timestamps = [v.timestamp for v in visual_signals]
 
+        # Phrase-based detect_anchors — segments dict with text + timing.
+        segments_for_detect = [
+            {
+                "text":       r[0] or "",
+                "start_time": (r[1] or 0) / 1000.0,
+                "end_time":   (r[2] or 0) / 1000.0,
+            }
+            for r in rows
+        ]
         anchors = detect_anchors(
-            visual_timestamps=visual_timestamps,
+            segments=segments_for_detect,
+            visual_change_timestamps=visual_timestamps,
             semantic_shifts=semantic_shifts,
             cross_validate_window=settings.ANCHOR_CROSS_VALIDATE_WINDOW,
             semantic_threshold=0.3,  # locked per CLAUDE.md §7
@@ -99,10 +109,11 @@ def anchor_task(self, session_id: str) -> dict:
         r.setex(_REDIS_SEMANTIC_KEY.format(session_id=session_id), _REDIS_TTL, json.dumps(shift_dicts))
         r.setex(done_key, _REDIS_TTL, "1")
 
-        confirmed = sum(1 for a in anchors if a.confirmed)
+        confirmed = sum(1 for a in anchors if a.visual_confirmed)
+        speculative = sum(1 for a in anchors if a.speculative)
         logger.info(
             f"anchor_task: session={session_id} anchors={len(anchors)} confirmed={confirmed} "
-            f"visual={len(visual_signals)} semantic={len(semantic_shifts)}"
+            f"speculative={speculative} visual={len(visual_signals)} semantic={len(semantic_shifts)}"
         )
 
         _trigger_normalize(session_id)

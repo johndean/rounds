@@ -125,6 +125,10 @@ def classify_discrepancies_task(self, session_id: str) -> dict:
         logger.info(f"classify: session={session_id} items={len(items)} batches={len(batches)} "
                     f"backend={backend} model={model}")
 
+        # 🟡 #51 — emit classification_partial WS event so the editor can
+        # show live progress while a long classify run is mid-batch.
+        from app.engines.ws_bridge import publish_ws_event_sync as _ws_emit
+
         classified_count = 0
         for batch_idx, batch in enumerate(batches):
             payload = json.dumps({"items": batch})
@@ -136,6 +140,14 @@ def classify_discrepancies_task(self, session_id: str) -> dict:
                 )
             except LLMError as e:
                 logger.warning(f"classify batch {batch_idx + 1} failed ({e.category}): {e}")
+                _ws_emit(session_id, {
+                    "type":          "classification_partial",
+                    "batch":         batch_idx + 1,
+                    "total_batches": len(batches),
+                    "classified":    classified_count,
+                    "total":         len(items),
+                    "error":         e.category,
+                })
                 continue
 
             results = result.get("results") or []
@@ -160,6 +172,21 @@ def classify_discrepancies_task(self, session_id: str) -> dict:
                         },
                     )
                     classified_count += 1
+
+            # Per-batch progress signal.
+            _ws_emit(session_id, {
+                "type":          "classification_partial",
+                "batch":         batch_idx + 1,
+                "total_batches": len(batches),
+                "classified":    classified_count,
+                "total":         len(items),
+            })
+
+        _ws_emit(session_id, {
+            "type":       "classification_complete",
+            "classified": classified_count,
+            "total":      len(items),
+        })
 
         logger.info(f"classify: session={session_id} classified={classified_count}/{len(items)}")
         return {

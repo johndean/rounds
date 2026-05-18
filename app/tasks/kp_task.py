@@ -20,16 +20,6 @@ from app.tasks.celery_app import RoundsTask, celery_app
 logger = logging.getLogger(__name__)
 
 
-_KP_PROMPT = """\
-You are extracting key points from a transcript. For each notable
-takeaway, emit one JSON object with `seq` (which segment), `label` (short
-title 5-12 words), and `score` (0-1 importance).
-
-Output STRICT JSON, no prose:
-  {"key_points": [{"seq": int, "label": "...", "score": 0.92}, ...]}
-"""
-
-
 @celery_app.task(
     bind=True,
     base=RoundsTask,
@@ -37,11 +27,21 @@ Output STRICT JSON, no prose:
     max_retries=2,
 )
 def kp_task(self, session_id: str) -> dict:
-    """Extract per-segment key-point annotations."""
+    """
+    Extract per-segment key-point annotations using the rule-based engine
+    in `app/iil/key_points.py`. Enforces KP-01..KP-09 invariants.
+
+    Activation gate (#48): when the session's template has
+    `structure_extraction = False`, write key_points=[] / available=False
+    for every segment and return early without computing candidates.
+
+    Closes 🟠 #47 (was calling Gemini instead of rule-based engine) +
+    🟠 #49 (iil/key_points.py was absent) + 🟡 #48 (activation gate).
+    """
     from sqlalchemy import create_engine, text
 
     from app.config import settings
-    from app.engines.llm_client import LLMError, call_gemini_text
+    from app.iil.key_points import extract_key_points
 
     sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
     engine = create_engine(sync_url)
@@ -55,53 +55,95 @@ def kp_task(self, session_id: str) -> dict:
                 logger.info(f"kp: skip — annotations exist for {session_id}")
                 return {"skipped": True}
 
+            # Activation gate from template (#48).
+            template_row = conn.execute(
+                text(
+                    """
+                    SELECT t.structure_extraction
+                      FROM session_templates st
+                      JOIN templates t ON t.id = st.template_id
+                     WHERE st.session_id = CAST(:sid AS uuid)
+                    """
+                ),
+                {"sid": session_id},
+            ).fetchone()
+            structure_extraction = bool(template_row[0]) if template_row else True
+
             seg_rows = conn.execute(
                 text(
                     """
-                    SELECT id, seq, text FROM segments
-                     WHERE session_id = CAST(:sid AS uuid)
-                     ORDER BY seq ASC
+                    SELECT s.id, s.seq, s.text, s.slide_id,
+                           coalesce(a.status, 'assigned') AS status
+                      FROM segments s
+                      LEFT JOIN alignments a ON a.segment_id = s.id
+                     WHERE s.session_id = CAST(:sid AS uuid)
+                     ORDER BY s.seq ASC
                     """
                 ),
                 {"sid": session_id},
             ).fetchall()
 
+            # Slide bullet text per slide_id for KP-09 content source.
+            bullet_rows = conn.execute(
+                text(
+                    """
+                    SELECT slide_id, text FROM bullets
+                     WHERE slide_id IN (
+                       SELECT id FROM slides WHERE session_id = CAST(:sid AS uuid)
+                     )
+                    """
+                ),
+                {"sid": session_id},
+            ).fetchall()
+            bullets_by_slide: dict[str, list[str]] = {}
+            for slide_id, btext in bullet_rows:
+                bullets_by_slide.setdefault(str(slide_id), []).append(btext or "")
+
         if not seg_rows:
             return {"session_id": session_id, "key_points": 0}
 
-        payload = json.dumps({"segments": [{"seq": r[1], "text": r[2] or ""} for r in seg_rows]})
-
-        try:
-            data = call_gemini_text(_KP_PROMPT, payload, model_id=settings.GEMINI_CLASSIFY_MODEL)
-            kps = json.loads(data).get("key_points", [])
-        except (LLMError, json.JSONDecodeError) as e:
-            logger.warning(f"kp: Gemini extraction failed — {e}")
-            return {"session_id": session_id, "key_points": 0, "error": str(e)}
-
-        seq_to_id = {r[1]: r[0] for r in seg_rows}
+        written = 0
         with engine.begin() as conn:
-            written = 0
-            for kp in kps:
-                seg_id = seq_to_id.get(kp.get("seq"))
-                if not seg_id:
-                    continue
+            for seg_id, _seq, seg_text, slide_id, status in seg_rows:
+                slide_bullets = bullets_by_slide.get(str(slide_id), []) if slide_id else []
+                result = extract_key_points(
+                    segment_id=str(seg_id),
+                    normalized_text=seg_text or "",
+                    slide_id=str(slide_id) if slide_id else None,
+                    status=status or "assigned",
+                    slide_bullets=slide_bullets,
+                    structure_extraction=structure_extraction,
+                )
+
+                # Persist row even when available=False so the UI can render the
+                # "no key points" state without ambiguity.
                 conn.execute(
                     text(
                         """
                         INSERT INTO key_points_annotations
-                            (session_id, segment_id, label, score)
+                            (session_id, segment_id, key_points, explanation,
+                             available, extraction_confidence)
                         VALUES
-                            (CAST(:sid AS uuid), :seg, :lbl, :s)
+                            (CAST(:sid AS uuid), :seg, CAST(:kps AS jsonb), :exp,
+                             :av, :conf)
+                        ON CONFLICT (session_id, segment_id) DO UPDATE
+                          SET key_points = EXCLUDED.key_points,
+                              explanation = EXCLUDED.explanation,
+                              available = EXCLUDED.available,
+                              extraction_confidence = EXCLUDED.extraction_confidence
                         """
                     ),
                     {
-                        "sid": session_id,
-                        "seg": str(seg_id),
-                        "lbl": (kp.get("label") or "")[:200],
-                        "s":   float(kp.get("score", 0.5) or 0.5),
+                        "sid":  session_id,
+                        "seg":  str(seg_id),
+                        "kps":  json.dumps(result.key_points),
+                        "exp":  result.explanation or "",
+                        "av":   result.available,
+                        "conf": result.extraction_confidence,
                     },
                 )
-                written += 1
+                if result.available:
+                    written += 1
 
         # Trigger learn_iil after kp completes (per-instructor profile update).
         try:
@@ -109,8 +151,15 @@ def kp_task(self, session_id: str) -> dict:
         except Exception as e:  # noqa: BLE001
             logger.warning(f"kp: failed to trigger learn_iil: {e}")
 
-        logger.info(f"kp: session={session_id} key_points={written}")
-        return {"session_id": session_id, "key_points": written}
+        logger.info(
+            f"kp: session={session_id} key_points={written} "
+            f"structure_extraction={structure_extraction}"
+        )
+        return {
+            "session_id":           session_id,
+            "key_points":           written,
+            "structure_extraction": structure_extraction,
+        }
 
     except Exception as exc:  # noqa: BLE001
         attempt = self.request.retries

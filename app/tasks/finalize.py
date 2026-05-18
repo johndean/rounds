@@ -106,6 +106,43 @@ def finalize_task(self, prev_result=None, session_id=None) -> dict:  # noqa: ARG
         except Exception as e:  # noqa: BLE001
             logger.warning(f"finalize: failed to trigger sop_auto_init: {e}")
 
+        # 🟡 #38 + #39 — emit timeline_ready + final metrics_update so the
+        # ProcessingView signal goes green and the diagnostic counts populate.
+        try:
+            from sqlalchemy import text as _text
+            from app.engines.ws_bridge import publish_ws_event_sync
+
+            with engine.connect() as conn:
+                counts = conn.execute(
+                    _text(
+                        """
+                        SELECT
+                          (SELECT COUNT(*) FROM segments    WHERE session_id = CAST(:sid AS uuid)),
+                          (SELECT COUNT(*) FROM slides      WHERE session_id = CAST(:sid AS uuid)),
+                          (SELECT COUNT(*) FROM alignments  WHERE segment_id IN
+                            (SELECT id FROM segments WHERE session_id = CAST(:sid AS uuid))),
+                          (SELECT duration_sec FROM sessions WHERE id = CAST(:sid AS uuid))
+                        """
+                    ),
+                    {"sid": session_id},
+                ).fetchone()
+
+            seg_n   = int(counts[0]) if counts else 0
+            slide_n = int(counts[1]) if counts else 0
+            align_n = int(counts[2]) if counts else 0
+            dur_s   = int(counts[3] or 0) if counts else 0
+
+            publish_ws_event_sync(session_id, {"type": "timeline_ready"})
+            publish_ws_event_sync(session_id, {
+                "type":            "metrics_update",
+                "segments":        seg_n,
+                "slides_total":    slide_n,
+                "slides_aligned":  align_n,
+                "duration_sec":    dur_s,
+            })
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"finalize: WS emit failed: {e}")
+
         logger.info(f"finalize: session {session_id} ready")
         return {"session_id": session_id, "status": "ready"}
     finally:

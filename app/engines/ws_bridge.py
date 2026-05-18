@@ -26,15 +26,24 @@ _WS_GLOB = "rounds:ws:*"
 
 
 def publish_ws_event_sync(session_id: str, payload: dict[str, Any]) -> None:
-    """Publish a WS event from a synchronous context (Celery tasks)."""
+    """
+    Publish a WS event from a synchronous context (Celery tasks).
+
+    Envelope shape (matches MIC §10):
+        {"session_id": "...", "payload": {...inner payload...}}
+    The bridge forwarder unwraps `data["payload"]` and broadcasts that to
+    connected clients — so frontend receives just `{type, ...}` without the
+    session_id wrapper.
+    """
     try:
         import redis as _redis
 
         r = _redis.from_url(settings.REDIS_URL, decode_responses=True)
         try:
-            r.publish(_WS_CHANNEL.format(session_id=session_id), json.dumps({
-                "session_id": session_id, **payload,
-            }))
+            r.publish(
+                _WS_CHANNEL.format(session_id=session_id),
+                json.dumps({"session_id": session_id, "payload": payload}),
+            )
         finally:
             r.close()
     except Exception as exc:  # noqa: BLE001
@@ -59,8 +68,9 @@ async def start_ws_bridge(ws_manager) -> None:
             try:
                 data = json.loads(message["data"])
                 session_id = data.get("session_id")
-                if session_id:
-                    await ws_manager.broadcast(session_id, data)
+                payload = data.get("payload")
+                if session_id and isinstance(payload, dict):
+                    await ws_manager.broadcast(session_id, payload)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"ws_bridge forward error: {exc}")
     except asyncio.CancelledError:

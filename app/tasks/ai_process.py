@@ -241,6 +241,8 @@ def _process_direct(
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"cleanup ignored: {e}")
 
+    _emit(75, f"Preparing to save {len(parsed)} segments…")
+    _emit(80, "Waiting for slide extraction…")
     _emit(85, f"Saving {len(parsed)} segments…")
 
     # ── 7. Persist segments + slides + speakers + alignments atomically ──
@@ -262,10 +264,17 @@ def _process_direct(
             if row:
                 speaker_id_by_name[name] = str(row[0])
 
+        # 🟠 #40 — wait for slide_extract_task to complete before writing slide
+        # rows. Without this, AI MODE direct races slide_extract and emits
+        # placeholder rows that shadow PyMuPDF-extracted content. Poll up to
+        # 60s for slide rows to materialize; if none arrive (slide_extract
+        # didn't run / failed), proceed with AI MODE markers as fallback.
+        _wait_for_slide_extract(engine, session_id, max_seconds=60)
+
         # Slides — write rows for each distinct slide_marker. If
-        # slide_extract_task (6k or current PNG fallback) also writes
-        # rows, ON CONFLICT (session_id, slide_index) keeps the richer
-        # version. AI MODE direct contributes start/end + title only.
+        # slide_extract_task already wrote richer rows, ON CONFLICT
+        # (session_id, slide_index) preserves them via COALESCE — AI MODE
+        # direct contributes start/end + title only when PyMuPDF didn't.
         slide_id_by_marker: dict[int, str] = {}
         markers = sorted({s["slide_marker"] for s in parsed if s.get("slide_marker") is not None})
         for marker in markers:
@@ -371,6 +380,18 @@ def _process_direct(
         release_slot(None, session_id)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"ai_process: release_slot failed: {e}")
+
+    # 🟠 #43 — fire stt_background_task to produce word-level STT timestamps
+    # + transcription_discrepancies. AI MODE direct otherwise has empty STT
+    # comparison surface for the editor's Discrepancies tab.
+    try:
+        stt_background_task.apply_async(
+            kwargs={"session_id": session_id, "gcs_uri": media_source[0]},
+            queue="celery",
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"ai_process: failed to trigger stt_background_task: {e}")
+
     try:
         from app.tasks.kp_task import kp_task
         kp_task.apply_async(args=[session_id], queue="celery")
@@ -479,6 +500,199 @@ def _process_enhanced(
             )
     logger.info(f"ai_process[enhanced]: session={session_id} refined={n}/{len(segs)} ai_mode={ai_mode}")
     return {"session_id": session_id, "refined": n, "ai_mode": ai_mode}
+
+
+# ─── #40 helper — wait for slide_extract_task to populate slide rows ────────
+
+
+def _wait_for_slide_extract(engine, session_id: str, *, max_seconds: int = 60) -> bool:
+    """
+    Poll for slide rows from slide_extract_task before AI MODE writes its own.
+    Returns True when at least one slide row appears, False if timeout.
+    Non-fatal: timeout still proceeds — AI MODE will write placeholder rows.
+    """
+    import time as _time
+
+    from sqlalchemy import text
+
+    started = _time.monotonic()
+    last_count = -1
+    while _time.monotonic() - started < max_seconds:
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT COUNT(*) FROM slides WHERE session_id = CAST(:sid AS uuid)"),
+                    {"sid": session_id},
+                ).fetchone()
+            count = int(row[0]) if row else 0
+            if count > 0:
+                logger.info(f"ai_process: slide_extract produced {count} slide rows")
+                return True
+            if count != last_count:
+                last_count = count
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"ai_process: slide poll error (non-fatal): {e}")
+        _time.sleep(1.0)
+    logger.warning(
+        f"ai_process: slide_extract didn't produce rows within {max_seconds}s — "
+        f"falling back to AI MODE placeholder slides"
+    )
+    return False
+
+
+# ─── #43 stt_background_task — produces word-level STT after AI MODE direct ──
+
+
+@celery_app.task(
+    bind=True,
+    base=RoundsTask,
+    name="rounds.tasks.stt_background",
+    max_retries=1,
+)
+def stt_background_task(self, *, session_id: str, gcs_uri: str) -> dict:
+    """
+    Runs Cloud STT in the background after AI MODE direct completes.
+    Writes word-level timestamps (start_ms, end_ms, confidence) into the
+    words table, then triggers lcs_discrepancies_task to produce
+    transcription_discrepancies for the editor's Discrepancies tab.
+
+    Non-critical: STT failures DO NOT mark the session as failed (the AI
+    MODE direct transcript is already complete and the session is `ready`).
+
+    Closes 🟠 #43 — AI MODE direct used to have an empty STT comparison
+    surface; this task fills it in asynchronously after the user gets the
+    ready signal.
+    """
+    import uuid as uuid_lib
+
+    from sqlalchemy import create_engine, text
+
+    from app.config import settings
+    from app.engines.ws_bridge import publish_ws_event_sync
+
+    sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+    engine = create_engine(sync_url)
+
+    try:
+        # Reuse transcribe helpers to run STT and get word-level results.
+        try:
+            from app.config import settings as _settings
+            from app.tasks.transcribe import _backend_google_stt, _backend_google_stt_chunked
+        except ImportError:
+            logger.warning("stt_background: transcribe helpers not available — skipping")
+            return {"session_id": session_id, "status": "skipped"}
+
+        backend = (_settings.TRANSCRIPTION_BACKEND or "google_stt_chunked").lower()
+        if backend == "google_stt_chunked":
+            stt_words = _backend_google_stt_chunked(gcs_uri)
+        elif backend == "google_stt":
+            stt_words = _backend_google_stt(gcs_uri)
+        else:
+            logger.warning(f"stt_background: backend '{backend}' not supported for STT-only — skipping")
+            return {"session_id": session_id, "status": "skipped"}
+        if not stt_words:
+            logger.info(f"stt_background: STT returned no words for {session_id}")
+            return {"session_id": session_id, "status": "no_words"}
+
+        with engine.connect() as conn:
+            segments = conn.execute(
+                text(
+                    """
+                    SELECT id, start_ms, end_ms FROM segments
+                     WHERE session_id = CAST(:sid AS uuid)
+                     ORDER BY start_ms
+                    """
+                ),
+                {"sid": session_id},
+            ).fetchall()
+
+        if not segments:
+            return {"session_id": session_id, "status": "no_segments"}
+
+        words_written = 0
+        with engine.begin() as conn:
+            # Clear stale words (idempotent re-run).
+            conn.execute(
+                text(
+                    """
+                    DELETE FROM words
+                     WHERE segment_id IN (SELECT id FROM segments WHERE session_id = CAST(:sid AS uuid))
+                    """
+                ),
+                {"sid": session_id},
+            )
+
+            for seg_id, seg_start_ms, seg_end_ms in segments:
+                seg_start_s = (seg_start_ms or 0) / 1000.0
+                seg_end_s = (seg_end_ms or 0) / 1000.0
+                in_segment = [
+                    w for w in stt_words
+                    if w["start_time"] >= seg_start_s - 0.5
+                    and w["start_time"] < seg_end_s + 0.5
+                ]
+                for seq_idx, w in enumerate(in_segment, start=1):
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO words (id, segment_id, seq, word, start_ms, end_ms, confidence)
+                            VALUES (CAST(:id AS uuid), :sid, :seq, :word, :st, :et, :conf)
+                            """
+                        ),
+                        {
+                            "id":   str(uuid_lib.uuid4()),
+                            "sid":  seg_id,
+                            "seq":  seq_idx,
+                            "word": w["word"],
+                            "st":   int(round(w["start_time"] * 1000)),
+                            "et":   int(round(w["end_time"] * 1000)),
+                            "conf": w.get("confidence", 0.9),
+                        },
+                    )
+                    words_written += 1
+
+        publish_ws_event_sync(session_id, {
+            "type":       "stt_ready",
+            "word_count": words_written,
+        })
+
+        # Kick lcs_discrepancies → classify chain.
+        try:
+            from app.tasks.lcs_discrepancies import lcs_discrepancies_task
+            lcs_discrepancies_task.apply_async(args=[session_id], queue="celery")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"stt_background: failed to enqueue lcs_discrepancies: {e}")
+
+        logger.info(f"stt_background: session={session_id} words={words_written}")
+        return {"session_id": session_id, "status": "completed", "words": words_written}
+
+    finally:
+        engine.dispose()
+
+
+class _SttBackgroundTask(RoundsTask):
+    """STT background failure is non-critical — never mark session as failed."""
+
+    abstract = True
+
+    def on_failure(self, exc, task_id, args, kwargs, einfo):  # noqa: ARG002, ANN001
+        session_id = kwargs.get("session_id") or (args[0] if args else None)
+        logger.warning(
+            f"stt_background_task FAILED for session {session_id}: {exc} — "
+            f"session NOT marked failed (AI MODE transcript is the authoritative output)"
+        )
+        if session_id:
+            try:
+                from app.engines.ws_bridge import publish_ws_event_sync
+                publish_ws_event_sync(session_id, {
+                    "type":   "stt_background_failed",
+                    "reason": str(exc)[:500],
+                })
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"stt_background: WS emit failed: {e}")
+
+
+# Re-bind stt_background_task to use the non-fatal failure class.
+stt_background_task.Task = _SttBackgroundTask  # type: ignore[attr-defined]
 
 
 # ─── Template autodetect ────────────────────────────────────────────────

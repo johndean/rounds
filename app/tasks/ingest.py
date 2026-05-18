@@ -87,13 +87,31 @@ def ingest_task(self, session_id: str) -> dict:  # noqa: ARG001
 
         ai_pipeline = (cfg[0] if cfg else "enhanced") or "enhanced"
 
-        # template_autodetect runs in parallel for either pipeline.
+        # 🟡 #29 — log GCS bucket pre-flight target for ops traceability.
         try:
-            from app.tasks.ai_process import template_autodetect_task
+            with engine.connect() as conn:
+                primary = conn.execute(
+                    text(
+                        """
+                        SELECT gcs_uri, role FROM sources
+                         WHERE session_id = CAST(:sid AS uuid)
+                           AND role IN ('video','audio','audio_enhance')
+                         ORDER BY CASE role WHEN 'video' THEN 0 WHEN 'audio' THEN 1 ELSE 2 END
+                         LIMIT 1
+                        """
+                    ),
+                    {"sid": session_id},
+                ).fetchone()
+            if primary:
+                logger.info(
+                    f"ingest: GCS target session={session_id} role={primary[1]} uri={primary[0]}"
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"ingest: pre-flight log failed (non-fatal): {e}")
 
-            template_autodetect_task.apply_async(args=[session_id], queue="celery")
-        except ImportError:
-            pass
+        # template_autodetect now runs at END of transcribe_task (#11/#46 —
+        # MIC fires it post-STT, after audio is actually downloaded; firing it
+        # here was misplaced since the stub is 0.0-confidence anyway).
 
         if ai_pipeline == "direct":
             # AI MODE direct — single task does everything, marks ready itself.

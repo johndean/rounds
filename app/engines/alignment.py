@@ -6,20 +6,23 @@ pick the dominant slide. The 4 signals (LOCKED weights, audit §6):
 
   ALIGN_WEIGHT_SEMANTIC   = 0.35   — token overlap with slide bullets/text
   ALIGN_WEIGHT_COVERAGE   = 0.25   — fraction of segment inside slide range
-  ALIGN_WEIGHT_TEMPORAL   = 0.25   — distance to slide center (gaussian-ish)
+  ALIGN_WEIGHT_TEMPORAL   = 0.25   — linear proximity to slide center
   ALIGN_WEIGHT_SEQUENTIAL = 0.15   — adjacency to prior segment's slide
-  ALIGN_SEQUENTIAL_PENALTY= 0.8    — penalty for non-adjacent jumps
+  ALIGN_SEQUENTIAL_PENALTY= 0.8    — penalty for backward jumps
 
-Dominance: top score / runner-up. dominance < 0.6 → status='uncertain',
-slide_id=NULL. IIL drift flag set when temporal signal is high but
-semantic is low — slide is in the right time window but content drift.
+Phase 7i (parity-3) — closes the alignment drift gaps from re-audit:
+  • #28 semantic = overlap/slide_tokens (MIC formula), not Jaccard
+  • #29 temporal = linear 1.0 − distance/half (MIC), not Gaussian
+  • #30 sequential = backward-only penalty (MIC), forward jumps allowed
+  • #31 dominance = absolute gap top−runner_up (MIC), not share-of-total
+  • #32 drift_flag = best_score<0.6 AND not uncertain (MIC), not (temporal≥0.7∧semantic<0.2)
+  • #34 dead duplicate run_pre_ready_gate removed
 
-Closes audit gaps 🔴 #17, 🟠 #15. Phase 6i / U108-U112.
+Pre-ready gate moved to canonical home in engines/pre_ready_gate.py.
 """
 from __future__ import annotations
 
 import logging
-import math
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -64,10 +67,17 @@ def _tokens(text: str) -> set[str]:
     return {t.lower() for t in re.findall(r"[A-Za-z][A-Za-z']*", text) if len(t) > 2}
 
 
-def _semantic_score(segment_tokens: set[str], slide_tokens: set[str]) -> float:
-    if not segment_tokens or not slide_tokens:
+def _semantic_score(segment_text: str, slide_text: str) -> float:
+    """
+    Phase 1 semantic signal: keyword/token overlap (#28).
+    MIC formula: overlap / slide_tokens (NOT Jaccard). Bounded [0,1].
+    """
+    seg_tokens = _tokens(segment_text)
+    slide_tokens = _tokens(slide_text)
+    if not seg_tokens or not slide_tokens:
         return 0.0
-    return len(segment_tokens & slide_tokens) / max(1, len(segment_tokens | slide_tokens))
+    overlap = seg_tokens & slide_tokens
+    return min(1.0, len(overlap) / max(1, len(slide_tokens)))
 
 
 def _coverage_score(seg_start: float, seg_end: float, slide_start: float, slide_end: float) -> float:
@@ -80,11 +90,28 @@ def _coverage_score(seg_start: float, seg_end: float, slide_start: float, slide_
 
 
 def _temporal_score(seg_mid: float, slide_start: float, slide_end: float) -> float:
-    """Gaussian-ish proximity to slide center. 1.0 = centered."""
+    """
+    Temporal proximity (#29) — linear 1.0 − distance/window_half (MIC).
+    1.0 = centered.
+    """
     center = (slide_start + slide_end) / 2.0
-    half = max(1.0, (slide_end - slide_start) / 2.0)
+    window_half = (slide_end - slide_start) / 2.0
+    if window_half <= 0:
+        return 0.0
     distance = abs(seg_mid - center)
-    return math.exp(-0.5 * (distance / half) ** 2)
+    return max(0.0, 1.0 - (distance / window_half))
+
+
+def _sequential_score(slide_number: int, prev_slide_number: Optional[int], penalty: float) -> float:
+    """
+    Sequential constraint (#30) — backward jumps only penalized.
+    MIC rule: forward or same slide → 1.0. Backward jump → penalty (0.8).
+    """
+    if prev_slide_number is None:
+        return 1.0
+    if slide_number >= prev_slide_number:
+        return 1.0
+    return penalty
 
 
 def align_segment(
@@ -111,30 +138,25 @@ def align_segment(
             status="uncertain",
         )
 
-    seg_tokens = _tokens(seg.text)
     seg_mid = (seg.start_time + seg.end_time) / 2.0
 
     scores: list[tuple[float, SlideRangeInput, dict]] = []
     for sr in slide_ranges:
-        slide_tokens = _tokens(sr.full_text + " " + sr.bullets)
-        sem = _semantic_score(seg_tokens, slide_tokens)
+        sem = _semantic_score(seg.text, sr.full_text + " " + sr.bullets)
         cov = _coverage_score(seg.start_time, seg.end_time, sr.soft_start, sr.soft_end)
         tem = _temporal_score(seg_mid, sr.start_time, sr.end_time)
-        seq = 1.0 if prev_slide_number is None else (
-            1.0 if sr.slide_number == prev_slide_number or sr.slide_number == prev_slide_number + 1
-            else sequential_penalty
-        )
+        seqv = _sequential_score(sr.slide_number, prev_slide_number, sequential_penalty)
         total = (
             w_semantic * sem
             + w_coverage * cov
             + w_temporal * tem
-            + w_sequential * seq
+            + w_sequential * seqv
         )
         scores.append((total, sr, {
-            "semantic":   round(sem, 3),
-            "coverage":   round(cov, 3),
-            "temporal":   round(tem, 3),
-            "sequential": round(seq, 3),
+            "semantic":   round(sem, 4),
+            "coverage":   round(cov, 4),
+            "temporal":   round(tem, 4),
+            "sequential": round(seqv, 4),
         }))
 
     # Pick winner + runner-up
@@ -142,62 +164,31 @@ def align_segment(
     winner_total, winner_sr, winner_signals = scores[0]
     runner_total = scores[1][0] if len(scores) > 1 else 0.0
 
-    dominance = winner_total / max(0.01, winner_total + runner_total)
+    # Dominance (#31) — absolute gap MIC-style.
+    dominance = winner_total - runner_total
     uncertain = dominance < 0.6
-    # Drift flag: high temporal score (correct time window) but low semantic
-    drift_flag = (
-        winner_signals["temporal"] >= 0.7
-        and winner_signals["semantic"] < 0.2
-    )
+
+    # Drift detection (#32) — MIC rule: best_score < 0.6 AND assignment is confident.
+    drift_flag = False
     confidence = max(0.0, min(1.0, winner_total))
-    if drift_flag:
+    if confidence < 0.6 and not uncertain:
+        drift_flag = True
         confidence = max(0.0, confidence - drift_confidence_penalty)
+
+    if uncertain:
+        slide_id = None
+        status = "uncertain"
+    else:
+        slide_id = winner_sr.slide_id
+        status = "assigned" if confidence >= 0.6 else "review"
 
     return AlignmentRecord(
         segment_id=seg.segment_id,
-        slide_id=None if uncertain else winner_sr.slide_id,
-        confidence=round(confidence, 3),
+        slide_id=slide_id,
+        confidence=round(confidence, 4),
         signals=winner_signals,
         drift_flag=drift_flag,
         anchor_hit=winner_signals["temporal"] >= 0.85,
         uncertain_flag=uncertain,
-        status="uncertain" if uncertain else "assigned",
+        status=status,
     )
-
-
-# ─── Pre-ready gate ─────────────────────────────────────────────────────
-
-
-class GateFailure(Exception):
-    """5-assertion gate failed before aligning→ready."""
-
-
-def run_pre_ready_gate(
-    alignments: list[AlignmentRecord],
-    segment_count: int,
-    slide_count: int,
-) -> None:
-    """
-    5 assertions before allowing aligning → ready:
-      1. alignments count = segment count
-      2. < 20% of alignments uncertain (else require review)
-      3. assigned alignments have non-null slide_id
-      4. drift_flag count < 25% of total
-      5. every confidence in [0,1]
-    """
-    if len(alignments) != segment_count:
-        raise GateFailure(f"gate: alignments={len(alignments)} != segments={segment_count}")
-    uncertain = sum(1 for a in alignments if a.uncertain_flag)
-    if alignments and uncertain / len(alignments) > 0.2:
-        raise GateFailure(
-            f"gate: uncertain ratio {uncertain}/{len(alignments)} > 20% — needs human review"
-        )
-    drift = sum(1 for a in alignments if a.drift_flag)
-    if alignments and drift / len(alignments) > 0.25:
-        raise GateFailure(f"gate: drift ratio {drift}/{len(alignments)} > 25%")
-    for a in alignments:
-        if a.status == "assigned" and not a.slide_id:
-            raise GateFailure(f"gate: assigned alignment has no slide_id: {a.segment_id}")
-        if not (0.0 <= a.confidence <= 1.0):
-            raise GateFailure(f"gate: confidence={a.confidence} out of range for {a.segment_id}")
-    # slide_count just available for future assertions; not used currently.

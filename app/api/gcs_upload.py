@@ -2,17 +2,34 @@
 /v1/gcs — signed-URL endpoint + upload-complete with R7 scope-validation.
 
 Ports MIC audit §2.7 / §8 (`app/api/gcs_upload.py:62-105` and `:287-362`).
+Phase 7i: closes residual gaps from re-audit
+  • #1 / #42  /upload-url echoes mime_type + expires_in_seconds (TTL hint)
+  • #5        R7 error payload key is `gcs_uri` (not `offending_uri`)
+  • #14       Manifest GCS download wrapped in asyncio.to_thread
+  • #16       parsed.code persisted to sessions table
+  • #18       Manifest summary emits both slide_count_with_resources and polls_parsed_count
+  • #36       Structured upload-complete summary log line
+  • #40       Pydantic enforces files non-empty
+  • #41       Session existence verified before INSERT into sources
 """
 from __future__ import annotations
 
+import asyncio
+import logging
+import time
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, status
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from app.auth import CurrentUser
 from app.db import DbSession
+from app.middleware.envelope import (
+    NotFoundError,
+    ValidationFailedError,
+    InternalError,
+)
 from app.services.gcs import (
     find_out_of_scope_uri,
     make_signed_put_url,
@@ -20,6 +37,10 @@ from app.services.gcs import (
 )
 
 router = APIRouter(prefix="/v1/gcs", tags=["gcs"])
+logger = logging.getLogger(__name__)
+
+
+_DEFAULT_SIGNED_URL_TTL_SECONDS = 3600  # 60 min — matches make_signed_put_url
 
 
 # ─── /upload-url ────────────────────────────────────────────────────────
@@ -27,12 +48,15 @@ class UploadUrlRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
     filename:   str = Field(..., min_length=1, max_length=512)
     role:       Optional[str] = Field(default=None, max_length=64)
+    mime_type:  Optional[str] = Field(default=None, max_length=128)
 
 
 class UploadUrlResponse(BaseModel):
-    signed_url: str
-    gcs_uri:    str
-    blob_name:  str
+    signed_url:          str
+    gcs_uri:             str
+    blob_name:           str
+    mime_type:           Optional[str] = None
+    expires_in_seconds:  int = _DEFAULT_SIGNED_URL_TTL_SECONDS
 
 
 @router.post("/upload-url", response_model=UploadUrlResponse)
@@ -44,12 +68,15 @@ async def signed_url(payload: UploadUrlRequest, _user: CurrentUser) -> UploadUrl
     try:
         signed, uri = make_signed_put_url(payload.session_id, payload.role, payload.filename)
     except Exception as exc:  # GCS SDK failures
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"GCS sign failed: {exc.__class__.__name__}",
-        ) from exc
+        raise InternalError(f"GCS sign failed: {exc.__class__.__name__}") from exc
     blob_name = uri.split("/", 3)[-1] if uri.count("/") >= 3 else uri
-    return UploadUrlResponse(signed_url=signed, gcs_uri=uri, blob_name=blob_name)
+    return UploadUrlResponse(
+        signed_url=signed,
+        gcs_uri=uri,
+        blob_name=blob_name,
+        mime_type=payload.mime_type,
+        expires_in_seconds=_DEFAULT_SIGNED_URL_TTL_SECONDS,
+    )
 
 
 # ─── /upload-complete ───────────────────────────────────────────────────
@@ -64,7 +91,7 @@ class UploadCompleteFile(BaseModel):
 
 class UploadCompleteRequest(BaseModel):
     session_id: str = Field(..., min_length=1)
-    files:      list[UploadCompleteFile]
+    files:      list[UploadCompleteFile] = Field(..., min_length=1)
 
 
 class UploadCompleteResponse(BaseModel):
@@ -83,16 +110,10 @@ async def upload_complete(
     Confirm upload. Enforces R7: every gcs_uri MUST start with the session's
     scoped prefix. Out-of-scope uris are rejected with 400 VALIDATION_FAILED
     (matches MIC audit §2.7 / `_find_out_of_scope_uri`).
-
-    Persists one row per uploaded file in the `sources` table. ON CONFLICT
-    (gcs_uri) DO NOTHING — uploading the same blob twice is idempotent.
-
-    After persisting sources, enqueues the Celery `ingest` task which
-    fans out to transcribe + slide_extract + align + finalize. Enqueue
-    failures are non-fatal — the upload still succeeded and the operator
-    can re-trigger ingest via `/v1/diag/reingest/{session_id}` (Phase 6b).
     """
     from app.middleware.rate_limit import reserve_slot, validate_files
+
+    t0 = time.monotonic()
 
     validate_files(payload.files, payload.session_id)
     reserve_slot(_user.email, payload.session_id)
@@ -100,15 +121,22 @@ async def upload_complete(
     files_as_dicts = [f.model_dump() for f in payload.files]
     out_of_scope = find_out_of_scope_uri(files_as_dicts, payload.session_id)
     if out_of_scope is not None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "VALIDATION_FAILED",
-                "message": "gcs_uri outside session scope",
+        raise ValidationFailedError(
+            message="gcs_uri outside session scope",
+            details={
                 "expected_prefix": session_prefix(payload.session_id),
-                "offending_uri": out_of_scope,
+                "gcs_uri":         out_of_scope,
+                "offending_uri":   out_of_scope,  # retain for backward-compat
             },
         )
+
+    # 🟠 #41 — session must exist before we insert orphan sources / fail on FK.
+    exists = (await db.execute(
+        text("SELECT 1 FROM sessions WHERE id = CAST(:sid AS uuid)"),
+        {"sid": payload.session_id},
+    )).first()
+    if not exists:
+        raise NotFoundError(f"session not found: {payload.session_id}")
 
     accepted: list[str] = []
     for f in payload.files:
@@ -133,8 +161,8 @@ async def upload_complete(
         accepted.append(f.gcs_uri)
     await db.commit()
 
-    # Parse manifest + chat sources if present (Phase 6f). Non-fatal —
-    # ingest still runs even if parsing returns an empty result.
+    # Parse manifest + chat sources if present. Non-fatal — ingest still
+    # runs even if parsing returns an empty result.
     manifest_summary = await _parse_manifest_and_chat_sources(payload.session_id, payload.files, db)
 
     # Kick off the Celery ingest pipeline.
@@ -143,11 +171,16 @@ async def upload_complete(
 
         enqueue_ingest(payload.session_id)
     except Exception as exc:  # noqa: BLE001
-        import logging
-
-        logging.getLogger(__name__).warning(
+        logger.warning(
             f"upload-complete: failed to enqueue ingest for {payload.session_id}: {exc}"
         )
+
+    duration_ms = int((time.monotonic() - t0) * 1000)
+    logger.info(
+        f"gcs_upload_complete session_id={payload.session_id} files={len(payload.files)} "
+        f"inserted={len(accepted)} manifest_parsed={bool(manifest_summary and manifest_summary.get('parsed'))} "
+        f"duration_ms={duration_ms}"
+    )
 
     return UploadCompleteResponse(
         session_id=payload.session_id,
@@ -161,16 +194,11 @@ async def _parse_manifest_and_chat_sources(
 ) -> Optional[dict]:
     """
     Parse manifest (role='manifest') + chat (role='chat') sources.
-    Writes session_speakers / session_slide_resources / sessions metadata for
-    manifest, and chat_messages rows for chat. Returns a manifest summary dict.
     """
     import json
-    import logging
 
     from app.engines.chat_parser import parse_chat_file
     from app.services.extras2_parser import parse_extras2
-
-    logger = logging.getLogger(__name__)
 
     summary: Optional[dict] = None
 
@@ -179,14 +207,13 @@ async def _parse_manifest_and_chat_sources(
 
     if manifest_files:
         try:
-            raw = _read_gcs_text(manifest_files[0].gcs_uri)
+            raw = await asyncio.to_thread(_read_gcs_text, manifest_files[0].gcs_uri)
             parsed = parse_extras2(raw)
 
-            from sqlalchemy import text
-
-            # Update session metadata
             updates = []
             params: dict = {"sid": session_id}
+            if parsed.code:
+                updates.append("code = :code"); params["code"] = parsed.code  # 🟠 #16
             if parsed.title_long:
                 updates.append("title_long = :tl"); params["tl"] = parsed.title_long
             if parsed.title_short:
@@ -209,7 +236,6 @@ async def _parse_manifest_and_chat_sources(
                     params,
                 )
 
-            # Write session_speakers
             for sp in parsed.speakers:
                 await db.execute(
                     text(
@@ -222,7 +248,6 @@ async def _parse_manifest_and_chat_sources(
                      "c": sp.credentials, "b": sp.bio, "so": sp.sort_order},
                 )
 
-            # Write session_slide_resources
             for rs in parsed.slide_resources:
                 await db.execute(
                     text(
@@ -237,16 +262,19 @@ async def _parse_manifest_and_chat_sources(
 
             await db.commit()
 
+            slide_count_with_resources = len({rs.slide_number for rs in parsed.slide_resources})
+
             summary = {
-                "parsed":              True,
-                "code":                parsed.code,
-                "title_long":          parsed.title_long,
-                "title_short":         parsed.title_short,
-                "speakers":            [{"role": s.role, "name": s.name, "credentials": s.credentials}
-                                        for s in parsed.speakers],
-                "slide_resource_count": len(parsed.slide_resources),
-                "publishing_links":    list(parsed.publishing_links.keys()),
-                "polls_parsed_count":  len(parsed.polls_parsed),
+                "parsed":                     True,
+                "code":                       parsed.code,
+                "title_long":                 parsed.title_long,
+                "title_short":                parsed.title_short,
+                "speakers":                   [{"role": s.role, "name": s.name, "credentials": s.credentials}
+                                               for s in parsed.speakers],
+                "slide_resource_count":       len(parsed.slide_resources),
+                "slide_count_with_resources": slide_count_with_resources,  # 🟡 #18
+                "publishing_links":           list(parsed.publishing_links.keys()),
+                "polls_parsed_count":         len(parsed.polls_parsed),
             }
         except Exception:
             logger.exception(f"manifest parse failed for session {session_id}")
@@ -254,9 +282,8 @@ async def _parse_manifest_and_chat_sources(
 
     if chat_files:
         try:
-            raw = _read_gcs_text(chat_files[0].gcs_uri)
+            raw = await asyncio.to_thread(_read_gcs_text, chat_files[0].gcs_uri)
             messages = parse_chat_file(raw)
-            from sqlalchemy import text
             for msg in messages:
                 await db.execute(
                     text(
@@ -285,7 +312,7 @@ async def _parse_manifest_and_chat_sources(
 
 
 def _read_gcs_text(gcs_uri: str) -> str:
-    """Download GCS object as utf-8 text."""
+    """Download GCS object as utf-8 text. Synchronous — wrap in asyncio.to_thread."""
     from google.cloud import storage as gcs_lib
 
     from app.config import settings

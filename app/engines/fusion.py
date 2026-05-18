@@ -2,28 +2,28 @@
 Fusion engine — combines visual + anchor + semantic signals into
 slide_time_ranges with confidence scores.
 
-Ports MIC's fusion logic. LOCKED weights (audit §6, never tune without
-explicit approval):
+LOCKED weights (audit §6, never tune without explicit approval):
   FUSION_WEIGHT_VISUAL    = 0.5
   FUSION_WEIGHT_ANCHOR    = 0.3
   FUSION_WEIGHT_SEMANTIC  = 0.2
   FUSION_BOUNDARY_THRESHOLD = 0.35
 
-For each slide (1..N), compute its time range from:
-  • Visual change at slide-N transition (frame_task signal)
-  • Confirmed anchor near that boundary (anchor_task hit)
-  • Semantic shift score
-Confidence = weighted sum, clamped to [0,1].
-Soft windows ± SOFT_WINDOW_EXPANSION (5s default) give downstream align
-room to absorb segment ambiguity.
+LOCKED Section 2 signal-gating invariant (closes 🟠 #23):
+  IF visual_change < threshold AND anchor_confirmed == False:
+      semantic signal CANNOT trigger a boundary alone
 
-Closes audit gaps 🔴 #6, #18. Phase 6h / U104-U106.
+LOCKED Section 2 timestamp lock (closes 🟡 #24):
+  Boundary timestamps are rounded to 0.5s precision after fusion — replay
+  reproducibility relies on this.
+
+Phase 7i (parity-3) — closes the 🟠 fusion gaps from the re-audit.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -43,6 +43,8 @@ class AnchorSignal:
     confirmed: bool
     visual_validated: bool
     semantic_score: float
+    phrase: str = ""               # added in #83 for fusion debugging
+    confidence: float = 0.0
 
 
 @dataclass
@@ -72,6 +74,24 @@ class FusionResult:
     output_dump: dict
 
 
+def _round_to_half(t: float) -> float:
+    """Round timestamp to 0.5s precision — locked invariant (#24)."""
+    return round(t * 2) / 2
+
+
+def _signal_gate_passes(
+    visual_change: float,
+    anchor_confirmed: bool,
+    visual_threshold: float,
+) -> bool:
+    """
+    Signal-gating invariant (Section 2):
+      IF visual_change < threshold AND anchor_confirmed == False:
+          semantic CANNOT trigger boundary alone → return False
+    """
+    return not (visual_change < visual_threshold and not anchor_confirmed)
+
+
 def run_fusion(
     session_id: str,
     slide_count: int,
@@ -85,6 +105,8 @@ def run_fusion(
     w_semantic: float = 0.2,
     boundary_threshold: float = 0.35,
     soft_window: float = 5.0,
+    visual_threshold: float = 8.0 / 255.0,
+    anchor_window: float = 5.0,
 ) -> FusionResult:
     """
     Compute slide_time_ranges for `slide_count` slides over `total_duration`.
@@ -94,17 +116,23 @@ def run_fusion(
     if slide_count <= 0 or total_duration <= 0:
         return FusionResult(slide_time_ranges=[], input_hash="", inputs_dump={}, output_dump={})
 
-    # ── Find boundary candidates ─────────────────────────────────────────
-    # Each candidate has a timestamp + weighted-sum score. Sort by score
-    # descending, pick the top N-1 boundaries that beat the threshold and
-    # are at least `min_gap` seconds apart.
+    # Pre-index anchors and semantics for gating logic.
+    anchor_confirmed_times = [
+        a.timestamp for a in anchor_signals if a.confirmed and a.visual_validated
+    ]
+
+    def _anchor_confirmed_near(t: float) -> bool:
+        return any(abs(at - t) <= anchor_window for at in anchor_confirmed_times)
+
     candidates: list[tuple[float, float, dict]] = []  # (score, timestamp, sources)
 
+    # Visual-driven candidates (always allowed — primary signal).
     for v in visual_signals:
         sources = {"visual": v.strength, "anchor": 0.0, "semantic": 0.0}
         score = w_visual * v.strength
         candidates.append((score, v.timestamp, sources))
 
+    # Anchor-driven candidates (only confirmed anchors are usable).
     for a in anchor_signals:
         if not a.confirmed:
             continue
@@ -113,12 +141,22 @@ def run_fusion(
         score = w_anchor * strength + w_semantic * a.semantic_score
         candidates.append((score, a.timestamp, sources))
 
+    # Semantic-driven candidates — GATED by Section 2 invariant.
+    # Semantic alone cannot trigger a boundary unless either visual ≥ threshold
+    # or a confirmed anchor exists nearby.
     for s in semantic_shifts:
+        # Find any nearby visual signal strength.
+        nearby_visual = max(
+            (v.strength for v in visual_signals if abs(v.timestamp - s.timestamp) <= anchor_window),
+            default=0.0,
+        )
+        if not _signal_gate_passes(nearby_visual, _anchor_confirmed_near(s.timestamp), visual_threshold):
+            continue  # gated — semantic cannot trigger alone
         sources = {"visual": 0.0, "anchor": 0.0, "semantic": s.shift_score}
         score = w_semantic * s.shift_score
         candidates.append((score, s.timestamp, sources))
 
-    # Deduplicate candidates within 2-second windows by keeping the highest score.
+    # Deduplicate candidates within 2s windows by keeping the highest score.
     candidates.sort(key=lambda c: -c[0])
     selected: list[tuple[float, float, dict]] = []
     for cand in candidates:
@@ -129,20 +167,28 @@ def run_fusion(
         selected.append(cand)
         if len(selected) >= slide_count - 1:
             break
-
-    # Sort selected by timestamp.
     selected.sort(key=lambda c: c[1])
 
-    # ── Build slide_time_ranges ──────────────────────────────────────────
+    # Lock timestamps to 0.5s precision (Section 2 invariant — #24).
+    locked: list[tuple[float, float, dict]] = []
+    seen_ts: set[float] = set()
+    for score, ts, sources in selected:
+        snapped = _round_to_half(ts)
+        if snapped in seen_ts:
+            continue
+        seen_ts.add(snapped)
+        locked.append((score, snapped, sources))
+    selected = locked
+
     boundaries = [0.0] + [c[1] for c in selected] + [total_duration]
-    # If we under-detected boundaries, pad with proportional ones so we
-    # always produce exactly slide_count ranges.
+    # Pad if under-detected.
     while len(boundaries) - 1 < slide_count:
-        # Insert a proportional boundary at the largest gap.
-        gaps = [(boundaries[i+1] - boundaries[i], i) for i in range(len(boundaries) - 1)]
+        gaps = [(boundaries[i + 1] - boundaries[i], i) for i in range(len(boundaries) - 1)]
         gaps.sort(reverse=True)
         gap, idx = gaps[0]
-        mid = (boundaries[idx] + boundaries[idx + 1]) / 2.0
+        mid = _round_to_half((boundaries[idx] + boundaries[idx + 1]) / 2.0)
+        if mid in boundaries:
+            mid = (boundaries[idx] + boundaries[idx + 1]) / 2.0
         boundaries.insert(idx + 1, mid)
 
     boundaries = sorted(boundaries[:slide_count + 1])
@@ -154,7 +200,6 @@ def run_fusion(
         end = boundaries[i + 1]
         soft_start = max(0.0, start - soft_window)
         soft_end = min(total_duration, end + soft_window)
-        # Confidence: did we have signal evidence for this boundary?
         boundary_score = 0.0
         for c in selected:
             if abs(c[1] - start) < 1.0 or abs(c[1] - end) < 1.0:
@@ -162,18 +207,17 @@ def run_fusion(
         confidence = max(0.3, min(1.0, boundary_score / (w_visual + w_anchor + w_semantic)))
         sources = selected_sources.get(start) or {"visual": 0.0, "anchor": 0.0, "semantic": 0.0}
         slide_ranges.append(SlideTimeRange(
-            slide_id=None,  # caller fills in from slides table
+            slide_id=None,
             slide_number=i,
-            start_time=round(start, 3),
-            end_time=round(end, 3),
-            slide_soft_start=round(soft_start, 3),
-            slide_soft_end=round(soft_end, 3),
+            start_time=_round_to_half(start),
+            end_time=_round_to_half(end),
+            slide_soft_start=_round_to_half(soft_start),
+            slide_soft_end=_round_to_half(soft_end),
             confidence=round(confidence, 3),
             sources=sources,
             status="assigned",
         ))
 
-    # ── Replay log inputs ────────────────────────────────────────────────
     inputs_dump = {
         "session_id":         session_id,
         "slide_count":        slide_count,
@@ -184,6 +228,7 @@ def run_fusion(
         "weights":            {"visual": w_visual, "anchor": w_anchor, "semantic": w_semantic},
         "boundary_threshold": boundary_threshold,
         "soft_window":        soft_window,
+        "visual_threshold":   visual_threshold,
     }
     input_hash = hashlib.sha256(json.dumps(inputs_dump, sort_keys=True).encode()).hexdigest()
     output_dump = {
@@ -203,33 +248,83 @@ def run_fusion(
     )
 
 
+# ─── Fusion pre-aligning gate ────────────────────────────────────────────────
+
+
 class GateFailure(Exception):
     """5-assertion gate failed before fusing → aligning."""
 
 
-def run_fusion_gate(slide_ranges: list[SlideTimeRange], total_duration: float, slide_count: int) -> None:
+def run_fusion_gate(
+    slide_ranges: list[SlideTimeRange],
+    total_duration: float,
+    slide_count: int,
+    segments: Optional[list[dict]] = None,
+) -> None:
     """
-    5 assertions before allowing fusing → aligning:
-      1. slide_ranges count matches slide_count
-      2. Monotonic non-overlapping ranges
-      3. First start_time ≈ 0
-      4. Last end_time ≈ total_duration
-      5. Every confidence in [0, 1]
+    5-assertion gate before fusing → aligning. Ports MIC §8 verbatim (#26):
+      GATE_1 boundary_count   — 2 ≤ count ≤ max(2, len(segments)//10) (when segments given)
+                                else exact match with slide_count
+      GATE_2 spacing_stddev   — boundary spacing stddev < total_duration * 0.5
+      GATE_3 timeline_coverage — every segment falls inside ≥1 soft-window (when segments given)
+      GATE_4 no_overlap        — slide_ranges do not overlap
+      GATE_5 no_gaps_over_1s   — gaps between consecutive slide_ranges ≤ 1s
+
     Raises GateFailure on violation.
     """
-    if len(slide_ranges) != slide_count:
-        raise GateFailure(f"gate: range count={len(slide_ranges)} != slide_count={slide_count}")
-    last_end = -1.0
-    for r in slide_ranges:
-        if r.start_time < last_end - 0.01:
-            raise GateFailure(f"gate: overlap at slide {r.slide_number}")
-        last_end = r.end_time
-    if abs(slide_ranges[0].start_time) > 1.0:
-        raise GateFailure(f"gate: first start={slide_ranges[0].start_time} should be ~0")
-    if abs(slide_ranges[-1].end_time - total_duration) > 5.0:
-        raise GateFailure(
-            f"gate: last end={slide_ranges[-1].end_time} vs total={total_duration}"
-        )
-    for r in slide_ranges:
-        if not (0.0 <= r.confidence <= 1.0):
-            raise GateFailure(f"gate: confidence={r.confidence} out of range at slide {r.slide_number}")
+    boundary_count = len(slide_ranges)
+    seg_count = len(segments) if segments else 0
+
+    # GATE_1
+    if segments:
+        if not (2 <= boundary_count <= max(2, seg_count // 10)):
+            raise GateFailure(
+                f"GATE_1 boundary_count: {boundary_count} not in [2, {max(2, seg_count // 10)}]"
+            )
+    else:
+        if boundary_count != slide_count:
+            raise GateFailure(f"GATE_1 boundary_count: {boundary_count} != slide_count {slide_count}")
+
+    # GATE_2 spacing_stddev
+    if boundary_count >= 2:
+        starts = sorted(r.start_time for r in slide_ranges)
+        spacings = [starts[i + 1] - starts[i] for i in range(len(starts) - 1)]
+        mean = sum(spacings) / len(spacings)
+        variance = sum((s - mean) ** 2 for s in spacings) / len(spacings)
+        stddev = math.sqrt(variance)
+        if stddev >= total_duration * 0.5:
+            raise GateFailure(
+                f"GATE_2 spacing_stddev: {stddev:.2f} ≥ {total_duration * 0.5:.2f}"
+            )
+    else:
+        raise GateFailure(f"GATE_2 spacing_stddev: only {boundary_count} boundary — insufficient")
+
+    # GATE_3 timeline_coverage
+    if segments:
+        covered = 0
+        for seg in segments:
+            mid = (seg["start_time"] + seg["end_time"]) / 2.0
+            for r in slide_ranges:
+                if r.slide_soft_start <= mid <= r.slide_soft_end:
+                    covered += 1
+                    break
+        if covered != seg_count:
+            raise GateFailure(
+                f"GATE_3 timeline_coverage: {covered}/{seg_count} segments inside a window"
+            )
+
+    # GATE_4 no_overlap
+    sorted_ranges = sorted(slide_ranges, key=lambda r: r.start_time)
+    for i in range(len(sorted_ranges) - 1):
+        if sorted_ranges[i].end_time > sorted_ranges[i + 1].start_time + 0.01:
+            raise GateFailure(
+                f"GATE_4 no_overlap: slide {sorted_ranges[i].slide_number} overlaps next"
+            )
+
+    # GATE_5 no_gaps_over_1s
+    for i in range(len(sorted_ranges) - 1):
+        gap = sorted_ranges[i + 1].start_time - sorted_ranges[i].end_time
+        if gap > 1.0:
+            raise GateFailure(
+                f"GATE_5 no_gaps_over_1s: {gap:.2f}s gap after slide {sorted_ranges[i].slide_number}"
+            )

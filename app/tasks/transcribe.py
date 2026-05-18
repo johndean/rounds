@@ -196,6 +196,17 @@ def transcribe_task(self, session_id: str) -> dict:  # noqa: ARG001  (bind=True 
         except Exception as anchor_err:  # noqa: BLE001
             logger.warning(f"transcribe: failed to trigger anchor_task: {anchor_err}")
 
+        # 🟡 #11/#46 — template_autodetect_task fires AFTER STT (audio available).
+        # MIC ordering: autodetect runs against the first 60s of the audio
+        # transcript. Firing pre-STT (as Rounds previously did from ingest)
+        # had no audio downloaded yet, so the stub always returned 0.0 conf.
+        try:
+            from app.tasks.ai_process import template_autodetect_task
+
+            template_autodetect_task.apply_async(args=[session_id], queue="celery")
+        except ImportError:
+            pass
+
         return {"session_id": session_id, "segment_count": len(raw_segments), "word_count": word_count}
 
     except Exception as exc:  # noqa: BLE001

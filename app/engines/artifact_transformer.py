@@ -15,6 +15,7 @@ import logging
 import re
 import zipfile
 from dataclasses import dataclass, field
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -226,48 +227,69 @@ def apply_srt_transform(text: str) -> str:
     return t.strip()
 
 
+class CMSValidationError(Exception):
+    """CMS doc validation gate failed — unresolved markers detected."""
+
+
 def apply_cms_transform(
     text: str,
     polls: list[PollForExport],
     chat: list[ChatForExport],
     resources: list[dict],
+    *,
+    hyperlinks: dict[str, str] | None = None,
+    strict: bool = False,
 ) -> str:
     """
-    CMS macro — produces publish-ready HTML/markdown:
-      • Removes {curly} markers entirely (CMS strips, doesn't keep)
-      • Injects poll blocks after their slide markers
-      • Replaces [pq][timestamp] with chat content
-      • Appends a Resources section
+    CMS macro (#65 + #66 + #69) — 9-step publish-ready transform:
+      1. Strip {curly} content (CMS variant — removes, doesn't keep)
+      2. Whitespace normalize
+      3. Inject poll blocks at slide markers
+      4. Replace [pq][HH:MM:SS] with nearest chat at that timestamp (#69)
+      5. Strip leftover bare [pq] tokens
+      6. Replace inline {{token}} hyperlinks per `hyperlinks` map (#65 step-7)
+      7. Append Resources section
+      8. Final whitespace cleanup
+      9. Validate — reject if any unresolved [X][T=]/curly/slide-marker remain (#66)
     """
     t = text
-    # Strip curly text (CMS variant — content removed)
+    # 1. Strip curly text (CMS variant — content removed)
     t = re.sub(r"\{[^}]*\}", "", t)
-    # Trim trailing spaces per line + collapse blank lines
+    # 2. Whitespace normalize
     t = "\n".join(line.strip() for line in t.split("\n"))
     t = re.sub(r"  +", " ", t)
     t = re.sub(r"\n{3,}", "\n\n", t)
 
-    # Inject polls after their slide markers
+    # 3. Inject polls after their slide markers
     for poll in polls:
         marker = f"++{poll.slide_index + 1}*+"
         block = _format_poll_block(poll)
         t = t.replace(marker, f"{marker}\n\n{block}", 1)
 
-    # Inject chat — for any [pq][t] marker, find the nearest chat by timestamp.
-    # In Rounds today the segmenter doesn't emit [pq] markers; this is a
-    # forward-compat hook. Strip any leftover bare [pq] tokens.
-    for msg in chat:
-        # No timestamp markers in current transcripts — append as a "Chat /
-        # Q&A" block at the end if any chat exists at all (rare).
-        pass
-    if chat:
-        t = t.rstrip() + "\n\n---\n\n**Chat / Q&A**\n\n"
-        for c in chat:
-            ts = _fmt_vtt_time(c.sent_at_ms).split(".")[0]
-            t += f"**{c.author}** ({ts}): {c.body}\n\n"
-    t = re.sub(r"\[pq\](\[[^\]]*\])?\s*", "", t)
+    # 4. Replace [pq][HH:MM:SS] markers with the nearest chat at that timestamp (#69)
+    chat_by_ms = sorted(chat, key=lambda c: c.sent_at_ms or 0)
 
-    # Resources section
+    def _replace_pq(match: re.Match) -> str:
+        ts_str = match.group(1)
+        target_ms = _parse_hhmmss_to_ms(ts_str)
+        if target_ms is None or not chat_by_ms:
+            return ""
+        nearest = min(chat_by_ms, key=lambda c: abs((c.sent_at_ms or 0) - target_ms))
+        ts = _fmt_vtt_time(nearest.sent_at_ms).split(".")[0]
+        return f"**{nearest.author}** ({ts}): {nearest.body}\n\n"
+
+    t = re.sub(r"\[pq\]\[(\d{1,2}:\d{2}(?::\d{2})?)\]\s*", _replace_pq, t)
+
+    # 5. Strip any leftover bare [pq] tokens.
+    t = re.sub(r"\[pq\]\s*", "", t)
+
+    # 6. Hyperlink replacement (#65 step-7) — replace {{token}} per hyperlinks dict.
+    if hyperlinks:
+        for token, url in hyperlinks.items():
+            pattern = r"\{\{\s*" + re.escape(token) + r"\s*\}\}"
+            t = re.sub(pattern, f"[{token}]({url})", t)
+
+    # 7. Resources section
     if resources:
         t = t.rstrip() + "\n\n---\n\n**Resources**\n\n"
         for r in resources:
@@ -280,7 +302,80 @@ def apply_cms_transform(
             else:
                 t += f"- {prefix}{label}\n"
 
-    return t.strip()
+    # 8. Final whitespace cleanup
+    t = re.sub(r"\n{3,}", "\n\n", t).strip()
+
+    # 9. Validate — reject unresolved markers (#66)
+    if strict:
+        _validate_cms_doc(t)
+
+    return t
+
+
+def _parse_hhmmss_to_ms(ts: str) -> Optional[int]:
+    """Parse 'HH:MM:SS' or 'MM:SS' to ms. Returns None on malformed input."""
+    parts = ts.split(":")
+    try:
+        if len(parts) == 3:
+            h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+            return (h * 3600 + m * 60 + s) * 1000
+        if len(parts) == 2:
+            m, s = int(parts[0]), int(parts[1])
+            return (m * 60 + s) * 1000
+    except ValueError:
+        return None
+    return None
+
+
+_UNRESOLVED_PATTERNS = [
+    re.compile(r"\[X\]"),                         # editor placeholder
+    re.compile(r"\[T=[^\]]*\]"),                  # unresolved timestamp token
+    re.compile(r"\{[^}]+\}"),                     # leftover curly
+    re.compile(r"\{\{[^}]+\}\}"),                 # unreplaced hyperlink token
+    re.compile(r"\[pq\](?:\[[^\]]*\])?"),         # any leftover pq marker
+]
+
+
+def _validate_cms_doc(text: str) -> None:
+    """
+    Reject CMS doc that still contains unresolved medical-review markers
+    or formatting placeholders. Closes 🟠 #66.
+    """
+    failures: list[str] = []
+    for pattern in _UNRESOLVED_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            failures.append(f"unresolved marker `{match.group(0)}` at index {match.start()}")
+    if failures:
+        raise CMSValidationError("; ".join(failures))
+
+
+# ─── Caption-line validator ─────────────────────────────────────────────────
+
+
+def validate_final_srt(srt_bytes: bytes, *, max_line_chars: int = 42) -> None:
+    """
+    DCMP caption compliance check (#67) — line length ≤42 chars, no HTML, no
+    markers, no curly braces. Raises CMSValidationError on violation.
+    """
+    text = srt_bytes.decode("utf-8") if isinstance(srt_bytes, (bytes, bytearray)) else str(srt_bytes)
+    failures: list[str] = []
+    for i, line in enumerate(text.splitlines(), start=1):
+        if re.match(r"^\d+$", line.strip()):
+            continue  # cue number
+        if "-->" in line:
+            continue  # timestamp line
+        if "<" in line and ">" in line:
+            failures.append(f"line {i}: contains HTML tag")
+        if "{" in line or "}" in line:
+            failures.append(f"line {i}: contains curly marker")
+        if "[pq]" in line.lower() or "[x]" in line.lower() or "[t=" in line.lower():
+            failures.append(f"line {i}: contains unresolved marker")
+        stripped = line.strip()
+        if stripped and len(stripped) > max_line_chars:
+            failures.append(f"line {i}: {len(stripped)} chars exceeds {max_line_chars}")
+    if failures:
+        raise CMSValidationError("validate_final_srt: " + "; ".join(failures[:8]))
 
 
 def _format_poll_block(poll: PollForExport) -> str:
@@ -299,7 +394,12 @@ def to_cms_html(session: SessionForExport) -> bytes:
     Slide markers become <h2>, speaker labels stay as bold prefixes.
     """
     marked = _build_marked_transcript(session)
-    cms = apply_cms_transform(marked, session.polls, session.chat, session.resources)
+    # Publish path — enforce validation gate (#66). Unresolved markers raise CMSValidationError.
+    cms = apply_cms_transform(
+        marked, session.polls, session.chat, session.resources,
+        hyperlinks=getattr(session, "hyperlinks", None),
+        strict=True,
+    )
 
     # Convert markdown-ish constructs to inline HTML.
     html_lines = ["<!doctype html>",

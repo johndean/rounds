@@ -205,6 +205,18 @@ def slide_extract_task(self, session_id: str) -> dict:
             total_bullets += bullets_written
             slide_index_cursor += slides_written
 
+        # 🟡 #7 — emit final metrics_update so the ProcessingView diagnostic
+        # row shows the canonical slides_total count after extraction completes.
+        try:
+            from app.engines.ws_bridge import publish_ws_event_sync
+            publish_ws_event_sync(session_id, {
+                "type":         "metrics_update",
+                "slides_total": total_slides,
+                "bullets":      total_bullets,
+            })
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"slide_extract: WS metrics_update emit failed: {e}")
+
         logger.info(
             f"slide_extract: session={session_id} slides={total_slides} bullets={total_bullets}"
         )

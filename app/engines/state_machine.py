@@ -49,16 +49,29 @@ TERMINAL_STATES = {"failed", "complete"}
 def _append_log_entry(
     conn, session_id: str, prev: str, new: str,
     actor: Optional[str] = None, reason: Optional[str] = None,
+    stage_metadata: Optional[dict] = None,
 ) -> None:
-    """Append one entry to session_audit.processing_log (JSONB array)."""
+    """
+    Append one entry to session_audit.processing_log (JSONB array).
+    Shape matches MIC §10 — {stage, status, started_at, completed_at, metadata}.
+    """
     from sqlalchemy import text
 
+    now = datetime.now(timezone.utc).isoformat()
+    status = "running"
+    completed_at: Optional[str] = None
+    if new in ("ready", "failed", "complete"):
+        status = "completed" if new in ("ready", "complete") else "failed"
+        completed_at = now
+
     entry = {
-        "ts":    datetime.now(timezone.utc).isoformat(),
-        "prev":  prev,
-        "next":  new,
-        "actor": actor,
-        "reason": reason,
+        "stage":        new,
+        "status":       status,
+        "started_at":   now,
+        "completed_at": completed_at,
+        "actor":        actor,
+        "reason":       reason,
+        "metadata":     stage_metadata or {},
     }
     conn.execute(
         text(
@@ -72,16 +85,21 @@ def _append_log_entry(
         ),
         {"sid": session_id, "entry": json.dumps([entry])},
     )
+    if new == "ready":
+        conn.execute(
+            text("UPDATE session_audit SET finalized_at = now() WHERE session_id = CAST(:sid AS uuid)"),
+            {"sid": session_id},
+        )
 
 
 def _emit_ws(session_id: str, prev: str, new: str) -> None:
-    """Emit processing_update WS event. No-op until ws_bridge ships in 6n."""
+    """Emit processing_update WS event. Shape matches MIC §10."""
     try:
         from app.engines.ws_bridge import publish_ws_event_sync  # type: ignore
 
         publish_ws_event_sync(
             session_id,
-            {"type": "processing_update", "prev": prev, "next": new},
+            {"type": "processing_update", "stage": new, "progress": 0},
         )
     except ImportError:
         # 6n not yet shipped — silent no-op.
@@ -187,13 +205,21 @@ async def transition_session(
         text("UPDATE sessions SET status = :new, updated_at = now() WHERE id = CAST(:sid AS uuid)"),
         {"new": new_status, "sid": session_id},
     )
-    # Append audit entry — same JSONB merge pattern as sync.
+    # Append audit entry — same JSONB merge pattern as sync (MIC §10 shape).
+    now_iso = datetime.now(timezone.utc).isoformat()
+    status = "running"
+    completed_at: Optional[str] = None
+    if new_status in ("ready", "failed", "complete"):
+        status = "completed" if new_status in ("ready", "complete") else "failed"
+        completed_at = now_iso
     entry = {
-        "ts":    datetime.now(timezone.utc).isoformat(),
-        "prev":  current,
-        "next":  new_status,
-        "actor": actor,
-        "reason": reason,
+        "stage":        new_status,
+        "status":       status,
+        "started_at":   now_iso,
+        "completed_at": completed_at,
+        "actor":        actor,
+        "reason":       reason,
+        "metadata":     {},
     }
     await db.execute(
         text(
@@ -207,6 +233,11 @@ async def transition_session(
         ),
         {"sid": session_id, "entry": json.dumps([entry])},
     )
+    if new_status == "ready":
+        await db.execute(
+            text("UPDATE session_audit SET finalized_at = now() WHERE session_id = CAST(:sid AS uuid)"),
+            {"sid": session_id},
+        )
 
     _emit_ws(session_id, current, new_status)
     logger.info(f"state: {session_id} {current} → {new_status} (actor={actor})")

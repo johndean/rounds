@@ -102,56 +102,44 @@ def _merge_rule2(groups: list[list[WordToken]]) -> list[list[WordToken]]:
 
 
 def _split_rule3(groups: list[list[WordToken]]) -> list[list[WordToken]]:
-    """Split any segment longer than MAX_SEGMENT_DURATION at the largest internal gap."""
-    out: list[list[WordToken]] = []
+    """
+    Split any segment longer than MAX_SEGMENT_DURATION at word-count midpoint.
+    Recursive for very long segments — matches MIC verbatim (#14 fix).
+    """
+    result: list[list[WordToken]] = []
     for g in groups:
         if not g:
             continue
-        duration = g[-1].end_time - g[0].start_time
-        if duration <= MAX_SEGMENT_DURATION:
-            out.append(g)
+        dur = g[-1].end_time - g[0].start_time
+        if dur <= MAX_SEGMENT_DURATION:
+            result.append(g)
             continue
-        # Find the largest internal gap and split there. Repeat until all sub-segments
-        # are within the cap.
-        stack = [g]
-        while stack:
-            grp = stack.pop()
-            dur = grp[-1].end_time - grp[0].start_time
-            if dur <= MAX_SEGMENT_DURATION or len(grp) < 2:
-                out.append(grp)
-                continue
-            # find max-gap index
-            max_gap = -1.0
-            max_idx = -1
-            for i in range(1, len(grp)):
-                gap = grp[i].start_time - grp[i - 1].end_time
-                if gap > max_gap:
-                    max_gap = gap
-                    max_idx = i
-            if max_idx < 1:
-                out.append(grp)
-                continue
-            left = grp[:max_idx]
-            right = grp[max_idx:]
-            stack.append(right)
-            stack.append(left)
-    return out
+        # Split at midpoint by word count (MIC ordering for byte-identical segment IDs).
+        mid = max(1, len(g) // 2)
+        result.append(g[:mid])
+        remainder = g[mid:]
+        # Recursive for very long segments
+        if remainder:
+            result.extend(_split_rule3([remainder]))
+    return result
 
 
 def segment_words(session_id: str, words: list[WordToken]) -> list[RawSegment]:
     """
-    Apply rules 1→4→2→3 (order chosen to match MIC) and return RawSegments
-    with content-deterministic SHA256 IDs.
+    Apply rules 1→2→3→4 in MIC's locked order and return RawSegments with
+    content-deterministic SHA256 IDs. Rule order matters: segment IDs are
+    SHA256(session_id + start_ms), so reordering rules changes start_ms and
+    therefore changes IDs. Locked to MIC (#13 fix).
     """
     if not words:
         return []
     g1 = _split_rule1(words)
-    g4 = _split_rule4(g1)
-    g2 = _merge_rule2(g4)
+    g2 = _merge_rule2(g1)
     g3 = _split_rule3(g2)
+    g4 = _split_rule4(g3)
 
     out: list[RawSegment] = []
-    for group in g3:
+    for group in g4:
         if not group:
             continue
         text = " ".join(w.word for w in group).strip()

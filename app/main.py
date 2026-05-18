@@ -89,6 +89,28 @@ from app.middleware.idempotency import IdempotencyMiddleware  # noqa: E402
 
 app.add_middleware(IdempotencyMiddleware)
 
+# Response envelope middleware — wraps every JSON response in
+# {success, data, error, meta} (MIC §9.1 locked invariant).
+# Mounted BELOW request_id so envelope.meta.request_id can read it.
+# Phase 7i / parity-3.
+from app.middleware.envelope import EnvelopeMiddleware, MICException  # noqa: E402
+
+app.add_middleware(EnvelopeMiddleware)
+
+
+@app.exception_handler(MICException)
+async def _mic_exception_handler(_request, exc: MICException):
+    from app.middleware.envelope import error_response
+    return error_response(
+        code=exc.code,
+        message=exc.message,
+        http_status=exc.http_status,
+        details=exc.details,
+        retryable=exc.retryable,
+        request_id=getattr(_request.state, "request_id", None),
+    )
+
+
 # Request-ID middleware — outermost so x-request-id appears on every response.
 # Phase 7h.
 from app.middleware.request_id import RequestIdMiddleware  # noqa: E402
