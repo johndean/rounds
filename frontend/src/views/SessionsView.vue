@@ -1,21 +1,28 @@
 <script setup lang="ts">
 /**
  * Sessions list — /sessions
- * Faithful 1:1 port of docs/port-source/sessions.jsx (184 LOC).
- * Same .sessions-table classes, .filter-chip-row, .kpi-row, .toolbar.
- * ?stage / ?ai / ?f query params honored.
+ *
+ * Wired to GET /v1/sessions. DOM structure matches React sessions.jsx
+ * (.page, .page-eyebrow, .kpi-row, .toolbar, .filter-chip-row,
+ * .sessions-table). Fixture import removed — fetches live rows; empty
+ * state when no session has been uploaded yet.
  */
-import { computed, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import Icon from '@/components/shared/Icon.vue';
 import StageBadge from '@/components/shared/StageBadge.vue';
-import { SESSIONS } from '@/fixtures/sessions';
-import { SOP_STAGES, SOP_STAGE_BY_ID } from '@/fixtures/sop_stages';
+import { sessions as sessionsApi, type SessionSummary } from '@/services/api';
+import { SOP_STAGE_BY_ID } from '@/fixtures/sop_stages';
 import { toast } from '@/composables/useToast';
 import { confirm } from '@/composables/useConfirm';
+import { ApiError } from '@/services/http';
 
 const router = useRouter();
 const route = useRoute();
+
+const sessions = ref<SessionSummary[]>([]);
+const loading = ref(true);
+const error = ref<string | null>(null);
 
 const query = ref('');
 const sortBy = ref('updated');
@@ -23,35 +30,42 @@ const activeFilter = ref<string>((route.query.f as string) ?? 'all');
 const stageFilter = ref<string | null>((route.query.stage as string) ?? null);
 const aiFilter = ref<string | null>((route.query.ai as string) ?? null);
 
-// Re-sync on hash change (pipeline-circle click on Dashboard, etc.)
+async function load(): Promise<void> {
+  loading.value = true;
+  error.value = null;
+  try {
+    sessions.value = await sessionsApi.list({
+      stage: stageFilter.value ?? undefined,
+      ai: aiFilter.value ?? undefined,
+      f: query.value || undefined,
+    });
+  } catch (e) {
+    error.value = e instanceof ApiError ? `${e.status}: ${e.message}` : e instanceof Error ? e.message : 'Failed to load';
+  } finally {
+    loading.value = false;
+  }
+}
+
+onMounted(load);
+
 watch(
   () => [route.query.stage, route.query.ai, route.query.f],
   ([s, a, f]) => {
-    if (s) stageFilter.value = s as string; else stageFilter.value = null;
-    if (a) aiFilter.value = a as string; else aiFilter.value = null;
+    stageFilter.value = (s as string) || null;
+    aiFilter.value = (a as string) || null;
     if (f) activeFilter.value = f as string;
-    if (!s && !a && !f) { stageFilter.value = null; aiFilter.value = null; }
+    void load();
   },
 );
 
-const sessions = SESSIONS;
-
-const filtered = computed(() => {
-  let rows = [...sessions];
-  if (stageFilter.value) rows = rows.filter(s => s.stage === stageFilter.value);
-  if (aiFilter.value) {
-    rows = rows.filter(s => {
-      const inferred = s.status === 'processing' ? 'transcribe' : s.status === 'complete' ? 'ready' : 'ready';
-      return inferred === aiFilter.value;
-    });
-  }
-  if (activeFilter.value === 'active')     rows = rows.filter(s => s.status === 'active');
-  if (activeFilter.value === 'processing') rows = rows.filter(s => s.status === 'processing');
-  if (activeFilter.value === 'complete')   rows = rows.filter(s => s.status === 'complete');
-  if (activeFilter.value === 'needs')      rows = rows.filter(s => s.needsReviewCount > 0);
+const filtered = computed<SessionSummary[]>(() => {
+  let rows = [...sessions.value];
+  if (activeFilter.value === 'active')     rows = rows.filter(s => s.status === 'ready' || s.status === 'ingesting');
+  if (activeFilter.value === 'processing') rows = rows.filter(s => s.status === 'ingesting');
+  if (activeFilter.value === 'complete')   rows = rows.filter(s => s.status === 'complete' || s.status === 'archived');
   if (query.value) {
     const q = query.value.toLowerCase();
-    rows = rows.filter(s => s.title.toLowerCase().includes(q) || s.presenter.toLowerCase().includes(q));
+    rows = rows.filter(s => s.title.toLowerCase().includes(q) || (s.presenter || '').toLowerCase().includes(q));
   }
   return rows;
 });
@@ -65,45 +79,39 @@ function clearStageOrAi(): void {
 }
 
 const filters = computed(() => [
-  { id: 'all',        label: 'All',          count: sessions.length },
-  { id: 'active',     label: 'In Workflow',  count: sessions.filter(s => s.status === 'active').length },
-  { id: 'needs',      label: 'Needs Review', count: sessions.filter(s => s.needsReviewCount > 0).length },
-  { id: 'processing', label: 'Processing',   count: sessions.filter(s => s.status === 'processing').length },
-  { id: 'complete',   label: 'Published',    count: sessions.filter(s => s.status === 'complete').length },
+  { id: 'all',        label: 'All',          count: sessions.value.length },
+  { id: 'active',     label: 'In Workflow',  count: sessions.value.filter(s => s.status === 'ready' || s.status === 'ingesting').length },
+  { id: 'processing', label: 'Processing',   count: sessions.value.filter(s => s.status === 'ingesting').length },
+  { id: 'complete',   label: 'Published',    count: sessions.value.filter(s => s.status === 'complete').length },
 ]);
 
-function aiStatusFor(s: typeof SESSIONS[number]): { label: string; chip: string } {
-  if (s.status === 'processing') return { label: 'Processing', chip: 'amber' };
-  if (s.status === 'complete')   return { label: 'Published',  chip: 'green' };
+function aiStatusFor(s: SessionSummary): { label: string; chip: string } {
+  if (s.status === 'ingesting') return { label: 'Processing', chip: 'amber' };
+  if (s.status === 'complete')  return { label: 'Published',  chip: 'green' };
+  if (s.status === 'failed')    return { label: 'Failed',     chip: 'red'   };
   return { label: 'Ready', chip: 'green' };
 }
 
-function routeFor(s: typeof SESSIONS[number]): string {
-  return s.status === 'processing' ? `/p/${s.id}` : `/s/${s.id}`;
+function routeFor(s: SessionSummary): string {
+  return s.status === 'ingesting' ? `/p/${s.id}` : `/s/${s.id}`;
 }
 
 function exportCsv(): void {
   toast.push('Sessions CSV download started', { tone: 'success' });
 }
 
-async function deleteRow(s: typeof SESSIONS[number], e: Event): Promise<void> {
+async function deleteRow(s: SessionSummary, e: Event): Promise<void> {
   e.stopPropagation();
   const ok = await confirm.open({
     title: `Delete ${s.code}?`,
-    body: `This will mark the session as deleted. It can be restored from Settings → Deleted Sessions for 30 days.`,
+    body: 'This will mark the session as deleted. Recoverable from Settings → Deleted Sessions for 30 days.',
     danger: true,
     confirmLabel: 'Delete',
   });
-  if (ok) toast.push(`Deleted ${s.code}`, { tone: 'success' });
+  if (!ok) return;
+  toast.push(`Deleted ${s.code} (mock — DELETE endpoint pending)`, { tone: 'success' });
+  await load();
 }
-
-function formatRecorded(d: string): string {
-  // 2026-05-14 → "05-14" then "05 · 14"
-  return d.replace(/^\d{4}-/, '').replace(/-/, ' · ');
-}
-
-// Silence unused
-void SOP_STAGES;
 </script>
 
 <template>
@@ -126,34 +134,29 @@ void SOP_STAGES;
       </div>
     </div>
 
-    <!-- KPI strip -->
     <div class="kpi-row" :style="{ marginTop: '18px' }">
       <div class="kpi">
         <div class="kpi__label">In Workflow</div>
-        <div class="kpi__value">{{ sessions.filter(s => s.status === 'active').length }}</div>
-        <div class="kpi__delta">▲ 2 since last week</div>
+        <div class="kpi__value">{{ sessions.filter(s => s.status === 'ready' || s.status === 'ingesting').length }}</div>
       </div>
       <div class="kpi">
-        <div class="kpi__label">Awaiting Medical Review</div>
-        <div class="kpi__value">{{ sessions.filter(s => s.stage === 'medical').length }}</div>
-        <div class="kpi__delta kpi__delta--down">▼ 1 since yesterday</div>
+        <div class="kpi__label">Processing</div>
+        <div class="kpi__value">{{ sessions.filter(s => s.status === 'ingesting').length }}</div>
       </div>
       <div class="kpi">
-        <div class="kpi__label">Open Discrepancies</div>
-        <div class="kpi__value">42</div>
-        <div class="kpi__delta kpi__delta--down">▼ 11 since this morning</div>
+        <div class="kpi__label">Published</div>
+        <div class="kpi__value">{{ sessions.filter(s => s.status === 'complete').length }}</div>
       </div>
       <div class="kpi">
-        <div class="kpi__label">Published this Month</div>
-        <div class="kpi__value">14</div>
-        <div class="kpi__delta">▲ 3 vs Apr</div>
+        <div class="kpi__label">Total</div>
+        <div class="kpi__value">{{ sessions.length }}</div>
       </div>
     </div>
 
     <div class="toolbar">
       <div class="search">
         <Icon name="search" />
-        <input v-model="query" placeholder="Search by title or presenter…" />
+        <input v-model="query" placeholder="Search by title or presenter…" @keyup.enter="load" />
       </div>
       <div class="filter-chip-row">
         <span
@@ -182,9 +185,8 @@ void SOP_STAGES;
         Sort
         <select v-model="sortBy" class="btn btn--secondary btn--sm" :style="{ paddingRight: '24px' }">
           <option value="updated">Last updated</option>
-          <option value="recorded">Recorded date</option>
-          <option value="stage">Stage</option>
-          <option value="attendees">Attendees</option>
+          <option value="code">Code</option>
+          <option value="title">Title</option>
         </select>
       </div>
     </div>
@@ -196,7 +198,7 @@ void SOP_STAGES;
         <div>AI Status</div>
         <div>SOP</div>
         <div>Segs</div>
-        <div>Created</div>
+        <div>Words</div>
         <div></div>
       </div>
       <div
@@ -209,16 +211,16 @@ void SOP_STAGES;
         <div class="sessions-table__code">{{ s.code || s.id }}</div>
         <div>
           <div class="sessions-table__title">{{ s.title }}</div>
-          <div class="sessions-table__sub">{{ (s.code || s.id) + (s.status === 'processing' ? '_audio.mp3' : '_trim.mp3') }}</div>
+          <div class="sessions-table__sub">{{ s.presenter || '—' }}</div>
         </div>
         <div>
           <span :class="['chip', `chip--${aiStatusFor(s).chip}`]">
             <span class="chip__dot" /> {{ aiStatusFor(s).label }}
           </span>
         </div>
-        <div><StageBadge :id="s.stage" /></div>
-        <div class="sessions-table__meta" :style="{ fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: 'var(--fg1)' }">{{ s.segs || 0 }}</div>
-        <div class="sessions-table__updated">{{ formatRecorded(s.recorded) }}</div>
+        <div><StageBadge id="prep" /></div>
+        <div class="sessions-table__meta" :style="{ fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: 'var(--fg1)' }">{{ s.segment_count || 0 }}</div>
+        <div class="sessions-table__updated" :style="{ fontVariantNumeric: 'tabular-nums' }">{{ s.word_count || 0 }}</div>
         <div :style="{ textAlign: 'right' }">
           <button
             class="btn btn--ghost btn--icon btn--sm"
@@ -230,8 +232,14 @@ void SOP_STAGES;
           </button>
         </div>
       </div>
-      <div v-if="filtered.length === 0" :style="{ padding: '36px', textAlign: 'center', color: 'var(--fg2)' }">
-        No sessions match this filter.
+      <div v-if="loading" :style="{ padding: '36px', textAlign: 'center', color: 'var(--fg2)' }">Loading sessions…</div>
+      <div v-else-if="error" :style="{ padding: '36px', textAlign: 'center', color: 'var(--color-red)' }">{{ error }}</div>
+      <div v-else-if="filtered.length === 0" :style="{ padding: '36px', textAlign: 'center', color: 'var(--fg2)' }">
+        <template v-if="sessions.length === 0">
+          No sessions yet —
+          <button class="btn btn--ghost btn--sm" :style="{ marginLeft: '6px' }" @click="router.push('/upload')">upload one</button>
+        </template>
+        <template v-else>No sessions match this filter.</template>
       </div>
     </div>
   </main>

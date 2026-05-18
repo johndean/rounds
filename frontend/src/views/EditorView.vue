@@ -1,11 +1,19 @@
 <script setup lang="ts">
 /**
- * EditorView — verbatim port of editor.jsx::EditorRoute (972-1552).
+ * EditorView — same DOM as React editor.jsx::EditorRoute.
  *
- * 3-column resizable layout, 4 tabs (AI · STT · Discrepancies · Audit),
- * mini SOP stepper, flagged filter row, slide rail (focus/filter), karaoke
- * playhead from a rAF loop, persisted column widths and slide-rail mode,
- * inline anchor placement (chat + polls drop on segments), status bar.
+ * Wired to the live backend:
+ *   GET /v1/sessions/{id}              — session shell
+ *   GET /v1/sessions/{id}/segments     — AI transcript segments
+ *   GET /v1/sessions/{id}/slides       — slide deck
+ *   GET /v1/sessions/{id}/chat         — chat anchors
+ *   GET /v1/sessions/{id}/polls        — poll anchors
+ *   GET /v1/sessions/{id}/discrepancies — STT-vs-base diffs
+ *   GET /v1/audit/sessions/{id}/corrections — append-only ledger
+ *
+ * Empty state until the ingest pipeline (Phase 6) produces rows. The 3-column
+ * layout, slide rail, transcript pane, STT pane, discrepancies pane, audit
+ * pane, and right-rail tabs all render their empty-state copy gracefully.
  */
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { RouterLink, useRouter } from 'vue-router';
@@ -23,10 +31,10 @@ import AdminTab from '@/components/editor/AdminTab.vue';
 import ChatTab from '@/components/editor/ChatTab.vue';
 import PollsTab from '@/components/editor/PollsTab.vue';
 import DownloadMenu from '@/components/editor/DownloadMenu.vue';
-import { SESSIONS } from '@/fixtures/sessions';
-import { SLIDES, SEGMENTS, TOTAL_DURATION, type Segment } from '@/fixtures/transcript';
-import { CHAT, POLLS } from '@/fixtures/chat_polls';
-import { DISCREPANCIES, CORRECTIONS } from '@/fixtures/audit';
+import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, type SessionSummary } from '@/services/api';
+import { http } from '@/services/http';
+import type { Segment, Slide } from '@/fixtures/transcript';
+import type { ChatMessage, Poll } from '@/fixtures/chat_polls';
 import { SOP_STAGES } from '@/fixtures/sop_stages';
 import { toast } from '@/composables/useToast';
 import { modal } from '@/composables/useModal';
@@ -36,25 +44,82 @@ type TabId = 'ai' | 'stt' | 'disc' | 'audit';
 type RightTabId = 'admin' | 'chat' | 'polls';
 
 const props = defineProps<{ id: string; initialTab?: TabId }>();
-
 const router = useRouter();
-const session = computed(() => SESSIONS.find((s) => s.id === props.id) || SESSIONS[0]!);
 
+// ── Data refs (empty until backend populates) ─────────────────────────
+const session = ref<SessionSummary | null>(null);
+const SLIDES = ref<Slide[]>([]);
+const SEGMENTS = ref<Segment[]>([]);
+const CHAT = ref<ChatMessage[]>([]);
+const POLLS = ref<Poll[]>([]);
+const DISCREPANCIES = ref<Array<{ kind: string; meaningful: boolean; status: string }>>([]);
+const CORRECTIONS = ref<Array<{ id: string; t: string; type: string; actor: string; seg: string; prior?: string | null; next?: string | null; note?: string | null }>>([]);
+const loading = ref(true);
+
+const TOTAL_DURATION = computed(() => session.value?.duration_sec ?? 0);
+const sessionCode = computed(() => session.value?.code || props.id);
+const sessionStage = computed(() => 'prep'); // until /sop wiring lands per-editor
+
+async function load(): Promise<void> {
+  loading.value = true;
+  try {
+    const [s, sg, sl, ch, po, di, co] = await Promise.all([
+      sessionsApi.get(props.id).catch(() => null),
+      segmentsApi.list(props.id).catch(() => []),
+      http<Slide[]>(`/v1/sessions/${encodeURIComponent(props.id)}/slides`).catch(() => []),
+      http<ChatMessage[]>(`/v1/sessions/${encodeURIComponent(props.id)}/chat`).catch(() => []),
+      http<Poll[]>(`/v1/sessions/${encodeURIComponent(props.id)}/polls`).catch(() => []),
+      http<Array<{ kind: string; meaningful: boolean; status: string }>>(`/v1/sessions/${encodeURIComponent(props.id)}/discrepancies`).catch(() => []),
+      auditApi.corrections(props.id).catch(() => []),
+    ]);
+    session.value = s;
+    // Adapt API segment shape (start_ms/end_ms/flags[]) → editor Segment shape.
+    SEGMENTS.value = (sg as Array<{ id: string; seq: number; start_ms: number; end_ms: number; text: string; confidence: number | null; flags: string[]; slide_id: string | null; speaker_id: string | null }>).map((row, i): Segment => ({
+      id: row.id,
+      idx: typeof row.seq === 'number' ? row.seq : i,
+      start: (row.start_ms ?? 0) / 1000,
+      end: (row.end_ms ?? 0) / 1000,
+      speaker: 'presenter',
+      slide_id: row.slide_id,
+      text: row.text || '',
+      ai_flags: (row.flags || []).map((kind) => ({ w: 0, kind: kind as 'drift' | 'uncertain' | 'low_confidence' })),
+      needs_review: (row.flags || []).length > 0,
+      has_user_override: false,
+      confidence: typeof row.confidence === 'number' && row.confidence < 0.75 ? 'low' : 'normal',
+      corrections: [],
+    }));
+    SLIDES.value = (sl as Array<{ id: string; slide_index: number; title: string | null }>).map((row): Slide => ({
+      id: row.id,
+      n: row.slide_index + 1,
+      title: row.title || '',
+      kind: 'data',
+    }));
+    CHAT.value = ch as ChatMessage[];
+    POLLS.value = po as Poll[];
+    DISCREPANCIES.value = di as Array<{ kind: string; meaningful: boolean; status: string }>;
+    CORRECTIONS.value = co as Array<{ id: string; t: string; type: string; actor: string; seg: string; prior?: string | null; next?: string | null; note?: string | null }>;
+  } finally {
+    loading.value = false;
+  }
+}
+onMounted(load);
+
+// ── Derived maps + computeds ─────────────────────────────────────────
 const segmentsById = computed<Map<string, Segment>>(() => {
   const m = new Map<string, Segment>();
-  SEGMENTS.forEach((s) => m.set(s.id, s));
+  SEGMENTS.value.forEach((s) => m.set(s.id, s));
   return m;
 });
 const segmentsBySlide = computed<Map<string, Segment[]>>(() => {
   const m = new Map<string, Segment[]>();
-  SLIDES.forEach((sl) => m.set(sl.id, []));
-  SEGMENTS.forEach((s) => { if (s.slide_id) m.get(s.slide_id)?.push(s); });
+  SLIDES.value.forEach((sl) => m.set(sl.id, []));
+  SEGMENTS.value.forEach((s) => { if (s.slide_id) m.get(s.slide_id)?.push(s); });
   return m;
 });
 
 const time = ref<number>((() => {
   const v = parseFloat(localStorage.getItem(`mic_playback_${props.id}`) ?? '');
-  return isNaN(v) ? 198 : v;
+  return isNaN(v) ? 0 : v;
 })());
 const playing = ref(false);
 const rate = ref(1);
@@ -74,7 +139,7 @@ watch(playing, (p) => {
     const dt = (now - lastTick) / 1000;
     lastTick = now;
     const next = time.value + dt * rate.value;
-    if (next >= TOTAL_DURATION) { time.value = TOTAL_DURATION; playing.value = false; return; }
+    if (next >= TOTAL_DURATION.value) { time.value = TOTAL_DURATION.value; playing.value = false; return; }
     time.value = next;
     rafId = requestAnimationFrame(step);
   };
@@ -84,10 +149,11 @@ watch(playing, (p) => {
 onUnmounted(() => { cancelAnimationFrame(rafId); });
 
 const activeSegment = computed<Segment | undefined>(() => {
-  for (let i = 0; i < SEGMENTS.length; i++) {
-    if (time.value >= SEGMENTS[i]!.start && time.value < SEGMENTS[i]!.end + 0.25) return SEGMENTS[i];
+  const segs = SEGMENTS.value;
+  for (let i = 0; i < segs.length; i++) {
+    if (time.value >= segs[i]!.start && time.value < segs[i]!.end + 0.25) return segs[i];
   }
-  return SEGMENTS[SEGMENTS.length - 1];
+  return segs[segs.length - 1];
 });
 
 const activeWordIdx = computed(() => {
@@ -95,12 +161,13 @@ const activeWordIdx = computed(() => {
   if (!seg) return -1;
   const dur = Math.max(0.1, seg.end - seg.start);
   const wordCount = seg.text.split(/\s+/).filter(Boolean).length;
+  if (wordCount === 0) return -1;
   const t = Math.max(0, Math.min(dur, time.value - seg.start));
   const idx = Math.floor((t / dur) * wordCount);
   return Math.min(wordCount - 1, Math.max(0, idx));
 });
 
-const activeSlide = computed(() => SLIDES.find((sl) => sl.id === activeSegment.value?.slide_id));
+const activeSlide = computed(() => SLIDES.value.find((sl) => sl.id === activeSegment.value?.slide_id));
 
 const tab = ref<TabId>(props.initialTab || 'ai');
 const rightTab = ref<RightTabId>('chat');
@@ -111,6 +178,8 @@ watch(slideRailMode, (m) => localStorage.setItem('mic_slide_click_mode', m));
 
 const focusedSlideId = ref<string | null>(null);
 const activeSlideCollapsed = ref(false);
+// F2 closure — switching tabs clears the slide focus (matches React behavior)
+watch(tab, () => { focusedSlideId.value = null; });
 
 const leftW  = ref<number>(parseInt(localStorage.getItem('mic_left_w')  || '320') || 320);
 const rightW = ref<number>(parseInt(localStorage.getItem('mic_right_w') || '360') || 360);
@@ -148,30 +217,19 @@ const gridStyle = computed(() => ({
   gridTemplateColumns: `${leftW.value}px 6px minmax(0, 1fr) 6px ${rightW.value}px`,
 }));
 
-const initialPlacements: Record<string, string | null> = (() => {
-  const m: Record<string, string | null> = {};
-  CHAT.forEach((c) => { m[c.id] = c.placed ? c.anchor : null; });
-  POLLS.forEach((p) => { m[p.id] = p.placed ? p.anchor : null; });
-  return m;
-})();
-const placements = ref<Record<string, string | null>>({ ...initialPlacements });
+const placements = ref<Record<string, string | null>>({});
 
-interface AnchorEntry {
-  id: string;
-  kind: 'chat' | 'poll';
-  t: number;
-  [k: string]: unknown;
-}
+interface AnchorEntry { id: string; kind: 'chat' | 'poll'; t: number; [k: string]: unknown }
 
 const anchorsBySegment = computed<Map<string, AnchorEntry[]>>(() => {
   const m = new Map<string, AnchorEntry[]>();
-  CHAT.forEach((c) => {
+  CHAT.value.forEach((c) => {
     const segId = placements.value[c.id];
     if (!segId) return;
     if (!m.has(segId)) m.set(segId, []);
     m.get(segId)!.push({ ...c, kind: 'chat' });
   });
-  POLLS.forEach((p) => {
+  POLLS.value.forEach((p) => {
     const segId = placements.value[p.id];
     if (!segId) return;
     if (!m.has(segId)) m.set(segId, []);
@@ -207,19 +265,21 @@ function onWordClick(segId: string, w: number): void {
   if (!s) return;
   const dur = s.end - s.start;
   const wordCount = s.text.split(/\s+/).filter(Boolean).length;
+  if (wordCount === 0) return;
   time.value = s.start + (w / wordCount) * dur;
 }
 function onScrubClick(e: MouseEvent): void {
+  if (TOTAL_DURATION.value === 0) return;
   const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
   const pct = (e.clientX - rect.left) / rect.width;
-  time.value = Math.max(0, Math.min(TOTAL_DURATION, pct * TOTAL_DURATION));
+  time.value = Math.max(0, Math.min(TOTAL_DURATION.value, pct * TOTAL_DURATION.value));
 }
 
 const counts = computed(() => ({
-  ai:    SEGMENTS.length,
-  stt:   SEGMENTS.length,
-  disc:  DISCREPANCIES.filter((d) => d.status === 'open' && d.meaningful).length,
-  audit: CORRECTIONS.length,
+  ai:    SEGMENTS.value.length,
+  stt:   SEGMENTS.value.length,
+  disc:  DISCREPANCIES.value.filter((d) => d.status === 'open' && d.meaningful).length,
+  audit: CORRECTIONS.value.length,
 }));
 
 interface FlagCounts {
@@ -234,30 +294,26 @@ const flagCounts = computed<FlagCounts>(() => {
     filler: 0, punctuation: 0, style: 0, other: 0,
     uncertain: 0, drift: 0, low_conf: 0,
   };
-  SEGMENTS.forEach((s) => {
+  SEGMENTS.value.forEach((s) => {
     s.ai_flags.forEach((f) => {
       if (f.kind === 'uncertain')      c.uncertain++;
       if (f.kind === 'drift')          c.drift++;
       if (f.kind === 'low_confidence') c.low_conf++;
     });
   });
-  DISCREPANCIES.forEach((d) => {
+  DISCREPANCIES.value.forEach((d) => {
     if (d.kind === 'drift')          c.drift++;
     if (d.kind === 'punctuation')    c.punctuation++;
     if (d.kind === 'filler')         c.filler++;
     if (d.kind === 'low_confidence') c.low_conf++;
   });
-  c.medication = 4;
-  c.terminology = 12;
-  c.name = 2;
-  c.number = 2;
   return c;
 });
 
 const flagFilter = ref<string | null>(null);
 
-const sessStageIdx = computed(() => SOP_STAGES.findIndex((x) => x.id === session.value.stage));
-const sessStageName = computed(() => SOP_STAGES.find((x) => x.id === session.value.stage)?.name || '');
+const sessStageIdx = computed(() => SOP_STAGES.findIndex((x) => x.id === sessionStage.value));
+const sessStageName = computed(() => SOP_STAGES.find((x) => x.id === sessionStage.value)?.name || '');
 
 function stepperCls(i: number, isCurrent: boolean): string {
   const cls = ['editor__stepper-item'];
@@ -287,38 +343,45 @@ const flaggedSecondary = computed(() => ([
 function onUndo(): void  { toast.push('Undone', { tone: 'info' }); }
 function onRedo(): void  { toast.push('Redone', { tone: 'info' }); }
 function onResult(): void { toast.push('Last AI result — opening side-by-side compare (mock)', { tone: 'info' }); }
-function onPreview(): void { router.push(`/v/${session.value.id}`); }
+function onPreview(): void { router.push(`/v/${props.id}`); }
 function openFind(): void { void modal.open(FindReplaceModal); }
+
+const sessionForChildren = computed(() => ({
+  id: session.value?.id || props.id,
+  presenter: session.value?.presenter || '',
+  recorded: '',
+}));
+const auditSessionRef = computed(() => ({ id: session.value?.id || props.id }));
 
 onMounted(() => { document.body.classList.add('has-editor'); });
 onUnmounted(() => { document.body.classList.remove('has-editor'); });
 </script>
 
 <template>
-  <div class="editor" :data-screen-label="`Editor / ${session.id}`">
+  <div class="editor" :data-screen-label="`Editor / ${props.id}`">
     <div class="editor__topbar">
       <div class="page-eyebrow" :style="{ marginBottom: '6px' }">
         <RouterLink to="/sessions">Sessions</RouterLink><span class="sep">/</span>
-        <RouterLink :to="`/s/${session.id}`">
-          <code :style="{ fontFamily: 'var(--font-mono)', color: 'var(--fg-link)' }">{{ session.code || session.id }}</code>
+        <RouterLink :to="`/s/${props.id}`">
+          <code :style="{ fontFamily: 'var(--font-mono)', color: 'var(--fg-link)' }">{{ sessionCode }}</code>
         </RouterLink><span class="sep">/</span>
         <span>Editor</span>
       </div>
 
       <div class="editor__stepper" role="navigation" aria-label="SOP stages">
         <template v-for="(st, i) in SOP_STAGES" :key="st.id">
-          <RouterLink :to="`/e/${session.id}/sop`" :class="stepperCls(i, st.id === session.stage)">
+          <RouterLink :to="`/e/${props.id}/sop`" :class="stepperCls(i, st.id === sessionStage)">
             <span class="dot" /> {{ st.name }}
           </RouterLink>
           <span v-if="i < SOP_STAGES.length - 1" class="editor__stepper-sep">▸</span>
         </template>
-        <span :style="{ marginLeft: 'auto', fontSize: '10px', fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: 'var(--color-green)' }">
-          <Icon name="check" :size="11" /> AI ready
+        <span :style="{ marginLeft: 'auto', fontSize: '10px', fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: session?.status === 'ready' || session?.status === 'complete' ? 'var(--color-green)' : 'var(--fg2)' }">
+          <Icon name="check" :size="11" /> {{ session?.status === 'ready' || session?.status === 'complete' ? 'AI ready' : (session?.status || 'pending') }}
         </span>
       </div>
 
       <div class="editor__title-row">
-        <h1 class="editor__title editor__title--mono">{{ session.code || session.id }}</h1>
+        <h1 class="editor__title editor__title--mono">{{ sessionCode }}</h1>
         <div class="page-actions">
           <button class="btn btn--ghost btn--sm" data-test-id="editor-result" title="Show last AI result" @click="onResult">
             <Icon name="chevron-left" /> Result
@@ -344,9 +407,9 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
         </button>
         <span :style="{ marginLeft: 'auto', display: 'inline-flex', gap: '8px', alignItems: 'center' }">
           <span class="stage-badge stage-badge--prep" :style="{ textTransform: 'uppercase' }">{{ sessStageName }}</span>
-          <RouterLink :to="`/e/${session.id}/sop`" class="btn btn--ghost btn--sm"><Icon name="branch" /> Workflow</RouterLink>
-          <RouterLink :to="`/e/${session.id}/audit`" class="btn btn--ghost btn--sm"><Icon name="history" /> Audit</RouterLink>
-          <DownloadMenu :code="session.code || session.id" />
+          <RouterLink :to="`/e/${props.id}/sop`" class="btn btn--ghost btn--sm"><Icon name="branch" /> Workflow</RouterLink>
+          <RouterLink :to="`/e/${props.id}/audit`" class="btn btn--ghost btn--sm"><Icon name="history" /> Audit</RouterLink>
+          <DownloadMenu :code="sessionCode" />
         </span>
       </div>
 
@@ -392,7 +455,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
     <div class="editor__grid" :style="gridStyle">
       <aside class="editor__leftcol">
         <VideoStrip
-          :session="session"
+          :session="sessionForChildren"
           :active-slide="activeSlide"
           :slides="SLIDES"
           :time="time"
@@ -454,7 +517,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
       />
       <AuditTabInline
         v-else
-        :session="session"
+        :session="auditSessionRef"
         :active-segment-id="activeSegment?.id"
         @segment-click="onSegmentClick"
       />
@@ -519,13 +582,11 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
     </div>
 
     <div class="editor__statusbar">
-      <span class="dot" /> WS connected · 18ms
+      <span class="dot" /> {{ loading ? 'loading' : 'ready' }} · {{ SEGMENTS.length }} segments · {{ SLIDES.length }} slides
       <span class="sep" />
-      <span>autosave <code>2s ago</code></span>
+      <span>autosave <code>—</code></span>
       <span class="sep" />
-      <span>longtasks/min: <code :style="{ color: '#5BE3A4' }">1</code></span>
-      <span class="sep" />
-      <span>heap: <code>108 MB · flat over 30m</code></span>
+      <span>session: <code>{{ session?.status || '—' }}</code></span>
       <span class="end">
         <span>shortcut: <code>?</code></span>
         <span class="sep" />

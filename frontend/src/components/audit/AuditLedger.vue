@@ -1,13 +1,26 @@
 <script setup lang="ts">
 /**
- * AuditLedger — faithful port of audit.jsx::AuditLedger (290-337).
+ * AuditLedger — verbatim port of audit.jsx::AuditLedger (290-337).
+ * Accepts a corrections array as a prop so callers can hand it data from
+ * either the backend (live) or fixtures (legacy). Empty array → empty ledger.
  */
 import { computed } from 'vue';
-import { CORRECTIONS, type Correction } from '@/fixtures/audit';
+
+export interface Correction {
+  id: string;
+  t: string;
+  seg: string;
+  type: string;
+  actor: string;
+  prior?: string | null;
+  next?: string | null;
+  note?: string | null;
+}
 
 const props = withDefaults(defineProps<{
   filter?: string;
-}>(), { filter: 'all' });
+  corrections?: readonly Correction[];
+}>(), { filter: 'all', corrections: () => [] });
 
 interface TypeMeta { label: string; chip: string; note: string }
 const correctionTypeLabel: Record<string, TypeMeta> = {
@@ -26,7 +39,7 @@ const correctionTypeLabel: Record<string, TypeMeta> = {
 };
 
 const rows = computed<Correction[]>(() => {
-  const all = [...CORRECTIONS].reverse();
+  const all = [...props.corrections].reverse();
   return props.filter === 'all' ? all : all.filter(r => r.type === props.filter);
 });
 
@@ -34,7 +47,8 @@ function meta(type: string): TypeMeta {
   return correctionTypeLabel[type] ?? { label: type, chip: 'ghost', note: '' };
 }
 function fmtT(t: string): string {
-  return new Date(t).toISOString().replace('T', ' ').replace(/\..*$/, '');
+  try { return new Date(t).toISOString().replace('T', ' ').replace(/\..*$/, ''); }
+  catch { return t; }
 }
 </script>
 

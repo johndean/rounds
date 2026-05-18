@@ -1,24 +1,60 @@
 <script setup lang="ts">
 /**
  * Audit / Word Track Changes — /audit and /e/:id/audit
- * Faithful 1:1 port of docs/port-source/audit.jsx::AuditRoute (340-420).
+ *
+ * Same DOM as React audit.jsx::AuditRoute (340-420). Wired to
+ *   GET /v1/audit/sessions/{id}/corrections  (per-session)
+ *   GET /v1/audit                            (global)
+ * Empty state until corrections accumulate.
  */
-import { computed, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
 import AuditLedger from '@/components/audit/AuditLedger.vue';
-import { CORRECTIONS } from '@/fixtures/audit';
-import { SESSIONS } from '@/fixtures/sessions';
+import { audit as auditApi, sessions as sessionsApi, type SessionSummary } from '@/services/api';
 import { toast } from '@/composables/useToast';
 
 const props = defineProps<{ id?: string }>();
 
-const session = computed(() => props.id ? SESSIONS.find(s => s.id === props.id) ?? null : null);
+interface Correction {
+  id: string;
+  t: string;
+  seg: string;
+  type: string;
+  actor: string;
+  prior?: string | null;
+  next?: string | null;
+  note?: string | null;
+}
+
+const session = ref<SessionSummary | null>(null);
+const corrections = ref<Correction[]>([]);
+const loading = ref(true);
+
+async function load(): Promise<void> {
+  loading.value = true;
+  try {
+    if (props.id) {
+      const [s, c] = await Promise.all([
+        sessionsApi.get(props.id).catch(() => null),
+        auditApi.corrections(props.id).catch(() => []),
+      ]);
+      session.value = s;
+      corrections.value = c as Correction[];
+    } else {
+      const list = await auditApi.list({}).catch(() => []);
+      corrections.value = list as Correction[];
+    }
+  } finally {
+    loading.value = false;
+  }
+}
+onMounted(load);
 
 const filter = ref<string>('all');
 
 const stats = computed(() => {
   const out: Record<string, number> = {};
-  CORRECTIONS.forEach(c => { out[c.type] = (out[c.type] ?? 0) + 1; });
+  corrections.value.forEach(c => { out[c.type] = (out[c.type] ?? 0) + 1; });
   return out;
 });
 
@@ -36,10 +72,10 @@ const types = [
 
 const allTypes = ['text_edit','chat_insert','chat_edit','chat_remove','poll_insert','poll_remove','slide_reassignment','speaker_reassignment','mark_reviewed','unmark_reviewed','annotation_add','annotation_remove'];
 
-const distinctActors = computed(() => new Set(CORRECTIONS.map(c => c.actor)).size);
+const distinctActors = computed(() => new Set(corrections.value.map(c => c.actor)).size);
 
 function exportJsonl(): void {
-  const ndjson = CORRECTIONS.map(c => JSON.stringify(c)).join('\n') + '\n';
+  const ndjson = corrections.value.map(c => JSON.stringify(c)).join('\n') + '\n';
   const blob = new Blob([ndjson], { type: 'application/x-ndjson' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -58,7 +94,7 @@ function exportJsonl(): void {
     <div class="page-eyebrow">
       <RouterLink to="/sessions">Sessions</RouterLink><span class="sep">/</span>
       <template v-if="session">
-        <RouterLink :to="`/e/${session.id}`">{{ session.id }}</RouterLink><span class="sep">/</span>
+        <RouterLink :to="`/e/${session.id}`">{{ session.code || session.id }}</RouterLink><span class="sep">/</span>
       </template>
       <span>Audit · Word Track Changes (v7)</span>
     </div>
@@ -70,7 +106,7 @@ function exportJsonl(): void {
     <div class="kpi-row">
       <div class="kpi">
         <div class="kpi__label">Total Corrections</div>
-        <div class="kpi__value">{{ CORRECTIONS.length }}</div>
+        <div class="kpi__value">{{ corrections.length }}</div>
       </div>
       <div class="kpi">
         <div class="kpi__label">Text Edits (dirty)</div>
@@ -79,7 +115,7 @@ function exportJsonl(): void {
       </div>
       <div class="kpi">
         <div class="kpi__label">Non-dirty Corrections</div>
-        <div class="kpi__value" :style="{ color: 'var(--color-green)' }">{{ CORRECTIONS.length - (stats.text_edit || 0) }}</div>
+        <div class="kpi__value" :style="{ color: 'var(--color-green)' }">{{ corrections.length - (stats.text_edit || 0) }}</div>
         <div class="kpi__delta">flag colors preserved</div>
       </div>
       <div class="kpi">
@@ -98,7 +134,7 @@ function exportJsonl(): void {
           @click="filter = t.id"
         >
           {{ t.label }}
-          <span :style="{ opacity: 0.7 }">· {{ t.id === 'all' ? CORRECTIONS.length : (stats[t.id] || 0) }}</span>
+          <span :style="{ opacity: 0.7 }">· {{ t.id === 'all' ? corrections.length : (stats[t.id] || 0) }}</span>
         </button>
       </div>
       <button class="btn btn--secondary" :style="{ marginLeft: 'auto' }" data-test-id="audit-wtc-export-jsonl" @click="exportJsonl">
@@ -106,7 +142,11 @@ function exportJsonl(): void {
       </button>
     </div>
 
-    <AuditLedger :filter="filter" />
+    <div v-if="loading" :style="{ padding: '40px', textAlign: 'center', color: 'var(--fg2)' }">Loading audit log…</div>
+    <div v-else-if="corrections.length === 0" :style="{ padding: '40px', textAlign: 'center', color: 'var(--fg2)' }">
+      No corrections yet — audit events accumulate as you edit segments.
+    </div>
+    <AuditLedger v-else :filter="filter" :corrections="corrections" />
 
     <div class="card" :style="{ marginTop: '22px' }">
       <div class="card__header">
