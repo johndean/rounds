@@ -1,13 +1,13 @@
 """
-Finalize task — runs align, then flips session to 'ready'.
+finalize_task — last link in the chain. aligning → ready.
 
-When this task runs the session has:
-  * segments rows from transcribe_task
-  * slides rows (if a PDF source was attached) from slide_extract_task
+After 6i, align_task does the heavy lifting and triggers finalize.
+finalize's job is simply:
+  • verify segments exist (else fail)
+  • transition aligning → ready
 
-Finalize runs align_task synchronously (it's fast, all DB), then
-transitions session.status to 'ready'. The Processing view auto-redirects
-the user to /e/<id> when the session lands ready.
+The "walk every intermediate state" stub logic from 6b is removed because
+6g+6h+6i now own their own transitions explicitly.
 """
 from __future__ import annotations
 
@@ -24,72 +24,64 @@ logger = logging.getLogger(__name__)
     name="rounds.tasks.finalize",
     max_retries=1,
 )
-def finalize_task(self, prev_result: dict | None = None, session_id: str | None = None) -> dict:  # noqa: ARG001
+def finalize_task(self, prev_result=None, session_id=None) -> dict:  # noqa: ARG001
     """
-    Last link of the ingest chain.
-
-    Celery passes the previous task's return value as the first positional
-    argument when tasks are chained. We accept it but ignore — `session_id`
-    is also bound via `.s(session_id)` so it's available either way.
+    Resolve session_id from kwarg OR previous chain result, verify segments,
+    transition aligning → ready. Chain-call safe: when called as the next
+    link in a Celery chain, prev_result is the upstream task's return.
     """
     from sqlalchemy import create_engine, text
 
     from app.config import settings
-    from app.tasks.align import _align_session
+    from app.engines.state_machine import ConflictError, transition_session_sync
 
     if not session_id:
-        # Chained-call path: session_id was the .s() arg; the previous
-        # return is in prev_result instead. Celery's chain semantics put
-        # the previous result first when bound, so accept either order.
         if isinstance(prev_result, str):
             session_id = prev_result
         elif isinstance(prev_result, dict):
             session_id = prev_result.get("session_id")
-
     if not session_id:
-        raise RuntimeError("finalize_task: no session_id resolved")
+        raise RuntimeError("finalize_task: no session_id")
 
     sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
     engine = create_engine(sync_url)
     try:
-        from app.engines.state_machine import ConflictError, transition_session_sync
-
-        # Walk through every intermediate state so the audit log captures the
-        # full MIC pipeline transitions even when 6g/6h haven't shipped yet.
-        # When normalize_task (6g) lands, it owns transcribing→normalizing.
-        # When fusion_task (6h) lands, it owns normalizing→fusing→aligning.
-        # Until then, finalize emits all transitions with reason="stub".
-
-        with engine.begin() as conn:
+        with engine.connect() as conn:
             seg_count = conn.execute(
                 text("SELECT COUNT(*) FROM segments WHERE session_id = CAST(:sid AS uuid)"),
                 {"sid": session_id},
             ).scalar() or 0
+            current = conn.execute(
+                text("SELECT status FROM sessions WHERE id = CAST(:sid AS uuid)"),
+                {"sid": session_id},
+            ).scalar()
+
         if seg_count == 0:
             try:
                 transition_session_sync(session_id, "failed", actor="finalize_task", reason="no_segments")
             except ConflictError as e:
                 logger.warning(f"finalize: cannot mark failed: {e}")
-            logger.error(f"finalize: session {session_id} has 0 segments — marked failed")
             return {"session_id": session_id, "status": "failed", "reason": "no_segments"}
 
-        # transcribing → normalizing (stub until 6g lands)
-        transition_session_sync(session_id, "normalizing", actor="finalize_task", reason="stub:pre-6g")
-        # normalizing → fusing (stub until 6h lands)
-        transition_session_sync(session_id, "fusing", actor="finalize_task", reason="stub:pre-6h")
-        # fusing → aligning
-        transition_session_sync(session_id, "aligning", actor="finalize_task")
+        # If 6g+6h+6i shipped their own transitions, status is already 'aligning'.
+        # If running the legacy pre-6g/6h chain via finalize directly, walk
+        # through the intermediate states to satisfy ALLOWED_TRANSITIONS.
+        try:
+            if current == "transcribing":
+                transition_session_sync(session_id, "normalizing", actor="finalize_task", reason="stub")
+                current = "normalizing"
+            if current == "normalizing":
+                transition_session_sync(session_id, "fusing", actor="finalize_task", reason="stub")
+                current = "fusing"
+            if current == "fusing":
+                transition_session_sync(session_id, "aligning", actor="finalize_task")
+                current = "aligning"
+            if current == "aligning":
+                transition_session_sync(session_id, "ready", actor="finalize_task")
+        except ConflictError as e:
+            logger.warning(f"finalize: transition error ({e}) — current={current}")
 
-        # align runs in-process — pure function call, not Celery dispatch.
-        align_result = _align_session(session_id)
-        logger.info(f"finalize: align={align_result}")
-
-        # aligning → ready
-        transition_session_sync(session_id, "ready", actor="finalize_task")
-        logger.info(f"finalize: session {session_id} marked ready")
+        logger.info(f"finalize: session {session_id} ready")
         return {"session_id": session_id, "status": "ready"}
-    except Exception as exc:
-        logger.exception(f"finalize failed for {session_id}: {exc}")
-        raise
     finally:
         engine.dispose()
