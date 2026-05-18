@@ -238,6 +238,12 @@ async def _parse_manifest_and_chat_sources(
                     params,
                 )
 
+            # Palette for manifest-derived speaker chips. Same colors as the
+            # frontend SLIDE_PALETTE so chips look consistent with slide rail.
+            _SPEAKER_PALETTE = [
+                "#2563eb", "#7c3aed", "#059669", "#d97706", "#dc2626",
+                "#0891b2", "#6366f1", "#ea580c", "#0d9488", "#be185d",
+            ]
             for sp in parsed.speakers:
                 await db.execute(
                     text(
@@ -248,6 +254,25 @@ async def _parse_manifest_and_chat_sources(
                     ),
                     {"sid": session_id, "r": sp.role, "n": sp.name,
                      "c": sp.credentials, "b": sp.bio, "so": sp.sort_order},
+                )
+                # Bridge manifest speaker → runtime speakers roster so the
+                # editor's Speaker picker + chip lookups (which read from
+                # `speakers`, not `session_speakers`) include manifest-named
+                # speakers. Idempotent: only insert when no matching name
+                # row exists for the session yet.
+                color = _SPEAKER_PALETTE[sp.sort_order % len(_SPEAKER_PALETTE)]
+                await db.execute(
+                    text(
+                        """
+                        INSERT INTO speakers (session_id, name, role, avatar_color)
+                        SELECT CAST(:sid AS uuid), :n, :r, :ac
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM speakers
+                            WHERE session_id = CAST(:sid AS uuid) AND name = :n
+                        )
+                        """
+                    ),
+                    {"sid": session_id, "n": sp.name, "r": sp.role, "ac": color},
                 )
 
             # Bridge polls_parsed JSONB → structured polls + poll_options rows

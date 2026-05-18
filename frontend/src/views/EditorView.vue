@@ -31,7 +31,9 @@ import AdminTab from '@/components/editor/AdminTab.vue';
 import ChatTab from '@/components/editor/ChatTab.vue';
 import PollsTab from '@/components/editor/PollsTab.vue';
 import DownloadMenu from '@/components/editor/DownloadMenu.vue';
-import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, type SessionSummary } from '@/services/api';
+import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, type SessionSummary } from '@/services/api';
+import { toast } from '@/composables/useToast';
+import { ApiError } from '@/services/http';
 import { http } from '@/services/http';
 import type { Segment, Slide } from '@/fixtures/transcript';
 import type { ChatMessage, Poll } from '@/fixtures/chat_polls';
@@ -50,7 +52,7 @@ const router = useRouter();
 const session = ref<SessionSummary | null>(null);
 const SLIDES = ref<Slide[]>([]);
 const SEGMENTS = ref<Segment[]>([]);
-interface ApiSpeaker { id: string; short: string | null; name: string | null; role: string | null }
+interface ApiSpeaker { id: string; short: string | null; name: string | null; role: string | null; avatar_color: string | null }
 const SPEAKERS_API = ref<ApiSpeaker[]>([]);
 const CHAT = ref<ChatMessage[]>([]);
 const POLLS = ref<Poll[]>([]);
@@ -77,29 +79,35 @@ async function load(): Promise<void> {
     ]);
     session.value = s;
     SPEAKERS_API.value = sp as ApiSpeaker[];
-    // Adapt API segment shape (start_ms/end_ms/flags[]/speaker_id) → editor Segment shape.
-    // KNOWN GAP: the editor's Segment.speaker is the legacy fixture key
-    // ('presenter' | 'cohost' | 'moderator') — the TranscriptPane/SegmentCard
-    // tree looks up SPEAKERS[seg.speaker] from the fixture. A full multi-
-    // speaker UI port needs TranscriptPane to accept a speakers-by-id map
-    // and switch every fixture lookup over. Until that lands, all real
-    // ingested segments render under the "presenter" persona — which is
-    // exactly what align.py writes anyway (single "Presenter" speaker
-    // until diarization ships).
-    SEGMENTS.value = (sg as Array<{ id: string; seq: number; start_ms: number; end_ms: number; text: string; confidence: number | null; flags: string[]; slide_id: string | null; speaker_id: string | null }>).map((row, i): Segment => ({
-      id: row.id,
-      idx: typeof row.seq === 'number' ? row.seq : i,
-      start: (row.start_ms ?? 0) / 1000,
-      end: (row.end_ms ?? 0) / 1000,
-      speaker: 'presenter',
-      slide_id: row.slide_id,
-      text: row.text || '',
-      ai_flags: (row.flags || []).map((kind) => ({ w: 0, kind: kind as 'drift' | 'uncertain' | 'low_confidence' })),
-      needs_review: (row.flags || []).length > 0,
-      has_user_override: false,
-      confidence: typeof row.confidence === 'number' && row.confidence < 0.75 ? 'low' : 'normal',
-      corrections: [],
-    }));
+    const speakersById = new Map<string, ApiSpeaker>();
+    SPEAKERS_API.value.forEach((row) => speakersById.set(row.id, row));
+    // Map API segment shape → editor Segment shape. Real speaker name + color
+    // are embedded so TranscriptPane/DiscrepanciesPane can render the real
+    // roster via speakerDisplay(seg) without fixture fallback. The legacy
+    // fixture key (`speaker: 'presenter'`) stays for backward-compat with any
+    // code that still keys off it.
+    SEGMENTS.value = (sg as Array<{ id: string; seq: number; start_ms: number; end_ms: number; text: string; confidence: number | null; flags: string[]; slide_id: string | null; speaker_id: string | null }>).map((row, i): Segment => {
+      const sp = row.speaker_id ? speakersById.get(row.speaker_id) : undefined;
+      return {
+        id: row.id,
+        idx: typeof row.seq === 'number' ? row.seq : i,
+        start: (row.start_ms ?? 0) / 1000,
+        end: (row.end_ms ?? 0) / 1000,
+        speaker: 'presenter',
+        slide_id: row.slide_id,
+        text: row.text || '',
+        ai_flags: (row.flags || []).map((kind) => ({ w: 0, kind: kind as 'drift' | 'uncertain' | 'low_confidence' })),
+        needs_review: (row.flags || []).length > 0,
+        has_user_override: false,
+        confidence: typeof row.confidence === 'number' && row.confidence < 0.75 ? 'low' : 'normal',
+        corrections: [],
+        speaker_id: row.speaker_id ?? null,
+        speaker_name: sp?.name ?? null,
+        speaker_short: sp?.short ?? null,
+        speaker_role: sp?.role ?? null,
+        speaker_color: sp?.avatar_color ?? null,
+      };
+    });
     SLIDES.value = (sl as Array<{ id: string; slide_index: number; title: string | null }>).map((row): Slide => ({
       id: row.id,
       n: row.slide_index + 1,
@@ -375,7 +383,86 @@ const flaggedSecondary = computed(() => ([
 // a data-integrity lie. Phase 4 (corrections API) re-introduces them with
 // real undo-stack persistence + AI-result history.
 function onPreview(): void { router.push(`/v/${props.id}`); }
-function openFind(): void { void modal.open(FindReplaceModal); }
+function openFind(): void { void modal.open(FindReplaceModal, { sessionId: props.id, onApplied: () => { void load(); } }); }
+
+// ── Inline-save handlers (Phase C.3) ─────────────────────────────────
+async function onEditSegment(segId: string, before: string, after: string): Promise<void> {
+  try {
+    await correctionsApi.apply(props.id, {
+      segment_id: segId, correction_type: 'text_edit',
+      old_text: before, new_text: after,
+    });
+    const idx = SEGMENTS.value.findIndex((s) => s.id === segId);
+    if (idx >= 0) {
+      SEGMENTS.value[idx] = { ...SEGMENTS.value[idx]!, text: after, has_user_override: true };
+    }
+    toast.push('Edit saved', { tone: 'success' });
+  } catch (e) {
+    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Save failed';
+    toast.push(msg, { tone: 'error' });
+  }
+}
+
+async function onReassignSegment(segId: string, beforeSlide: string | null, afterSlide: string): Promise<void> {
+  try {
+    await correctionsApi.apply(props.id, {
+      segment_id: segId, correction_type: 'slide_reassignment',
+      old_slide_id: beforeSlide, new_slide_id: afterSlide,
+    });
+    const idx = SEGMENTS.value.findIndex((s) => s.id === segId);
+    if (idx >= 0) {
+      SEGMENTS.value[idx] = { ...SEGMENTS.value[idx]!, slide_id: afterSlide };
+    }
+    toast.push('Reassigned to new slide', { tone: 'success' });
+  } catch (e) {
+    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Reassign failed';
+    toast.push(msg, { tone: 'error' });
+  }
+}
+
+async function onReassignSpeakerLive(segId: string, _beforeSpeakerId: string | null, afterSpeakerId: string): Promise<void> {
+  try {
+    await speakersApi.reassignSegment(props.id, segId, afterSpeakerId);
+    const sp = SPEAKERS_API.value.find((s) => s.id === afterSpeakerId);
+    const idx = SEGMENTS.value.findIndex((s) => s.id === segId);
+    if (idx >= 0 && sp) {
+      SEGMENTS.value[idx] = {
+        ...SEGMENTS.value[idx]!,
+        speaker_id: sp.id,
+        speaker_name: sp.name,
+        speaker_short: sp.short,
+        speaker_color: sp.avatar_color ?? null,
+        speaker_role: sp.role,
+      };
+    }
+    toast.push('Speaker updated', { tone: 'success' });
+  } catch (e) {
+    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Speaker change failed';
+    toast.push(msg, { tone: 'error' });
+  }
+}
+
+// ── Undo / Redo (Phase C.4) ──────────────────────────────────────────
+async function onUndo(): Promise<void> {
+  try {
+    await correctionsApi.undo(props.id);
+    await load();
+    toast.push('Undone', { tone: 'info' });
+  } catch (e) {
+    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Undo failed';
+    toast.push(msg, { tone: 'error' });
+  }
+}
+async function onRedo(): Promise<void> {
+  try {
+    await correctionsApi.redo(props.id);
+    await load();
+    toast.push('Redone', { tone: 'info' });
+  } catch (e) {
+    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Redo failed';
+    toast.push(msg, { tone: 'error' });
+  }
+}
 
 const sessionForChildren = computed(() => ({
   id: session.value?.id || props.id,
@@ -414,20 +501,12 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
       <div class="editor__title-row">
         <h1 class="editor__title editor__title--mono">{{ sessionCode }}</h1>
         <div class="page-actions">
-          <!--
-            Phase 1 audit cleanup: Result / Undo / Redo hidden until Phase 4
-            (corrections API) provides real persistence + reversal. Markup
-            preserved (commented) so re-enable in Phase 4 is a comment-strip.
-          <button class="btn btn--ghost btn--sm" data-test-id="editor-result" title="Show last AI result" @click="onResult">
-            <Icon name="chevron-left" /> Result
-          </button>
           <button class="btn btn--ghost btn--sm" data-test-id="editor-undo" title="Undo (⌘Z)" @click="onUndo">
             <Icon name="history" /> Undo
           </button>
           <button class="btn btn--ghost btn--sm" data-test-id="editor-redo" title="Redo (⇧⌘Z)" :style="{ transform: 'scaleX(-1)' }" @click="onRedo">
             <Icon name="history" />
           </button>
-          -->
           <button class="btn btn--secondary btn--sm" data-test-id="editor-preview" title="Preview rendered output" @click="onPreview">
             <Icon name="external" /> Preview
           </button>
@@ -526,11 +605,15 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
         :focused-slide-id="focusedSlideId"
         :slide-rail-mode="slideRailMode"
         :anchors-by-segment="anchorsBySegment as any"
+        :live-speakers="SPEAKERS_API"
         @segment-click="onSegmentClick"
         @word-click="onWordClick"
         @clear-focus="focusedSlideId = null"
         @drop-on-segment="handleDropOnSegment"
         @remove-anchor="handleRemoveAnchor"
+        @edit-segment="onEditSegment"
+        @reassign-segment="onReassignSegment"
+        @reassign-speaker-live="onReassignSpeakerLive"
       />
       <STTPane
         v-else-if="tab === 'stt'"

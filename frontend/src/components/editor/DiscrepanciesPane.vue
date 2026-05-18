@@ -9,9 +9,9 @@ import Icon from '@/components/shared/Icon.vue';
 import SegmentText from '@/components/editor/SegmentText.vue';
 import {
   SEGMENTS,
-  SPEAKERS,
   slideAccent,
   slideById,
+  speakerDisplay,
   type Segment,
 } from '@/fixtures/transcript';
 import { DISCREPANCIES, type Discrepancy } from '@/fixtures/audit';
@@ -175,7 +175,10 @@ function onSegReassign(seg: Segment): void {
           <div class="segment__body">
             <div class="segment__gutter">
               <span class="segment__time">{{ fmtTime(seg.start) }}</span>
-              <span :class="['segment__speaker-pill', `speaker-${seg.speaker}`]">{{ SPEAKERS[seg.speaker].short }}</span>
+              <span
+                :class="['segment__speaker-pill', `speaker-${seg.speaker}`]"
+                :style="{ background: `${speakerDisplay(seg).color}22`, color: speakerDisplay(seg).color, borderColor: `${speakerDisplay(seg).color}55` }"
+              >{{ speakerDisplay(seg).short }}</span>
             </div>
             <div class="segment__main">
               <SegmentText :text="seg.text" :flags="seg.ai_flags" :active-word-idx="-1" />

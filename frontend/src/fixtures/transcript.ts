@@ -139,6 +139,22 @@ export interface Segment {
   has_user_override: boolean;
   confidence: 'low' | 'normal';
   corrections: unknown[];
+  // Optional real-data fields populated when the segment came from the live
+  // backend instead of the fixture. When present, components prefer these
+  // over the fixture SPEAKERS[seg.speaker] lookup so real speaker rosters
+  // render correctly. See speakerDisplay() below.
+  speaker_id?: string | null;
+  speaker_name?: string | null;
+  speaker_short?: string | null;
+  speaker_color?: string | null;
+  speaker_role?: string | null;
+}
+
+export interface SpeakerDisplay {
+  short: string;
+  name: string;
+  color: string;
+  role: string;
 }
 
 // Deterministic pseudo-random (mulberry32) so reloads paint identical timings.
@@ -205,3 +221,19 @@ export function slideAccent(slideId: string | null | undefined): string {
   return SLIDE_PALETTE[_hashStr(slideId) % SLIDE_PALETTE.length]!;
 }
 export function slideById(slideId: string): Slide | undefined { return _slideByIdMap.get(slideId); }
+
+// Resolve a segment's speaker display info. Prefers real fields embedded by
+// EditorView.load (speaker_id/name/short/color/role) and falls back to the
+// fixture SPEAKERS dict so the demo / fixture-only paths still render.
+export function speakerDisplay(seg: Segment): SpeakerDisplay {
+  if (seg.speaker_name || seg.speaker_short) {
+    const color = seg.speaker_color
+      || SLIDE_PALETTE[_hashStr(seg.speaker_id || seg.speaker_name || 'unknown') % SLIDE_PALETTE.length]!;
+    const name = seg.speaker_name || seg.speaker_short || 'Speaker';
+    const short = seg.speaker_short || (seg.speaker_name ? seg.speaker_name.split(/\s+/).slice(0, 2).join(' ') : 'Speaker');
+    return { short, name, color, role: seg.speaker_role || '' };
+  }
+  const sp = SPEAKERS[seg.speaker];
+  if (sp) return { short: sp.short, name: sp.name, color: sp.color, role: sp.role };
+  return { short: 'Speaker', name: 'Speaker', color: '#4D6995', role: '' };
+}

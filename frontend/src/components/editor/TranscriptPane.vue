@@ -14,14 +14,24 @@ import {
   SPEAKERS,
   slideAccent,
   slideById,
+  speakerDisplay,
   type Segment,
   type SpeakerKey,
+  type SpeakerDisplay,
 } from '@/fixtures/transcript';
 import type { ChatMessage, Poll } from '@/fixtures/chat_polls';
 import { fmtTime } from '@/utils/editorHelpers';
 import { toast } from '@/composables/useToast';
 
 type AnchorEntry = (ChatMessage & { kind: 'chat' }) | (Poll & { kind: 'poll' });
+
+interface LiveSpeaker {
+  id: string;
+  short: string | null;
+  name: string | null;
+  role: string | null;
+  avatar_color: string | null;
+}
 
 const props = defineProps<{
   segments: readonly Segment[];
@@ -30,6 +40,10 @@ const props = defineProps<{
   focusedSlideId: string | null;
   slideRailMode: 'focus' | 'filter';
   anchorsBySegment: Map<string, AnchorEntry[]>;
+  // When present, the Speaker picker uses live session speakers instead of
+  // the fixture 3-speaker dict. EditorView passes this from the
+  // /v1/sessions/{id}/speakers endpoint.
+  liveSpeakers?: readonly LiveSpeaker[];
 }>();
 
 const emit = defineEmits<{
@@ -38,6 +52,9 @@ const emit = defineEmits<{
   (e: 'clearFocus'): void;
   (e: 'dropOnSegment', itemId: string, segId: string): void;
   (e: 'removeAnchor', id: string): void;
+  (e: 'editSegment', segId: string, before: string, after: string): void;
+  (e: 'reassignSegment', segId: string, beforeSlide: string | null, afterSlide: string): void;
+  (e: 'reassignSpeakerLive', segId: string, beforeSpeakerId: string | null, afterSpeakerId: string): void;
 }>();
 
 interface InlineEdit {
@@ -79,7 +96,7 @@ function startEdit(seg: Segment): void {
   inline.value = {
     segId: seg.id,
     mode: 'edit',
-    draft: `**${SPEAKERS[seg.speaker].short}:** ${seg.text}`,
+    draft: `**${speakerDisplay(seg).short}:** ${seg.text}`,
     history: [],
     redo: [],
   };
@@ -92,23 +109,35 @@ function startSpeaker(seg: Segment): void {
 }
 function closeInline(): void { inline.value = null; }
 
-// Phase 1 (audit remediation): saveEdit / saveReassign / saveSpeaker
-// previously toasted "Segment saved" with no backend call — operators
-// believed their edit persisted across reload, but the next page load
-// revealed the original text. Per Phase 4 plan, real persistence wires
-// through segments.edit / segments.reassign once the corrections API
-// + audit trail land. Until then, surface honest pending warnings so
-// operators know their work is preview-only.
-function saveEdit(_seg: Segment): void {
-  toast.push('Edit not persisted — segment editing ships with Phase 4 corrections audit.', { tone: 'warn' });
+// Phase C.3: inline saves now emit up to EditorView which calls the corrections
+// API. Live speakers (real UUIDs from the session_speakers roster) go through
+// reassignSpeakerLive; fixture-key picks fall back to a warn toast since they
+// aren't a backend-resolvable speaker id.
+function saveEdit(seg: Segment): void {
+  if (!inline.value) return;
+  // Strip the speaker prefix the editor injects ("**Short:** text").
+  const raw = inline.value.draft || '';
+  const stripped = raw.replace(/^\*\*[^*]+:\*\*\s*/, '');
+  if (stripped !== seg.text) {
+    emit('editSegment', seg.id, seg.text, stripped);
+  }
   closeInline();
 }
-function saveReassign(_seg: Segment, _slideId: string): void {
-  toast.push('Reassign not persisted — slide reassign ships with Phase 4 corrections audit.', { tone: 'warn' });
+function saveReassign(seg: Segment, slideId: string): void {
+  if (slideId !== seg.slide_id) {
+    emit('reassignSegment', seg.id, seg.slide_id, slideId);
+  }
   closeInline();
 }
 function saveSpeaker(_seg: Segment, _speakerKey: SpeakerKey): void {
-  toast.push('Speaker change not persisted — speaker reassign ships with Phase 4 corrections audit.', { tone: 'warn' });
+  // Fixture-only path (no live speakers in session) — no real id to persist.
+  toast.push('Fixture speakers are demo-only — upload a manifest with a Bio block to enable speaker reassignment.', { tone: 'warn' });
+  closeInline();
+}
+function saveSpeakerLive(seg: Segment, speakerId: string): void {
+  if (speakerId !== seg.speaker_id) {
+    emit('reassignSpeakerLive', seg.id, seg.speaker_id ?? null, speakerId);
+  }
   closeInline();
 }
 
@@ -205,12 +234,37 @@ function onDrop(e: DragEvent, segId: string): void {
   if (data) emit('dropOnSegment', data, segId);
 }
 
-function speakersList(): Array<[SpeakerKey, typeof SPEAKERS[SpeakerKey]]> {
-  return (Object.entries(SPEAKERS) as Array<[SpeakerKey, typeof SPEAKERS[SpeakerKey]]>);
+interface SpeakerPickRow {
+  key: string;                   // pick id (real UUID or fixture key)
+  short: string;
+  name: string;
+  color: string;
+  role: string;
+  isLive: boolean;               // true → real UUID; false → fixture key
+}
+
+function speakersList(): SpeakerPickRow[] {
+  if (props.liveSpeakers && props.liveSpeakers.length) {
+    return props.liveSpeakers.map((s, i): SpeakerPickRow => ({
+      key:   s.id,
+      short: s.short || s.name || 'Speaker',
+      name:  s.name  || s.short || 'Speaker',
+      color: s.avatar_color || ['#2563eb', '#7c3aed', '#059669', '#d97706', '#dc2626', '#0891b2', '#6366f1', '#ea580c', '#0d9488', '#be185d'][i % 10]!,
+      role:  s.role  || '',
+      isLive: true,
+    }));
+  }
+  return (Object.entries(SPEAKERS) as Array<[SpeakerKey, typeof SPEAKERS[SpeakerKey]]>).map(([key, sp]): SpeakerPickRow => ({
+    key, short: sp.short, name: sp.name, color: sp.color, role: sp.role, isLive: false,
+  }));
 }
 
 function speakerInitials(short: string): string {
   return short.split(' ').map((s) => s[0] || '').join('').slice(0, 2).toUpperCase();
+}
+
+function segSpeaker(seg: Segment): SpeakerDisplay {
+  return speakerDisplay(seg);
 }
 
 function rows(): number {
@@ -259,7 +313,7 @@ function rows(): number {
             <template v-if="inline && inline.segId === seg.id && inline.mode === 'speaker'">
               <span :style="{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '2px 8px', border: '1px solid var(--border-subtle)', borderRadius: '999px', fontSize: '11.5px' }">
                 <Icon name="message" :size="10" />
-                <strong :style="{ color: SPEAKERS[seg.speaker]?.color }">{{ (SPEAKERS[seg.speaker]?.name || '').replace(/, DVM.*/, '') }} – VIN</strong>
+                <strong :style="{ color: segSpeaker(seg).color }">{{ segSpeaker(seg).name.replace(/, DVM.*/, '') }} – VIN</strong>
               </span>
               <button class="segment__inline-action" @click.stop>Edit</button>
               <button class="segment__inline-action segment__inline-action--danger" @click.stop="closeInline">
@@ -271,7 +325,10 @@ function rows(): number {
         <div class="segment__body">
           <div class="segment__gutter">
             <span class="segment__time">{{ fmtTime(seg.start) }}</span>
-            <span :class="['segment__speaker-pill', `speaker-${seg.speaker}`]">{{ SPEAKERS[seg.speaker].short }}</span>
+            <span
+              :class="['segment__speaker-pill', `speaker-${seg.speaker}`]"
+              :style="{ background: `${segSpeaker(seg).color}22`, color: segSpeaker(seg).color, borderColor: `${segSpeaker(seg).color}55` }"
+            >{{ segSpeaker(seg).short }}</span>
           </div>
           <div class="segment__main">
             <div
@@ -337,15 +394,15 @@ function rows(): number {
               class="segment-speakerpick"
             >
               <button
-                v-for="[key, sp] in speakersList()"
-                :key="key"
-                :class="['segment-speakerpick__tile', key === inline.draftSpeaker ? 'is-current' : '']"
-                @click.stop="saveSpeaker(seg, key)"
+                v-for="row in speakersList()"
+                :key="row.key"
+                :class="['segment-speakerpick__tile', row.key === (seg.speaker_id || inline.draftSpeaker) ? 'is-current' : '']"
+                @click.stop="row.isLive ? saveSpeakerLive(seg, row.key) : saveSpeaker(seg, row.key as SpeakerKey)"
               >
-                <span class="segment-speakerpick__avatar" :style="{ background: sp.color }">{{ speakerInitials(sp.short) }}</span>
+                <span class="segment-speakerpick__avatar" :style="{ background: row.color }">{{ speakerInitials(row.short) }}</span>
                 <div>
-                  <div :style="{ fontWeight: 700, fontSize: '12.5px' }">{{ sp.name }}</div>
-                  <div :style="{ fontSize: '11px', color: 'var(--fg2)' }">{{ sp.role }}</div>
+                  <div :style="{ fontWeight: 700, fontSize: '12.5px' }">{{ row.name }}</div>
+                  <div :style="{ fontSize: '11px', color: 'var(--fg2)' }">{{ row.role }}</div>
                 </div>
               </button>
               <div :style="{ display: 'flex', justifyContent: 'flex-end', marginTop: '8px' }">
