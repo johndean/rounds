@@ -19,6 +19,7 @@ from app.api import audit as audit_router
 from app.api import auth as auth_router
 from app.api import diagnostics as diag_router
 from app.api import discrepancies as disc_router
+from app.api import exports as exports_router
 from app.api import gcs_upload as gcs_router
 from app.api import improvements as improvements_router
 from app.api import segments as segments_router
@@ -125,6 +126,7 @@ app.include_router(audit_router.router)
 app.include_router(improvements_router.router)
 app.include_router(settings_router.router)
 app.include_router(diag_router.router)
+app.include_router(exports_router.router)
 
 
 # ── Static frontend (production) ─────────────────────────────────────────
