@@ -1,7 +1,7 @@
 # Plan: Rounds → Full MIC Pipeline Parity (Zero-Gap)
 
 **Type:** feat
-**Status:** active
+**Status:** complete — all 17 phases shipped 2026-05-18
 **Created:** 2026-05-18
 **Predecessor:** [`2026-05-17-001-feat-rounds-bootstrap-plan.md`](./2026-05-17-001-feat-rounds-bootstrap-plan.md) (Phases 1-10 complete; ingest stub shipped)
 **Scope:** Close every gap surfaced by the audit on 2026-05-18. Reach MIC SSOT parity on upload → ingest → render path.

@@ -89,6 +89,14 @@ def finalize_task(self, prev_result=None, session_id=None) -> dict:  # noqa: ARG
         except Exception as e:  # noqa: BLE001
             logger.warning(f"finalize: release_slot failed: {e}")
 
+        # Trigger IIL learning loop (6q) — non-blocking, never marks failed.
+        try:
+            from app.tasks.kp_task import kp_task
+
+            kp_task.apply_async(args=[session_id], queue="celery")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"finalize: failed to trigger kp_task: {e}")
+
         logger.info(f"finalize: session {session_id} ready")
         return {"session_id": session_id, "status": "ready"}
     finally:

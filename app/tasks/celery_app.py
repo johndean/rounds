@@ -41,6 +41,7 @@ celery_app = Celery(
         "app.tasks.lcs_discrepancies",
         "app.tasks.classify_task",
         "app.tasks.burn_captions",
+        "app.tasks.kp_task",
     ],
 )
 

@@ -330,6 +330,18 @@ def _process_direct(
         reason=f"direct/{ai_mode}/{ai_model}",
     )
 
+    # Release rate-limit slot (6o) + kick IIL learning (6q).
+    try:
+        from app.middleware.rate_limit import release_slot
+        release_slot(None, session_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"ai_process: release_slot failed: {e}")
+    try:
+        from app.tasks.kp_task import kp_task
+        kp_task.apply_async(args=[session_id], queue="celery")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"ai_process: failed to trigger kp_task: {e}")
+
     logger.info(
         f"ai_process[direct]: session={session_id} segments={len(parsed)} "
         f"slides={len(slide_id_by_marker)} speakers={len(speaker_id_by_name)} ready"
