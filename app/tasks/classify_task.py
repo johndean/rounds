@@ -3,47 +3,33 @@ classify_discrepancies_task — Gemini-based classification of
 transcription_discrepancies rows. Non-critical: failure NEVER marks
 session as failed (session is already 'ready' when this runs).
 
-Ports MIC `app/tasks/classify_task.py` (179 LOC) with the same custom
-on_failure semantics:
+Ports MIC `app/tasks/classify_task.py` (179 LOC) with the same partial-
+result + auto-retry semantics:
   • Override on_failure → log + WS emit but DO NOT transition session
   • Reads org_settings.classify_backend + classify_model
   • Reads session_templates for per-session override (not used yet)
-  • Batches in DISCREPANCY_BATCH_SIZE (32 default) chunks
+  • Engine layer (llm_client.classify_discrepancies) does the 15-item
+    batching, per-batch retry of missing ids, and partial-success return
+  • Partial classification (some items still NULL) raises LLMError to
+    trigger Celery retry on the remaining items only
 
-Phase 6l / U124. Closes audit gap 🟠 #16.
+Phase 6l / U124. Closes audit gap 🟠 #16 + Phase 5 of audit remediation
+(MIC parity for discrepancy batching + fence-strip + per-batch retry).
 """
 from __future__ import annotations
 
 import json
 import logging
-
-from celery import Task
+import uuid
 
 from app.tasks.celery_app import RoundsTask, celery_app
 
 logger = logging.getLogger(__name__)
 
 
-DISCREPANCY_BATCH_SIZE = 32
-
-
-_CLASSIFY_PROMPT = """\
-You are a strict transcript-classification assistant. For each input
-discrepancy, return whether the change from `stt_text` to `ai_text` is
-"meaningful" (semantically changes meaning, terminology, dose, or name)
-or "noise" (filler removal, capitalization, punctuation only).
-
-Output STRICT JSON, no prose. Shape:
-  {"results": [{"id": "<id>", "is_meaningful": true|false, "category": "..."}]}
-
-`category` must be one of:
-  medication, terminology, name, number, date, filler, punctuation, style, drift, other.
-"""
-
-
 class _ClassifyTask(RoundsTask):
     """
-    Override on_failure — classification is non-critical. Failed classify
+    Override on_failure — classification is non-critical. A failed classify
     must NEVER mark the session as 'failed'. Log + WS emit only.
     """
 
@@ -73,13 +59,18 @@ class _ClassifyTask(RoundsTask):
 )
 def classify_discrepancies_task(self, session_id: str) -> dict:
     """
-    Load unclassified discrepancies → call Gemini in batches → write verdicts.
-    Idempotent — already-classified rows are skipped.
+    Load discrepancies → engine batches + classifies → write verdicts.
+    Idempotent — already-classified rows are skipped on subsequent runs.
+
+    Partial classification (some items still NULL after engine returns
+    partial) raises LLMError to trigger Celery's 60s/120s/240s backoff
+    chain. Each retry re-loads, skips done rows, and tries again.
     """
     from sqlalchemy import create_engine, text
 
     from app.config import settings
     from app.engines.llm_client import LLMError, classify_discrepancies
+    from app.engines.ws_bridge import publish_ws_event_sync
 
     sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
     engine = create_engine(sync_url)
@@ -89,10 +80,9 @@ def classify_discrepancies_task(self, session_id: str) -> dict:
             rows = conn.execute(
                 text(
                     """
-                    SELECT id, ai_text, stt_text, category
+                    SELECT id, ai_text, stt_text, is_meaningful
                       FROM transcription_discrepancies
                      WHERE session_id = CAST(:sid AS uuid)
-                       AND is_meaningful IS NULL
                     """
                 ),
                 {"sid": session_id},
@@ -105,100 +95,133 @@ def classify_discrepancies_task(self, session_id: str) -> dict:
             ).fetchone()
 
         if not rows:
-            logger.info(f"classify: no unclassified discrepancies for {session_id}")
-            return {"classified": 0}
+            logger.info(f"classify: no discrepancies for {session_id}")
+            return {"classified": 0, "meaningful": 0, "noise": 0}
 
         backend = (backend_row[0] if backend_row else None) or "gemini-dev"
         model = (model_row[0] if model_row else None) or settings.GEMINI_CLASSIFY_MODEL
+        # org_settings.value is jsonb — unwrap quoted strings
         if isinstance(backend, str) and backend.startswith('"'):
             backend = json.loads(backend)
         if isinstance(model, str) and model.startswith('"'):
             model = json.loads(model)
 
-        items = [
-            {"id": str(r[0]), "ai_text": r[1] or "", "stt_text": r[2] or "",
-             "category_hint": r[3] or "other"}
-            for r in rows
-        ]
-        batches = [items[i:i + DISCREPANCY_BATCH_SIZE]
-                   for i in range(0, len(items), DISCREPANCY_BATCH_SIZE)]
-        logger.info(f"classify: session={session_id} items={len(items)} batches={len(batches)} "
-                    f"backend={backend} model={model}")
+        use_vertex = (backend == "vertex")
 
-        # 🟡 #51 — emit classification_partial WS event so the editor can
-        # show live progress while a long classify run is mid-batch.
-        from app.engines.ws_bridge import publish_ws_event_sync as _ws_emit
+        # Separate already-classified from pending — engine skips dones,
+        # but we also need the counts for the partial-retry decision.
+        already_classified_ids: set[str] = set()
+        items: list[dict] = []
+        for r in rows:
+            rid = str(r[0])
+            ai_text, stt_text, is_meaningful = r[1], r[2], r[3]
+            if is_meaningful is not None:
+                already_classified_ids.add(rid)
+            items.append({"id": rid, "ai_text": ai_text or "", "stt_text": stt_text or ""})
 
-        classified_count = 0
-        for batch_idx, batch in enumerate(batches):
-            payload = json.dumps({"items": batch})
-            try:
-                result = classify_discrepancies(
-                    _CLASSIFY_PROMPT, payload,
-                    backend="vertex" if backend == "vertex" else "gemini",
-                    model_id=model,
+        logger.info(
+            f"classify: session={session_id} items={len(items)} "
+            f"already_done={len(already_classified_ids)} backend={backend} model={model}"
+        )
+
+        verdicts = classify_discrepancies(
+            items,
+            model_id=model,
+            already_classified_ids=already_classified_ids,
+            use_vertex=use_vertex,
+        )
+        if verdicts is None:
+            raise LLMError(
+                "Gemini classification returned None — all batches failed",
+                category="gemini_overloaded",
+            )
+
+        # Write verdicts to DB immediately — partial results are valuable.
+        meaningful = 0
+        noise = 0
+        skipped = 0
+        with engine.begin() as conn:
+            for v in verdicts:
+                # Defense-in-depth against malformed verdict ids slipping
+                # past the engine's _classify_batch validator.
+                try:
+                    uuid.UUID(v["id"])
+                except (ValueError, KeyError, TypeError):
+                    logger.warning(f"classify: skipping malformed verdict id={v.get('id')!r}")
+                    skipped += 1
+                    continue
+                conn.execute(
+                    text(
+                        """
+                        UPDATE transcription_discrepancies
+                           SET category         = :cat,
+                               is_meaningful    = :meaningful,
+                               classifier_model = :model,
+                               classified_at    = now()
+                         WHERE id = CAST(:id AS uuid)
+                        """
+                    ),
+                    {
+                        "id":         v["id"],
+                        "cat":        v["category"],
+                        "meaningful": bool(v["is_meaningful"]),
+                        "model":      model,
+                    },
                 )
-            except LLMError as e:
-                logger.warning(f"classify batch {batch_idx + 1} failed ({e.category}): {e}")
-                _ws_emit(session_id, {
-                    "type":          "classification_partial",
-                    "batch":         batch_idx + 1,
-                    "total_batches": len(batches),
-                    "classified":    classified_count,
-                    "total":         len(items),
-                    "error":         e.category,
-                })
-                continue
+                if v["is_meaningful"]:
+                    meaningful += 1
+                else:
+                    noise += 1
+        if skipped:
+            logger.warning(f"classify: skipped {skipped} verdict(s) with malformed UUIDs in {session_id}")
 
-            results = result.get("results") or []
-            with engine.begin() as conn:
-                for r in results:
-                    conn.execute(
-                        text(
-                            """
-                            UPDATE transcription_discrepancies
-                               SET is_meaningful   = :im,
-                                   category        = COALESCE(:cat, category),
-                                   classifier_model = :model,
-                                   classified_at   = now()
-                             WHERE id = CAST(:id AS uuid)
-                            """
-                        ),
-                        {
-                            "im":     bool(r.get("is_meaningful", False)),
-                            "cat":    r.get("category"),
-                            "model":  model,
-                            "id":     r.get("id"),
-                        },
-                    )
-                    classified_count += 1
+        total_classified = len(already_classified_ids) + len(verdicts) - skipped
+        total_items = len(items)
+        all_done = total_classified >= total_items
 
-            # Per-batch progress signal.
-            _ws_emit(session_id, {
-                "type":          "classification_partial",
-                "batch":         batch_idx + 1,
-                "total_batches": len(batches),
-                "classified":    classified_count,
-                "total":         len(items),
+        logger.info(
+            f"classify: session={session_id} new={len(verdicts)} "
+            f"({meaningful} meaningful, {noise} noise) total={total_classified}/{total_items}"
+            f"{' COMPLETE' if all_done else ' PARTIAL — retrying remaining'}"
+        )
+
+        if all_done:
+            publish_ws_event_sync(session_id, {
+                "type":       "classification_complete",
+                "classified": total_classified,
+                "meaningful": meaningful,
+                "noise":      noise,
             })
+            return {
+                "session_id":  session_id,
+                "classified":  total_classified,
+                "meaningful":  meaningful,
+                "noise":       noise,
+                "backend":     backend,
+                "model":       model,
+            }
 
-        _ws_emit(session_id, {
-            "type":       "classification_complete",
-            "classified": classified_count,
-            "total":      len(items),
+        # Partial: signal progress, then raise to trigger Celery retry on
+        # the remaining un-classified rows.
+        publish_ws_event_sync(session_id, {
+            "type":       "classification_partial",
+            "classified": total_classified,
+            "total":      total_items,
         })
+        raise LLMError(
+            f"Partial classification: {total_classified}/{total_items} done — retrying remaining",
+            category="gemini_overloaded",
+        )
 
-        logger.info(f"classify: session={session_id} classified={classified_count}/{len(items)}")
-        return {
-            "session_id": session_id,
-            "classified": classified_count,
-            "total":      len(items),
-            "backend":    backend,
-            "model":      model,
-        }
-
+    except LLMError as exc:
+        attempt = self.request.retries
+        logger.warning(f"classify: attempt {attempt + 1} failed for {session_id}: {exc}")
+        if attempt < self.max_retries:
+            self.retry_with_backoff(exc, attempt)
+        raise
     except Exception as exc:  # noqa: BLE001
         attempt = self.request.retries
+        logger.error(f"classify: unexpected error for {session_id}: {exc}", exc_info=True)
         if attempt < self.max_retries:
             self.retry_with_backoff(exc, attempt)
         raise

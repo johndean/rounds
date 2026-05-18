@@ -251,28 +251,182 @@ def call_vertex_ai_text(
     raise LLMError(f"vertex failed: {last_err}", category=_categorize_gemini_error(str(last_err)))
 
 
-def classify_discrepancies(
-    system_prompt: str,
-    user_payload: str,
-    backend: Optional[str] = None,
-    model_id: Optional[str] = None,
-) -> dict:
-    """
-    Dispatcher: Gemini (default) or Vertex AI (when settings flag enabled).
-    `backend` can override the global setting per-request (frontend
-    Settings → Discrepancy classification → Vertex toggle sends
-    `X-Classify-Backend: vertex` for example).
+DISCREPANCY_BATCH_SIZE = 15
 
-    Returns the parsed JSON object. Caller is responsible for shape validation.
+_DISCREPANCY_ALLOWED_CATEGORIES = frozenset({
+    "medication", "number", "name", "date", "terminology",
+    "filler", "punctuation", "style", "other",
+})
+
+
+def _parse_gemini_json_array(raw: str) -> list[dict] | None:
     """
-    use_vertex = (backend == "vertex") or (backend is None and settings.VERTEX_AI_CLASSIFY_ENABLED)
-    model = model_id or settings.GEMINI_CLASSIFY_MODEL
-    raw = (
-        call_vertex_ai_text(system_prompt, user_payload, model_id=model)
-        if use_vertex
-        else call_gemini_text(system_prompt, user_payload, model_id=model)
-    )
+    Parse Gemini's response into a JSON array, stripping markdown fences if
+    the model ignored the "no fences" instruction. Returns None on parse
+    failure or non-list payload.
+    """
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        # Drop the opening fence + optional language tag
+        text = text.split("\n", 1)[1] if "\n" in text else text
+        if text.endswith("```"):
+            text = text.rsplit("```", 1)[0]
+        text = text.strip()
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        raise LLMError(f"classify returned invalid JSON: {e}", category="gemini_error")
+        parsed = json.loads(text)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"_parse_gemini_json_array: failed to parse: {e}; raw={raw[:400]!r}")
+        return None
+    if not isinstance(parsed, list):
+        logger.warning(f"_parse_gemini_json_array: expected list, got {type(parsed).__name__}")
+        return None
+    return parsed
+
+
+def _classify_batch_once(
+    batch: list[dict],
+    prompt: str,
+    classify_model: str,
+    use_vertex: bool,
+) -> list[dict] | None:
+    """Single classify pass — no count validation, no missing-id retry."""
+    payload = json.dumps(
+        [
+            {"id": str(it["id"]), "ai": it.get("ai_text", ""), "stt": it.get("stt_text", "")}
+            for it in batch
+        ],
+        ensure_ascii=False,
+    )
+    backend_label = "Vertex AI Gemini" if use_vertex else "Gemini"
+    try:
+        if use_vertex:
+            raw = call_vertex_ai_text(prompt, payload, model_id=classify_model)
+        else:
+            raw = call_gemini_text(prompt, payload, model_id=classify_model)
+    except LLMError as e:
+        logger.warning(f"_classify_batch_once: {backend_label} failed ({e.category})")
+        return None
+
+    parsed = _parse_gemini_json_array(raw)
+    if parsed is None:
+        return None
+
+    out: list[dict] = []
+    for r in parsed:
+        if not isinstance(r, dict):
+            continue
+        rid = r.get("id")
+        cat = r.get("category")
+        mean = r.get("is_meaningful")
+        if rid is None or not isinstance(mean, bool):
+            continue
+        if cat not in _DISCREPANCY_ALLOWED_CATEGORIES:
+            cat = "other"
+        out.append({"id": str(rid), "category": cat, "is_meaningful": mean})
+    return out
+
+
+def _classify_batch(
+    batch: list[dict],
+    prompt: str,
+    model_id: Optional[str] = None,
+    use_vertex: bool = False,
+) -> list[dict] | None:
+    """
+    Classify a batch with count validation: if Gemini returns fewer items
+    than were sent (truncation or item-skip), retry the missing ids ONCE
+    before returning a partial. Items still missing after retry stay
+    `is_meaningful IS NULL` in the DB and get re-picked by the next
+    Celery retry / sweep.
+    """
+    classify_model = model_id or settings.GEMINI_CLASSIFY_MODEL
+    expected_ids = {str(it["id"]) for it in batch}
+
+    out = _classify_batch_once(batch, prompt, classify_model, use_vertex)
+    if out is None:
+        return None
+
+    received_ids = {r["id"] for r in out}
+    missing_ids = expected_ids - received_ids
+    if missing_ids:
+        logger.warning(
+            f"_classify_batch: {len(missing_ids)}/{len(expected_ids)} items missing, retrying missing ids"
+        )
+        retry_batch = [it for it in batch if str(it["id"]) in missing_ids]
+        retry_out = _classify_batch_once(retry_batch, prompt, classify_model, use_vertex)
+        if retry_out:
+            out.extend(retry_out)
+        still_missing = expected_ids - {r["id"] for r in out}
+        if still_missing:
+            logger.warning(
+                f"_classify_batch: {len(still_missing)} items still missing after retry; "
+                "returning partial — Celery retry will re-pick these as is_meaningful IS NULL"
+            )
+    return out
+
+
+def classify_discrepancies(
+    items: list[dict],
+    model_id: Optional[str] = None,
+    already_classified_ids: Optional[set] = None,
+    use_vertex: bool = False,
+) -> list[dict] | None:
+    """
+    Classify word-level diffs as meaningful or noise.
+
+    items: list of dicts with keys {id, ai_text, stt_text}
+    model_id: optional Gemini model override (default settings.GEMINI_CLASSIFY_MODEL)
+    already_classified_ids: set of item IDs already written to DB — skip these
+    use_vertex: route through Vertex AI Gemini instead of dev Gemini
+
+    Returns:
+      - list of dicts {id, category, is_meaningful} — partial results when
+        some batches fail are still returned
+      - None ONLY if zero batches succeed (caller should retry whole task)
+
+    Ports MIC `app/engines/llm_client.py:365-415`. Batching size matches
+    MIC (DISCREPANCY_BATCH_SIZE=15) to keep payloads under Gemini's per-
+    response truncation threshold; per-batch retry rescues missing ids
+    when Gemini truncates the JSON array.
+    """
+    if not items:
+        return []
+
+    from app.prompts import DISCREPANCY_FILTER_PROMPT
+
+    skip_ids = already_classified_ids or set()
+    pending_items = [i for i in items if str(i["id"]) not in skip_ids]
+    if not pending_items:
+        logger.info("classify_discrepancies: all items already classified, skipping")
+        return []
+
+    batches = [
+        pending_items[i:i + DISCREPANCY_BATCH_SIZE]
+        for i in range(0, len(pending_items), DISCREPANCY_BATCH_SIZE)
+    ]
+    logger.info(
+        f"classify_discrepancies: {len(pending_items)} pending items in {len(batches)} batch(es), "
+        f"model={model_id or 'default'}, vertex={use_vertex} (skipped {len(skip_ids)} already done)"
+    )
+
+    all_results: list[dict] = []
+    failed_count = 0
+    for batch_idx, batch in enumerate(batches):
+        logger.info(f"classify_discrepancies: batch {batch_idx + 1}/{len(batches)} ({len(batch)} items)")
+        result = _classify_batch(batch, DISCREPANCY_FILTER_PROMPT, model_id=model_id, use_vertex=use_vertex)
+        if result is None:
+            logger.warning(f"classify_discrepancies: batch {batch_idx + 1} failed — continuing")
+            failed_count += 1
+            continue
+        all_results.extend(result)
+
+    if not all_results and failed_count > 0:
+        logger.warning(f"classify_discrepancies: ALL {failed_count} batch(es) failed, returning None")
+        return None
+
+    if failed_count > 0:
+        logger.warning(
+            f"classify_discrepancies: {failed_count} batch(es) failed, "
+            f"{len(all_results)} items classified (partial)"
+        )
+    return all_results

@@ -10,10 +10,44 @@ string for the given mode. The prompt instructs Gemini to emit:
   - paragraphs separated by blank lines (one per segment)
   - slide markers of form `++<N>*+` on their own line
   - speaker labels of form `**Name:**` inline at start of speech
+
+Also exports `DISCREPANCY_FILTER_PROMPT` used by
+`app.engines.llm_client.classify_discrepancies` to label STT-vs-AI diffs
+as meaningful (medication / number / name / date / terminology / other)
+or noise (filler / punctuation / style).
 """
 from __future__ import annotations
 
 from typing import Optional
+
+
+DISCREPANCY_FILTER_PROMPT = """\
+You are auditing word-level diffs between an AI-cleaned medical lecture transcript and a raw Google STT transcript.
+
+For each diff, decide whether the AI transcript's version is a MEANINGFUL mistranscription worth flagging for Medical Review, or NOISE the AI correctly cleaned up.
+
+MEANINGFUL (is_meaningful = true) — flag for review:
+- medication  : drug names, brand/generic (e.g., "Narcan" vs "Narcon", "metformin" vs "metoprolol")
+- number      : dosages, counts, percentages, vitals (e.g., "500mg" vs "50mg", "12%" vs "20%")
+- name        : proper nouns — people, places, institutions (e.g., "Dr. Patel" vs "Dr. Patell")
+- date        : dates, years, durations (e.g., "2024" vs "2014")
+- terminology : medical/clinical terms where the word itself carries meaning
+- other       : any other substantive factual mismatch
+
+NOISE (is_meaningful = false) — the AI correctly cleaned this up:
+- filler      : um, uh, er, ah, hm, "you know", "like", "I mean" (AI hard-removes these by design)
+- punctuation : commas, periods, quote marks, capitalization
+- style       : contractions, word reordering, sentence splitting, false-start cleanup, synonyms that preserve meaning
+
+RULES:
+1. Each input item has an `id`, the AI text for the diff range, and the STT text for the diff range.
+2. Return a JSON array with ONE object per input item, same `id`, plus `category` (one of the labels above) and `is_meaningful` (boolean).
+3. If the only difference is filler words the AI removed, it is NOISE.
+4. If the difference involves a medication, number, name, date, or clinical term, it is MEANINGFUL even if small.
+5. When genuinely unsure between style and terminology, lean MEANINGFUL — better to over-flag than miss a mistranscription.
+
+OUTPUT: Return ONLY the JSON array. No prose. No markdown fences. No commentary.
+"""
 
 
 _BASE_FORMAT = """\
