@@ -53,13 +53,28 @@ function _q(params: Record<string, string | number | undefined>): string {
   return s ? `?${s}` : '';
 }
 
+export interface PipelineConfig {
+  ai_pipeline: 'direct' | 'enhanced';
+  ai_mode: string;
+  ai_model: string;
+  prompt_mode: string;
+  custom_prompt?: string | null;
+  stt_backend: string;
+  template_id: string;
+  iil_config: { enabled: boolean; tier1: boolean; tier2: boolean; tier3: boolean };
+}
+
 export const sessions = {
   list: (filters: SessionFilters = {}) =>
     http<SessionSummary[]>(`/v1/sessions${_q({ ...filters })}`),
   get: (id: string) =>
     http<SessionSummary>(`/v1/sessions/${encodeURIComponent(id)}`),
-  create: (payload: { code: string; title: string; presenter?: string; duration_sec?: number; attendee_count?: number; taxonomy?: string[] }) =>
+  create: (payload: { code: string; title: string; presenter?: string; duration_sec?: number | null; attendee_count?: number | null; taxonomy?: string[]; pipeline_config?: PipelineConfig }) =>
     http<SessionSummary>('/v1/sessions', { body: payload, method: 'POST' }),
+  pipelineConfig: (id: string) =>
+    http<PipelineConfig & { auto_detected_template_id: string | null; auto_detected_confidence: number | null }>(
+      `/v1/sessions/${encodeURIComponent(id)}/pipeline-config`,
+    ),
 };
 
 // ─── Segments ────────────────────────────────────────────────────────────

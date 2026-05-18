@@ -14,14 +14,33 @@
  *      c. POST /v1/gcs/upload-complete (R7 scope-validated, writes Source rows)
  *      d. Router push to /p/<session_id> for ingest progress (Phase 6)
  */
-import { computed, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import Icon from '@/components/shared/Icon.vue';
 import { toast } from '@/composables/useToast';
-import { sessions as sessionsApi, gcs as gcsApi } from '@/services/api';
+import { sessions as sessionsApi, gcs as gcsApi, settingsApi, type PipelineConfig } from '@/services/api';
 import { ApiError } from '@/services/http';
 
 const router = useRouter();
+
+// Prefill the form's defaults from org-level settings (Settings → AI Models).
+onMounted(async () => {
+  try {
+    const s = await settingsApi.list();
+    const defaults = s as Record<string, unknown>;
+    if (typeof defaults.default_ai_model === 'string') {
+      model.value = defaults.default_ai_model as string;
+    }
+    if (typeof defaults.default_pipeline === 'string') {
+      pipeline.value = defaults.default_pipeline as string;
+    }
+    if (typeof defaults.default_style === 'string') {
+      style.value = defaults.default_style as string;
+    }
+  } catch {
+    /* settings load is non-fatal — UploadView falls back to local defaults */
+  }
+});
 
 // ── Form state ────────────────────────────────────────────────────────
 const pipeline = ref('direct');
@@ -130,6 +149,43 @@ function genCode(): string {
   return `${mm}${dd}${yy}_${stem.replace(/[^A-Za-z0-9_-]/g, '_')}`;
 }
 
+function buildPipelineConfig(): PipelineConfig {
+  // Map UploadView form refs → backend PipelineConfig contract.
+  // pipeline:  'direct' | 'enhanced'  (matches backend enum exactly)
+  // ai_mode:   form value passes through
+  // ai_model:  model picker → strip 'gemini-' / 'gpt-' prefix already canonical
+  // template_id: derived from `style` (lecture / training / technical / podcast / sales / custom)
+  const styleToTemplate: Record<string, string> = {
+    lecture:           'lecture_v1',
+    training:          'training_v1',
+    technical:         'technical_v1',
+    podcast:           'podcast_v1',
+    sales:             'sales_v1',
+    'custom-define':   'lecture_v1',  // fallback when 'Custom' style chosen
+  };
+  const modelMap: Record<string, string> = {
+    'gemini-25-pro':    'gemini-2.5-pro',
+    'gemini-25-flash':  'gemini-2.5-flash',
+    'gpt-5':            'gpt-5',
+    'claude-opus':      'claude-opus-4-5',
+  };
+  return {
+    ai_pipeline:   pipeline.value === 'direct' ? 'direct' : 'enhanced',
+    ai_mode:       aiMode.value,
+    ai_model:      modelMap[model.value] ?? model.value,
+    prompt_mode:   aiMode.value,
+    custom_prompt: aiMode.value === 'custom-prompt' ? customPromptDefault : null,
+    stt_backend:   stt.value,
+    template_id:   styleToTemplate[style.value] ?? 'lecture_v1',
+    iil_config:    {
+      enabled: iilEnabled.value,
+      tier1:   tier1.value,
+      tier2:   tier2.value,
+      tier3:   tier3.value,
+    },
+  };
+}
+
 async function processBatch(): Promise<void> {
   if (!filesAttached.value) {
     toast.push('Add at least one file', { tone: 'warn' });
@@ -140,7 +196,7 @@ async function processBatch(): Promise<void> {
   progress.value = { done: 0, total: attached.value.length };
   const code = genCode();
   try {
-    // 1) Create session
+    // 1) Create session with pipeline_config from form
     toast.push(`Creating session ${code}…`, { tone: 'info' });
     const session = await sessionsApi.create({
       code,
@@ -149,8 +205,9 @@ async function processBatch(): Promise<void> {
       duration_sec: null,
       attendee_count: null,
       taxonomy: [],
-    } as never);
-    const sessionId = (session as { id: string }).id;
+      pipeline_config: buildPipelineConfig(),
+    });
+    const sessionId = session.id;
 
     // 2) Per-file: signed-URL → PUT
     const completeFiles: Array<{ gcs_uri: string; role: string; filename: string; content_type: string; size_bytes: number }> = [];

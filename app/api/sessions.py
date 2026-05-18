@@ -6,7 +6,7 @@ Supports the frontend's ?stage / ?ai / ?f query params for filtered lists
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, status
@@ -21,6 +21,21 @@ router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
 
 
 # ─── Pydantic schemas ──────────────────────────────────────────────────
+class PipelineConfig(BaseModel):
+    """
+    Pipeline routing captured at upload. Persisted to `session_templates`.
+    The 7 UploadView form fields all live here.
+    """
+    ai_pipeline: str = Field(default="enhanced")             # direct | enhanced
+    ai_mode: str     = Field(default="transcript")           # transcript | summary | key-moments | structured-notes | custom-prompt
+    ai_model: str    = Field(default="gemini-2.5-pro")
+    prompt_mode: str = Field(default="transcript")
+    custom_prompt: Optional[str] = None
+    stt_backend: str = Field(default="google_latest_long")
+    template_id: str = Field(default="lecture_v1")
+    iil_config: dict[str, Any] = Field(default_factory=lambda: {"enabled": True, "tier1": True, "tier2": True, "tier3": True})
+
+
 class SessionIn(BaseModel):
     code: str = Field(..., min_length=1, max_length=64)
     title: str = Field(..., min_length=1, max_length=512)
@@ -28,6 +43,7 @@ class SessionIn(BaseModel):
     duration_sec: Optional[int] = None
     attendee_count: Optional[int] = None
     taxonomy: list[str] = Field(default_factory=list)
+    pipeline_config: Optional[PipelineConfig] = None
 
 
 class SessionOut(BaseModel):
@@ -86,11 +102,14 @@ async def list_sessions(
 @router.post("", response_model=SessionOut, status_code=status.HTTP_201_CREATED)
 async def create_session(payload: SessionIn, db: DbSession, user: CurrentUser) -> dict:
     """
-    Create a placeholder session row. Real ingest path (manifest parse +
-    Celery enqueue) lands in Phase 6 / U37-U40.
+    Create a session row + the matching `session_templates` row that carries
+    the pipeline routing chosen on Upload. The two writes happen in the same
+    transaction so `ingest_task` always finds a config row.
     """
-    # Direct SQL insert until ORM models land in Phase 7.
+    import json
+
     from sqlalchemy import text
+
     row = (
         await db.execute(
             text(
@@ -110,7 +129,61 @@ async def create_session(payload: SessionIn, db: DbSession, user: CurrentUser) -
             },
         )
     ).mappings().one()
+
+    # Pipeline config — fall back to defaults if not supplied (legacy clients).
+    cfg = payload.pipeline_config or PipelineConfig()
+    await db.execute(
+        text(
+            """
+            INSERT INTO session_templates
+                (session_id, ai_pipeline, ai_mode, ai_model, prompt_mode, custom_prompt,
+                 stt_backend, template_id, iil_config)
+            VALUES
+                (:sid, :ai_pipeline, :ai_mode, :ai_model, :prompt_mode, :custom_prompt,
+                 :stt_backend, :template_id, CAST(:iil_config AS jsonb))
+            """
+        ),
+        {
+            "sid":           str(row["id"]),
+            "ai_pipeline":   cfg.ai_pipeline,
+            "ai_mode":       cfg.ai_mode,
+            "ai_model":      cfg.ai_model,
+            "prompt_mode":   cfg.prompt_mode,
+            "custom_prompt": cfg.custom_prompt,
+            "stt_backend":   cfg.stt_backend,
+            "template_id":   cfg.template_id,
+            "iil_config":    json.dumps(cfg.iil_config),
+        },
+    )
     await db.commit()
+    return dict(row)
+
+
+# ─── /v1/sessions/{id}/pipeline-config ────────────────────────────────
+class PipelineConfigOut(PipelineConfig):
+    auto_detected_template_id: Optional[str] = None
+    auto_detected_confidence: Optional[float] = None
+
+
+@router.get("/{session_id}/pipeline-config", response_model=PipelineConfigOut)
+async def get_pipeline_config(session_id: UUID, db: DbSession, _u: CurrentUser) -> dict:
+    from sqlalchemy import text
+
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT ai_pipeline, ai_mode, ai_model, prompt_mode, custom_prompt,
+                       stt_backend, template_id, iil_config,
+                       auto_detected_template_id, auto_detected_confidence
+                FROM session_templates WHERE session_id = :sid
+                """
+            ),
+            {"sid": str(session_id)},
+        )
+    ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="No pipeline config for session")
     return dict(row)
 
 
