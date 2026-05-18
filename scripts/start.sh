@@ -9,18 +9,23 @@ if [[ -n "${GCP_KEY_B64:-}" ]]; then
 fi
 
 # Role resolution:
-#   1. Explicit first argument wins ($1)
-#   2. Railway sets RAILWAY_SERVICE_NAME — match common names
-#   3. Fallback to "api"
-# This means the worker service runs Celery without needing a startCommand
-# override in railway.json (the default in railway.json is "bash scripts/start.sh api"
-# and we don't want to fork that file per service).
-if [[ -n "${1:-}" ]]; then
+#   1. RAILWAY_SERVICE_NAME matches a worker name — ALWAYS use "worker"
+#      (the worker service inherits the default startCommand from
+#      railway.json which is "bash scripts/start.sh api" — that "api"
+#      arg would otherwise force the worker to run uvicorn and ingest
+#      jobs sit in Redis forever).
+#   2. Explicit $1 argument
+#   3. RAILWAY_SERVICE_NAME otherwise (api / migrate)
+#   4. Fallback to "api"
+if [[ -n "${RAILWAY_SERVICE_NAME:-}" ]] && \
+   [[ "${RAILWAY_SERVICE_NAME,,}" =~ ^(worker|celery|.*-worker)$ ]]; then
+  role="worker"
+elif [[ -n "${1:-}" ]]; then
   role="$1"
 elif [[ -n "${RAILWAY_SERVICE_NAME:-}" ]]; then
   case "${RAILWAY_SERVICE_NAME,,}" in
-    worker|celery|*-worker) role="worker" ;;
-    *)                       role="api" ;;
+    *migrate*) role="migrate" ;;
+    *)         role="api" ;;
   esac
 else
   role="api"

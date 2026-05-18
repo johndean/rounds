@@ -96,8 +96,9 @@ from app.middleware.request_id import RequestIdMiddleware  # noqa: E402
 app.add_middleware(RequestIdMiddleware)
 
 
-@app.get("/v1/health")
+@app.api_route("/v1/health", methods=["GET", "HEAD"])
 async def health() -> JSONResponse:
+    """Healthcheck — supports HEAD for load-balancer probes that don't want a body."""
     return JSONResponse({"status": "ok", "version": app.version, "env": settings.ENVIRONMENT})
 
 

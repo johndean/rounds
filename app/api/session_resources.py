@@ -39,8 +39,8 @@ class ReExtractRequest(BaseModel):
 @router.post("/slides/re-extract")
 async def re_extract_slides(
     session_id: UUID,
+    _user: CurrentUser,
     payload: ReExtractRequest = Body(...),
-    _user: CurrentUser = None,  # type: ignore[assignment]
 ) -> dict:
     """Phase 7h — re-extract specific PDF pages on operator request."""
     try:
