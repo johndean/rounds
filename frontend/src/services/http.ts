@@ -61,12 +61,45 @@ export async function http<T = unknown>(path: string, opts: RequestOpts = {}): P
   const isJson = resp.headers.get('content-type')?.includes('application/json');
   const payload = isJson ? await resp.json().catch(() => undefined) : await resp.text().catch(() => '');
 
+  // Auto-unwrap MIC §9.1 envelope. Backend wraps every JSON response in
+  // {success, data, error, meta} — frontend callers expect the raw `data`
+  // payload as before parity-3. Detect the envelope by checking the exact
+  // 4-key shape so we don't unwrap a response that legitimately happens to
+  // contain a `data` field.
+  const unwrapped = unwrapEnvelope(payload);
+
   if (!resp.ok) {
     if (resp.status === 401 && !opts.anonymous) {
       // JWT expired or revoked. Clear it so the next request prompts login.
       setToken(null);
     }
-    throw new ApiError(resp.status, payload);
+    throw new ApiError(resp.status, unwrapped);
   }
-  return payload as T;
+  return unwrapped as T;
+}
+
+
+function unwrapEnvelope(payload: unknown): unknown {
+  if (
+    payload &&
+    typeof payload === 'object' &&
+    !Array.isArray(payload) &&
+    'success' in payload &&
+    'data' in payload &&
+    'error' in payload &&
+    'meta' in payload
+  ) {
+    const env = payload as { success: boolean; data: unknown; error: unknown };
+    // On error: surface the error.code/message via ApiError thrown above; but
+    // here we still return the envelope's data field (null on error) so the
+    // caller can inspect it if it gets through. The non-2xx path already
+    // throws ApiError so most callers never see a null-data envelope.
+    if (env.success === false && env.error) {
+      // Propagate the error shape via the throw path (caller's response was
+      // not ok). For 2xx-with-success=false (unusual), return null data.
+      return env.data;
+    }
+    return env.data;
+  }
+  return payload;
 }
