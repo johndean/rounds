@@ -21,6 +21,7 @@ from app.api import discrepancies as disc_router
 from app.api import gcs_upload as gcs_router
 from app.api import improvements as improvements_router
 from app.api import segments as segments_router
+from app.api import session_resources as session_resources_router
 from app.api import sessions as sessions_router
 from app.api import settings as settings_router
 from app.api import sop as sop_router
@@ -73,6 +74,7 @@ async def health() -> JSONResponse:
 app.include_router(auth_router.router)
 app.include_router(gcs_router.router)
 app.include_router(sessions_router.router)
+app.include_router(session_resources_router.router)
 app.include_router(segments_router.router)
 app.include_router(disc_router.router)
 app.include_router(sop_router.router)

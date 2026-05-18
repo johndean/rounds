@@ -51,22 +51,36 @@ async def list_sessions(
     _user: CurrentUser,
     stage: Optional[str] = None,    # SOP stage filter — ?stage=medical
     ai: Optional[str]    = None,    # AI pipeline stage   — ?ai=transcribe
-    f: Optional[str]     = None,    # free-text query     — ?f=… (TBD)
+    f: Optional[str]     = None,    # free-text query     — ?f=…
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict]:
     """
     Lists non-deleted sessions, optionally filtered by SOP stage (via sop_state
-    join) or AI processing stage (via sessions.status), or free-text.
-
-    NOTE: Sessions table is empty in v1 (no ingest path yet) — this currently
-    returns an empty list. Filtering logic is in place so the frontend's
-    pipeline-circle navigation already lands here.
+    join), AI processing stage (via sessions.status), or free-text on code/title.
     """
-    # SOP stage filter requires sop_state join — wire when Phase 7 / U48 lands.
-    # AI stage filter maps to the `status` column (ingesting | ready | failed | archived).
-    # For now: just return [] until ingest writes rows.
-    return []
+    from sqlalchemy import text
+    where = ["deleted_at IS NULL"]
+    params: dict[str, object] = {"limit": limit, "offset": offset}
+    if ai:
+        where.append("status = :ai")
+        params["ai"] = ai
+    if f:
+        where.append("(LOWER(code) LIKE :f OR LOWER(title) LIKE :f)")
+        params["f"] = f"%{f.lower()}%"
+    sql = f"""
+        SELECT s.id, s.code, s.title, s.presenter, s.status, s.duration_sec,
+               s.word_count, s.segment_count, s.attendee_count, s.taxonomy
+        FROM sessions s
+        {"JOIN sop_state st ON st.session_id = s.id AND st.stage = :stage" if stage else ""}
+        WHERE {' AND '.join(where)}
+        ORDER BY s.created_at DESC NULLS LAST, s.code DESC
+        LIMIT :limit OFFSET :offset
+    """
+    if stage:
+        params["stage"] = stage
+    rows = (await db.execute(text(sql), params)).mappings().all()
+    return [dict(r) for r in rows]
 
 
 @router.post("", response_model=SessionOut, status_code=status.HTTP_201_CREATED)
