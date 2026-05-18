@@ -82,30 +82,47 @@ def transcribe_task(self, session_id: str) -> dict:  # noqa: ARG001  (bind=True 
         logger.info(f"transcribe: session={session_id} backend={backend} uri={gcs_uri}")
 
         if backend == "google_stt_chunked":
-            words = _backend_google_stt_chunked(gcs_uri)
+            raw_words = _backend_google_stt_chunked(gcs_uri)
         elif backend == "google_stt":
-            words = _backend_google_stt(gcs_uri)
+            raw_words = _backend_google_stt(gcs_uri)
         else:
             raise RuntimeError(f"unknown TRANSCRIPTION_BACKEND: {backend}")
 
-        segments = _group_words_to_segments(words)
-        if not segments:
+        # Phase 7a: hand off to the deterministic 4-rule segmenter (engines/segmenter.py).
+        # This replaces the inline 3-rule fallback. Output is RawSegment dataclasses
+        # with content-deterministic SHA256 IDs.
+        from app.engines.segmenter import WordToken, segment_words
+
+        word_tokens = [
+            WordToken(
+                word=w["word"],
+                start_time=w["start_time"],
+                end_time=w["end_time"],
+                confidence=w["confidence"],
+            )
+            for w in raw_words
+        ]
+        raw_segments = segment_words(session_id, word_tokens)
+        if not raw_segments:
             raise RuntimeError("transcribe: STT returned 0 words — refusing to mark session ready")
 
-        duration_sec = int(round(max((s["end_ms"] for s in segments), default=0) / 1000.0))
-        word_count = sum(len(s["text"].split()) for s in segments)
+        duration_sec = int(round(max((s.end_time for s in raw_segments), default=0)))
+        word_count = sum(len(s.text.split()) for s in raw_segments)
 
         with engine.begin() as conn:
-            for seg in segments:
+            for seq, seg in enumerate(raw_segments, start=1):
+                start_ms = int(round(seg.start_time * 1000))
+                end_ms = int(round(seg.end_time * 1000))
                 seg_row = conn.execute(
                     text(
                         """
                         INSERT INTO segments
-                            (session_id, seq, start_ms, end_ms, text, confidence, flags)
+                            (session_id, seq, start_ms, end_ms, text, confidence, flags, content_hash)
                         VALUES
-                            (CAST(:sid AS uuid), :seq, :st, :et, :tx, :conf, '[]'::jsonb)
-                        ON CONFLICT (session_id, seq) DO UPDATE
-                          SET start_ms = EXCLUDED.start_ms,
+                            (CAST(:sid AS uuid), :seq, :st, :et, :tx, :conf, '[]'::jsonb, :hash)
+                        ON CONFLICT (session_id, content_hash) DO UPDATE
+                          SET seq      = EXCLUDED.seq,
+                              start_ms = EXCLUDED.start_ms,
                               end_ms   = EXCLUDED.end_ms,
                               text     = EXCLUDED.text,
                               confidence = EXCLUDED.confidence,
@@ -115,16 +132,17 @@ def transcribe_task(self, session_id: str) -> dict:  # noqa: ARG001  (bind=True 
                     ),
                     {
                         "sid": session_id,
-                        "seq": seg["seq"],
-                        "st": seg["start_ms"],
-                        "et": seg["end_ms"],
-                        "tx": seg["text"],
-                        "conf": seg["confidence"],
+                        "seq": seq,
+                        "st":  start_ms,
+                        "et":  end_ms,
+                        "tx":  seg.text,
+                        "conf": seg.confidence,
+                        "hash": seg.segment_id,
                     },
                 ).fetchone()
-                if seg_row and seg.get("words"):
-                    seg_id = str(seg_row[0])
-                    for w_seq, w in enumerate(seg["words"]):
+                if seg_row and seg.words:
+                    seg_uuid = str(seg_row[0])
+                    for w_seq, w in enumerate(seg.words):
                         conn.execute(
                             text(
                                 """
@@ -140,12 +158,12 @@ def transcribe_task(self, session_id: str) -> dict:  # noqa: ARG001  (bind=True 
                                 """
                             ),
                             {
-                                "seg":  seg_id,
+                                "seg":  seg_uuid,
                                 "seq":  w_seq,
-                                "w":    w["word"],
-                                "st":   int(round(w["start_time"] * 1000)),
-                                "et":   int(round(w["end_time"] * 1000)),
-                                "conf": w["confidence"],
+                                "w":    w.word,
+                                "st":   int(round(w.start_time * 1000)),
+                                "et":   int(round(w.end_time * 1000)),
+                                "conf": w.confidence,
                             },
                         )
             conn.execute(
@@ -163,11 +181,11 @@ def transcribe_task(self, session_id: str) -> dict:  # noqa: ARG001  (bind=True 
                     "sid": session_id,
                     "dur": duration_sec,
                     "wc": word_count,
-                    "sc": len(segments),
+                    "sc": len(raw_segments),
                 },
             )
 
-        logger.info(f"transcribe: session={session_id} wrote {len(segments)} segments / {word_count} words")
+        logger.info(f"transcribe: session={session_id} wrote {len(raw_segments)} segments / {word_count} words")
 
         # Trigger anchor_task — reads frame_task's Redis output (or empty if
         # frame hasn't finished) and writes confirmed AnchorHit[] for fusion.
@@ -178,7 +196,7 @@ def transcribe_task(self, session_id: str) -> dict:  # noqa: ARG001  (bind=True 
         except Exception as anchor_err:  # noqa: BLE001
             logger.warning(f"transcribe: failed to trigger anchor_task: {anchor_err}")
 
-        return {"session_id": session_id, "segment_count": len(segments), "word_count": word_count}
+        return {"session_id": session_id, "segment_count": len(raw_segments), "word_count": word_count}
 
     except Exception as exc:  # noqa: BLE001
         attempt = self.request.retries
