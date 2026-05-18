@@ -134,19 +134,13 @@ class RoundsTask(Task):
         except Exception as e:  # noqa: BLE001
             logger.error(f"_fail_session: unexpected error for {session_id}: {e}")
 
-        # Release the Redis active-session counter — failed = terminal.
-        # 6o (rate-limit) populates these sets; until then this is a no-op cleanup.
+        # Release rate-limit slot (6o).
         try:
-            import redis as _redis
+            from app.middleware.rate_limit import release_slot
 
-            r = _redis.from_url(settings.REDIS_URL, decode_responses=True)
-            try:
-                for key in r.keys("sessions:active:*"):
-                    r.srem(key, session_id)
-            finally:
-                r.close()
+            release_slot(None, session_id)
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"_fail_session: redis cleanup failed for {session_id}: {e}")
+            logger.warning(f"_fail_session: release_slot failed for {session_id}: {e}")
 
         # Emit WS event (no-op until 6n).
         try:

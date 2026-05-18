@@ -38,6 +38,9 @@ class UploadUrlResponse(BaseModel):
 @router.post("/upload-url", response_model=UploadUrlResponse)
 async def signed_url(payload: UploadUrlRequest, _user: CurrentUser) -> UploadUrlResponse:
     """Returns a 60-minute v4 PUT signed URL for the given session/role/filename."""
+    from app.middleware.rate_limit import check_user_quota
+
+    check_user_quota(_user)
     try:
         signed, uri = make_signed_put_url(payload.session_id, payload.role, payload.filename)
     except Exception as exc:  # GCS SDK failures
@@ -89,6 +92,11 @@ async def upload_complete(
     failures are non-fatal — the upload still succeeded and the operator
     can re-trigger ingest via `/v1/diag/reingest/{session_id}` (Phase 6b).
     """
+    from app.middleware.rate_limit import reserve_slot, validate_files
+
+    validate_files(payload.files, payload.session_id)
+    reserve_slot(_user.email, payload.session_id)
+
     files_as_dicts = [f.model_dump() for f in payload.files]
     out_of_scope = find_out_of_scope_uri(files_as_dicts, payload.session_id)
     if out_of_scope is not None:

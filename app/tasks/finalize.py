@@ -81,6 +81,14 @@ def finalize_task(self, prev_result=None, session_id=None) -> dict:  # noqa: ARG
         except ConflictError as e:
             logger.warning(f"finalize: transition error ({e}) — current={current}")
 
+        # Release rate-limit slot (6o) — session is terminal-success.
+        try:
+            from app.middleware.rate_limit import release_slot
+
+            release_slot(None, session_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"finalize: release_slot failed: {e}")
+
         logger.info(f"finalize: session {session_id} ready")
         return {"session_id": session_id, "status": "ready"}
     finally:

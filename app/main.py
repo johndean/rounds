@@ -82,6 +82,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Idempotency middleware — replay-cached responses on Idempotency-Key header.
+# Phase 6o / U139-U140.
+from app.middleware.idempotency import IdempotencyMiddleware  # noqa: E402
+
+app.add_middleware(IdempotencyMiddleware)
+
 
 @app.get("/v1/health")
 async def health() -> JSONResponse:
