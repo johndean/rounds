@@ -304,7 +304,14 @@ def _process_direct(
 
     # ── 7. Persist segments + slides + speakers + alignments atomically ──
     with engine.begin() as conn:
-        # Speakers — one row per unique speaker label.
+        # Speakers — one row per unique speaker label. Wipe existing rows for
+        # this session first so retries don't leak duplicate "Presenter" rows.
+        # The speakers table has no UNIQUE(session_id, name); deterministic
+        # idempotency lives in the segments table via content_hash.
+        conn.execute(
+            text("DELETE FROM speakers WHERE session_id = CAST(:sid AS uuid)"),
+            {"sid": session_id},
+        )
         speaker_id_by_name: dict[str, str] = {}
         unique_names = list({(s.get("speaker_name") or "Presenter") for s in parsed})
         for name in unique_names:
@@ -351,29 +358,31 @@ def _process_direct(
             if row:
                 slide_id_by_marker[marker] = str(row[0])
 
-        # Segments — one row per parsed paragraph. Deterministic ID
-        # (SHA256 of session+start_ms) so re-runs are idempotent. The
-        # `segments` table currently uses UUID id columns — until 6j
-        # ports the schema to text IDs, we keep gen_random_uuid here
-        # but enforce idempotency through the (session_id, seq) UNIQUE.
+        # Segments — one row per parsed paragraph. Deterministic content_hash
+        # (SHA256 of session_id + start_ms — migration 020) is the idempotency
+        # key, NOT (session_id, seq) — migration 022 dropped that UNIQUE
+        # constraint because re-runs with a refined segmenter can shift seq
+        # values while preserving content_hash.
         for seq_idx, seg in enumerate(parsed, start=1):
             start_ms = int(round(seg["start_time"] * 1000))
             end_ms = int(round(seg["end_time"] * 1000))
             speaker_name = seg.get("speaker_name") or "Presenter"
             speaker_id = speaker_id_by_name.get(speaker_name)
             slide_id = slide_id_by_marker.get(seg.get("slide_marker") or -1)
+            content_hash = hashlib.sha256(f"{session_id}{start_ms}".encode()).hexdigest()
 
             conn.execute(
                 text(
                     """
                     INSERT INTO segments
                         (session_id, seq, start_ms, end_ms, text, confidence,
-                         flags, slide_id, speaker_id)
+                         flags, slide_id, speaker_id, content_hash)
                     VALUES
                         (CAST(:sid AS uuid), :seq, :st, :et, :tx, :conf,
-                         '[]'::jsonb, :slide_id, :speaker_id)
-                    ON CONFLICT (session_id, seq) DO UPDATE
+                         '[]'::jsonb, :slide_id, :speaker_id, :ch)
+                    ON CONFLICT (session_id, content_hash) DO UPDATE
                       SET text       = EXCLUDED.text,
+                          seq        = EXCLUDED.seq,
                           start_ms   = EXCLUDED.start_ms,
                           end_ms     = EXCLUDED.end_ms,
                           slide_id   = EXCLUDED.slide_id,
@@ -390,6 +399,7 @@ def _process_direct(
                     "conf":       0.9,
                     "slide_id":   slide_id,
                     "speaker_id": speaker_id,
+                    "ch":         content_hash,
                 },
             )
 
