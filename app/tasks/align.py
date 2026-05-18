@@ -1,18 +1,16 @@
 """
 Align task — assign segments to slides + write slide windows.
 
-This first-pass aligner uses a time-proportional approach: segments are
-distributed evenly across the slide count by their `start_ms` relative to
-`session.duration_sec`. When a future `frame_task` writes visual change
-signals, the LOCKED ALIGN_WEIGHT_* fusion (audit §6) takes over.
+First-pass aligner: time-proportional bucketing of segments across the slide
+count. When a future `frame_task` writes visual change signals, the LOCKED
+ALIGN_WEIGHT_* fusion (audit §6) replaces this.
 
-Output:
-  * segments.slide_id ← the slide that owns each segment's start
-  * slides.start_ms / slides.end_ms ← derived from the segments assigned
+The core work lives in `_align_session(session_id)` so `finalize_task` can
+call it synchronously without entering Celery's bind-self plumbing.
 
-Side-effect: writes a single placeholder speakers row ("Presenter") if
-the session has no speakers, so the editor's right rail has something
-to show. Real speaker diarization is a Phase 6b follow-up.
+Side-effect: writes a placeholder speakers row ("Presenter") if the session
+has no speakers, so the editor's right rail has something to show. Real
+speaker diarization is Phase 6b.
 """
 from __future__ import annotations
 
@@ -23,13 +21,12 @@ from app.tasks.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(
-    bind=True,
-    name="rounds.tasks.align",
-    max_retries=2,
-    default_retry_delay=30,
-)
-def align_task(self, session_id: str) -> dict:  # noqa: ARG001
+def _align_session(session_id: str) -> dict:
+    """
+    Pure function — no Celery binding. Reusable from `finalize_task` so we
+    can chain align + status-flip atomically without re-entering the
+    worker's bind/retry machinery.
+    """
     from sqlalchemy import create_engine, text
 
     from app.config import settings
@@ -69,7 +66,6 @@ def align_task(self, session_id: str) -> dict:  # noqa: ARG001
             logger.info(f"align: no segments for {session_id} — nothing to do")
             return {"session_id": session_id, "assigned": 0, "slides": 0}
 
-        speaker_id = None
         if not speaker_existing:
             with engine.begin() as conn:
                 row = conn.execute(
@@ -128,7 +124,19 @@ def align_task(self, session_id: str) -> dict:  # noqa: ARG001
 
         logger.info(f"align: session={session_id} assigned={len(segs)} slides={len(slides)}")
         return {"session_id": session_id, "assigned": len(segs), "slides": len(slides)}
+    finally:
+        engine.dispose()
 
+
+@celery_app.task(
+    bind=True,
+    name="rounds.tasks.align",
+    max_retries=2,
+    default_retry_delay=30,
+)
+def align_task(self, session_id: str) -> dict:
+    try:
+        return _align_session(session_id)
     except Exception as exc:  # noqa: BLE001
         attempt = self.request.retries
         if attempt < self.max_retries:
@@ -136,5 +144,3 @@ def align_task(self, session_id: str) -> dict:  # noqa: ARG001
             raise self.retry(exc=exc, countdown=30 * (attempt + 1))
         logger.exception(f"align: terminal failure for {session_id}")
         raise
-    finally:
-        engine.dispose()

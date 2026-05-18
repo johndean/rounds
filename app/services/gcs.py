@@ -27,6 +27,7 @@ _ROLE_PREFIXES: dict[str, str] = {
     "manifest":      "manifest/",
     "audio_enhance": "uploads/",
     "audio":         "uploads/",
+    "chat":          "chat/",           # raw chat-transcript .txt — manifest parser ingests
     "other":         "uploads/",
 }
 

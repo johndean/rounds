@@ -6,24 +6,61 @@
  * Hop statuses are derived from the session.status field — until the
  * Celery ingest task is implemented they stay at "queued" past hop 2.
  */
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { useRouter } from 'vue-router';
 import Icon from '@/components/shared/Icon.vue';
 import { sessions as sessionsApi, type SessionSummary } from '@/services/api';
 import { toast } from '@/composables/useToast';
 import { confirm } from '@/composables/useConfirm';
 
 const props = defineProps<{ id: string }>();
+const router = useRouter();
 const session = ref<SessionSummary | null>(null);
 const loading = ref(true);
 const error = ref<string | null>(null);
+let pollHandle: ReturnType<typeof setInterval> | null = null;
+
+async function fetchOnce(): Promise<void> {
+  try {
+    session.value = await sessionsApi.get(props.id);
+    error.value = null;
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'Failed to load';
+  }
+}
 
 async function load(): Promise<void> {
   loading.value = true;
-  try { session.value = await sessionsApi.get(props.id); }
-  catch (e) { error.value = e instanceof Error ? e.message : 'Failed to load'; }
+  try { await fetchOnce(); }
   finally { loading.value = false; }
 }
-onMounted(load);
+
+function startPolling(): void {
+  if (pollHandle) return;
+  pollHandle = setInterval(() => {
+    const s = session.value?.status;
+    // Stop polling once terminal — ready / complete / failed.
+    if (s === 'ready' || s === 'complete' || s === 'failed') {
+      stopPolling();
+      return;
+    }
+    void fetchOnce();
+  }, 4000);
+}
+function stopPolling(): void {
+  if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
+}
+
+onMounted(async () => { await load(); startPolling(); });
+onUnmounted(stopPolling);
+
+// Auto-redirect to the editor when the session lands ready.
+watch(() => session.value?.status, (s, prev) => {
+  if ((s === 'ready' || s === 'complete') && prev && prev !== s) {
+    toast.push('Ingest complete — opening editor', { tone: 'success' });
+    setTimeout(() => router.push(`/e/${props.id}`), 600);
+  }
+});
 
 type HopStatus = 'done' | 'running' | 'pending' | 'failed';
 interface Hop { n: number; name: string; desc: string; status: HopStatus; t: string }
@@ -32,17 +69,17 @@ const hops = computed<Hop[]>(() => {
   const s = session.value?.status ?? 'ingesting';
   const isReady = s === 'ready' || s === 'complete';
   const isFailed = s === 'failed';
-  // Today: upload-complete writes Source rows but no Celery task runs.
-  // Hops 1-3 (upload + persist) are done; 4+ stay queued until ingest exists.
-  const after3: HopStatus = isFailed ? 'failed' : isReady ? 'done' : 'pending';
+  const segCount = session.value?.segment_count ?? 0;
+  const sttDone: HopStatus = isFailed ? 'failed' : (isReady || segCount > 0) ? 'done' : 'running';
+  const post: HopStatus = isFailed ? 'failed' : isReady ? 'done' : (segCount > 0 ? 'running' : 'pending');
   return [
     { n: 1, name: 'Asset Upload',               desc: 'Audio + slide deck received from presenter',     status: 'done',    t: '0:00:01' },
     { n: 2, name: 'Media Probe',                desc: 'FFmpeg probe · duration / channels / sample rate', status: 'done',    t: '0:00:01' },
     { n: 3, name: 'GCS Persist',                desc: 'Bytes streamed direct-to-bucket',                  status: 'done',    t: '0:00:01' },
-    { n: 4, name: 'STT (Google)',               desc: 'Streaming recognition · chunked',                  status: after3,    t: after3 === 'done' ? '—' : 'queued' },
-    { n: 5, name: 'Gemini Reconstruction',      desc: 'Verbatim-minus-fillers · 3-tier normalization',    status: after3,    t: 'queued' },
-    { n: 6, name: 'Slide Alignment',            desc: 'Segment ↔ slide_id assignment',                    status: after3,    t: 'queued' },
-    { n: 7, name: 'Discrepancy Classification', desc: 'STT vs base_text · server-side LCS',               status: after3,    t: 'queued' },
+    { n: 4, name: 'STT (Google)',               desc: 'Cloud STT · chunked long_running_recognize',       status: sttDone,   t: sttDone === 'done' ? '—' : (sttDone === 'running' ? 'running' : 'queued') },
+    { n: 5, name: 'Slide Extraction',           desc: 'pdftoppm rasterization · GCS thumbnails',          status: post,      t: post === 'done' ? '—' : 'queued' },
+    { n: 6, name: 'Slide Alignment',            desc: 'Segment ↔ slide_id assignment',                    status: post,      t: post === 'done' ? '—' : 'queued' },
+    { n: 7, name: 'Discrepancy Classification', desc: 'STT vs base_text · server-side LCS',               status: 'pending', t: 'deferred' },
     { n: 8, name: 'Ready for Edit',             desc: 'Session graduates to Prep stage',                  status: isReady ? 'done' : 'pending', t: isReady ? '—' : 'queued' },
   ];
 });

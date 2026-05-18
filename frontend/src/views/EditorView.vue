@@ -50,6 +50,8 @@ const router = useRouter();
 const session = ref<SessionSummary | null>(null);
 const SLIDES = ref<Slide[]>([]);
 const SEGMENTS = ref<Segment[]>([]);
+interface ApiSpeaker { id: string; short: string | null; name: string | null; role: string | null }
+const SPEAKERS_API = ref<ApiSpeaker[]>([]);
 const CHAT = ref<ChatMessage[]>([]);
 const POLLS = ref<Poll[]>([]);
 const DISCREPANCIES = ref<Array<{ kind: string; meaningful: boolean; status: string }>>([]);
@@ -63,17 +65,27 @@ const sessionStage = computed(() => 'prep'); // until /sop wiring lands per-edit
 async function load(): Promise<void> {
   loading.value = true;
   try {
-    const [s, sg, sl, ch, po, di, co] = await Promise.all([
+    const [s, sg, sl, sp, ch, po, di, co] = await Promise.all([
       sessionsApi.get(props.id).catch(() => null),
       segmentsApi.list(props.id).catch(() => []),
       http<Slide[]>(`/v1/sessions/${encodeURIComponent(props.id)}/slides`).catch(() => []),
+      http<ApiSpeaker[]>(`/v1/sessions/${encodeURIComponent(props.id)}/speakers`).catch(() => []),
       http<ChatMessage[]>(`/v1/sessions/${encodeURIComponent(props.id)}/chat`).catch(() => []),
       http<Poll[]>(`/v1/sessions/${encodeURIComponent(props.id)}/polls`).catch(() => []),
       http<Array<{ kind: string; meaningful: boolean; status: string }>>(`/v1/sessions/${encodeURIComponent(props.id)}/discrepancies`).catch(() => []),
       auditApi.corrections(props.id).catch(() => []),
     ]);
     session.value = s;
-    // Adapt API segment shape (start_ms/end_ms/flags[]) → editor Segment shape.
+    SPEAKERS_API.value = sp as ApiSpeaker[];
+    // Adapt API segment shape (start_ms/end_ms/flags[]/speaker_id) → editor Segment shape.
+    // KNOWN GAP: the editor's Segment.speaker is the legacy fixture key
+    // ('presenter' | 'cohost' | 'moderator') — the TranscriptPane/SegmentCard
+    // tree looks up SPEAKERS[seg.speaker] from the fixture. A full multi-
+    // speaker UI port needs TranscriptPane to accept a speakers-by-id map
+    // and switch every fixture lookup over. Until that lands, all real
+    // ingested segments render under the "presenter" persona — which is
+    // exactly what align.py writes anyway (single "Presenter" speaker
+    // until diarization ships).
     SEGMENTS.value = (sg as Array<{ id: string; seq: number; start_ms: number; end_ms: number; text: string; confidence: number | null; flags: string[]; slide_id: string | null; speaker_id: string | null }>).map((row, i): Segment => ({
       id: row.id,
       idx: typeof row.seq === 'number' ? row.seq : i,

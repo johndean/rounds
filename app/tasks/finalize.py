@@ -35,7 +35,7 @@ def finalize_task(self, prev_result: dict | None = None, session_id: str | None 
     from sqlalchemy import create_engine, text
 
     from app.config import settings
-    from app.tasks.align import align_task
+    from app.tasks.align import _align_session
 
     if not session_id:
         # Chained-call path: session_id was the .s() arg; the previous
@@ -53,8 +53,10 @@ def finalize_task(self, prev_result: dict | None = None, session_id: str | None 
     engine = create_engine(sync_url)
     try:
         # align runs in-process so we can flip status atomically with the
-        # alignment results visible.
-        align_result = align_task.run(session_id=session_id)  # type: ignore[misc]
+        # alignment results visible. We call the pure function (not the
+        # bound Celery task) — calling `.run()` on a `bind=True` task
+        # passes `session_id` into the `self` slot and crashes.
+        align_result = _align_session(session_id)
         logger.info(f"finalize: align={align_result}")
 
         with engine.begin() as conn:
