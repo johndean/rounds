@@ -97,14 +97,20 @@ def transcribe_task(self, session_id: str) -> dict:  # noqa: ARG001  (bind=True 
 
         with engine.begin() as conn:
             for seg in segments:
-                conn.execute(
+                seg_row = conn.execute(
                     text(
                         """
                         INSERT INTO segments
                             (session_id, seq, start_ms, end_ms, text, confidence, flags)
                         VALUES
                             (CAST(:sid AS uuid), :seq, :st, :et, :tx, :conf, '[]'::jsonb)
-                        ON CONFLICT (session_id, seq) DO NOTHING
+                        ON CONFLICT (session_id, seq) DO UPDATE
+                          SET start_ms = EXCLUDED.start_ms,
+                              end_ms   = EXCLUDED.end_ms,
+                              text     = EXCLUDED.text,
+                              confidence = EXCLUDED.confidence,
+                              updated_at = now()
+                        RETURNING id
                         """
                     ),
                     {
@@ -115,7 +121,33 @@ def transcribe_task(self, session_id: str) -> dict:  # noqa: ARG001  (bind=True 
                         "tx": seg["text"],
                         "conf": seg["confidence"],
                     },
-                )
+                ).fetchone()
+                if seg_row and seg.get("words"):
+                    seg_id = str(seg_row[0])
+                    for w_seq, w in enumerate(seg["words"]):
+                        conn.execute(
+                            text(
+                                """
+                                INSERT INTO words
+                                    (segment_id, seq, word, start_ms, end_ms, confidence)
+                                VALUES
+                                    (CAST(:seg AS uuid), :seq, :w, :st, :et, :conf)
+                                ON CONFLICT (segment_id, seq) DO UPDATE
+                                  SET word       = EXCLUDED.word,
+                                      start_ms   = EXCLUDED.start_ms,
+                                      end_ms     = EXCLUDED.end_ms,
+                                      confidence = EXCLUDED.confidence
+                                """
+                            ),
+                            {
+                                "seg":  seg_id,
+                                "seq":  w_seq,
+                                "w":    w["word"],
+                                "st":   int(round(w["start_time"] * 1000)),
+                                "et":   int(round(w["end_time"] * 1000)),
+                                "conf": w["confidence"],
+                            },
+                        )
             conn.execute(
                 text(
                     """
@@ -349,6 +381,7 @@ def _group_words_to_segments(words: list[dict]) -> list[dict]:
                 "end_ms": int(round(last_word_end * 1000)),
                 "text": text,
                 "confidence": round(avg_conf, 4),
+                "words": list(bucket),   # for 6j words table
             }
         )
         seq += 1
