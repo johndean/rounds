@@ -91,6 +91,8 @@ export const sessions = {
     http<PipelineConfig & { auto_detected_template_id: string | null; auto_detected_confidence: number | null }>(
       `/v1/sessions/${encodeURIComponent(id)}/pipeline-config`,
     ),
+  retry: (id: string) =>
+    http<{ session_id: string; status: string }>(`/v1/diagnostics/reingest/${encodeURIComponent(id)}`, { method: 'POST' }),
   // Session-files panel (MIC add_to_session.py port)
   missing: (id: string) =>
     http<{ has_slides: boolean; has_chat: boolean; has_manifest: boolean; has_bios: boolean }>(
