@@ -273,6 +273,19 @@ async def delete_session(session_id: UUID, db: DbSession, _user: CurrentUser) ->
         {"id": str(session_id)},
     )
     await db.commit()
+
+    # Release the Redis rate-limit slot. Without this, every soft-deleted
+    # session continues to count against the operator's MAX_CONCURRENT_SESSIONS
+    # cap (=3), which manifests as a 429 toast on the next upload. Mirrors
+    # MIC `sessions.py:1556-1562`.
+    try:
+        from app.middleware.rate_limit import release_slot
+        release_slot(_user.email if hasattr(_user, "email") else None, str(session_id))
+    except Exception as exc:  # noqa: BLE001
+        # Non-fatal — the DB delete already succeeded.
+        import logging
+        logging.getLogger(__name__).warning(f"delete_session: release_slot failed: {exc}")
+
     return {"session_id": str(session_id), "deleted": True}
 
 

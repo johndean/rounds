@@ -162,6 +162,56 @@ async def reingest(session_id: str, db: DbSession, _u: CurrentUser) -> ReingestR
     )
 
 
+class ClearSlotsResult(BaseModel):
+    email: str
+    removed_count: int
+    removed_session_ids: list[str]
+    cap: int
+    remaining: int
+
+
+@router.post("/clear-rate-limit-slots", response_model=ClearSlotsResult)
+async def clear_rate_limit_slots(db: DbSession, _u: CurrentUser) -> ClearSlotsResult:
+    """
+    Sweep the Redis active-sessions set for the calling user and remove any
+    slot whose session_id is soft-deleted (or no longer exists) in the DB.
+    Unblocks operators who hit 429 RATE_LIMIT_USER after a create+delete
+    cycle that didn't release slots (regression from older DELETE handler
+    that didn't call release_slot — now fixed, this endpoint cleans up
+    pre-fix leakage).
+
+    Idempotent. Slots for live sessions (deleted_at IS NULL) are preserved.
+    """
+    import redis as _redis
+    r = _redis.from_url(settings.REDIS_URL, decode_responses=True)
+    try:
+        key = f"sessions:active:{_u.email}"
+        ids = list(r.smembers(key))
+        removed: list[str] = []
+        for sid in ids:
+            row = (
+                await db.execute(
+                    text("SELECT deleted_at FROM sessions WHERE id = CAST(:sid AS uuid)"),
+                    {"sid": sid},
+                )
+            ).fetchone()
+            should_release = (row is None) or (row[0] is not None)
+            if should_release:
+                r.srem(key, sid)
+                r.lrem("sessions:queue", 0, sid)
+                removed.append(sid)
+        remaining = r.scard(key)
+        return ClearSlotsResult(
+            email=_u.email,
+            removed_count=len(removed),
+            removed_session_ids=removed,
+            cap=settings.MAX_CONCURRENT_SESSIONS,
+            remaining=int(remaining or 0),
+        )
+    finally:
+        r.close()
+
+
 @router.post("/sop-check")
 async def sop_deadline_check(_u: CurrentUser) -> dict:
     """
