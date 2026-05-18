@@ -34,8 +34,7 @@ node_modules/
 frontend/dist/
 frontend/node_modules/
 frontend/.vite/
-frontend/tests/visual/__snapshots__/
-frontend/tests/visual/test-results/
+frontend/test-results/
 frontend/playwright-report/
 .parcel-cache/
 .next/

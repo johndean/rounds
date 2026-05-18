@@ -9,18 +9,21 @@
     "preview": "vite preview --port 4173",
     "lint": "eslint src --ext .ts,.tsx,.vue",
     "typecheck": "vue-tsc --noEmit",
-    "test:e2e": "playwright test --config=tests/playwright.config.ts",
-    "test:visual": "playwright test --config=tests/visual/playwright.config.ts",
-    "capture-baselines": "node ../scripts/capture-prototype-baselines.mjs"
+    "test": "playwright test --config=tests/playwright.config.ts",
+    "test:smoke": "playwright test --config=tests/playwright.config.ts smoke.spec.ts",
+    "test:interactions": "playwright test --config=tests/playwright.config.ts interactions.spec.ts",
+    "test:visual": "playwright test --config=tests/playwright.config.ts visual.spec.ts",
+    "test:visual:update": "playwright test --config=tests/playwright.config.ts visual.spec.ts --update-snapshots",
+    "test:report": "playwright show-report"
   },
   "dependencies": {
-    "vue": "^3.4.38",
-    "vue-router": "^4.4.5",
+    "lucide-vue-next": "^0.460.0",
     "pinia": "^2.2.4",
-    "lucide-vue-next": "^0.460.0"
+    "vue": "^3.4.38",
+    "vue-router": "^4.4.5"
   },
   "devDependencies": {
-    "@playwright/test": "^1.49.0",
+    "@playwright/test": "^1.60.0",
     "@types/node": "^22.9.0",
     "@vitejs/plugin-vue": "^5.1.4",
     "@vue/tsconfig": "^0.5.1",

@@ -107,9 +107,23 @@ jobs:
         run: npm run build
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
-      - name: Run e2e tests
-        run: npm run test:e2e || echo "no e2e tests yet (Phase 4+)"
-      - name: Visual diff
-        run: npm run test:visual || echo "no visual baselines yet (Phase 10)"
-        env:
-          PLAYWRIGHT_RUN_VISUAL: '1'
+      - name: Smoke tests (every route loads + key surface classes + no console errors)
+        run: npm run test:smoke
+      - name: Interaction tests (modals + overlays + inline edit + drill-ins)
+        run: npm run test:interactions
+      - name: Visual regression (43 snapshots)
+        # Baselines committed are platform-specific (PLATFORM-chromium-<os>.png).
+        # CI runs on Linux; Windows-captured baselines will diff. Allow-failure
+        # until matching Linux baselines are committed via `npm run test:visual:update`
+        # on a Linux runner.
+        continue-on-error: true
+        run: npm run test:visual
+      - name: Upload Playwright report on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 14
