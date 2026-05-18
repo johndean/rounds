@@ -82,7 +82,7 @@ async def _ensure_pointer(db, session_id: str) -> int:
     await db.execute(
         text(
             """
-            INSERT INTO correction_pointers (session_id, current_pointer, updated_at)
+            INSERT INTO ledger_pointers (session_id, current_pointer, updated_at)
             VALUES (CAST(:sid AS uuid), -1, now())
             ON CONFLICT (session_id) DO NOTHING
             """
@@ -91,7 +91,7 @@ async def _ensure_pointer(db, session_id: str) -> int:
     )
     row = (
         await db.execute(
-            text("SELECT current_pointer FROM correction_pointers WHERE session_id = CAST(:sid AS uuid)"),
+            text("SELECT current_pointer FROM ledger_pointers WHERE session_id = CAST(:sid AS uuid)"),
             {"sid": session_id},
         )
     ).mappings().first()
@@ -103,7 +103,7 @@ async def _next_seq(db, session_id: str) -> int:
     row = (
         await db.execute(
             text(
-                "SELECT MAX(sequence_number) AS m FROM corrections "
+                "SELECT MAX(sequence_number) AS m FROM correction_ledger "
                 "WHERE session_id = CAST(:sid AS uuid)"
             ),
             {"sid": session_id},
@@ -119,7 +119,7 @@ async def _truncate_redo_tail(db, session_id: str, current_pointer: int) -> None
     """
     await db.execute(
         text(
-            "DELETE FROM corrections WHERE session_id = CAST(:sid AS uuid) "
+            "DELETE FROM correction_ledger WHERE session_id = CAST(:sid AS uuid) "
             "AND sequence_number > :ptr"
         ),
         {"sid": session_id, "ptr": current_pointer},
@@ -184,7 +184,7 @@ async def apply_correction(
         await db.execute(
             text(
                 """
-                INSERT INTO corrections
+                INSERT INTO correction_ledger
                     (session_id, segment_id, correction_type,
                      old_slide_id, new_slide_id, old_text, new_text,
                      applied_by, action_id, sequence_number)
@@ -214,7 +214,7 @@ async def apply_correction(
 
     await db.execute(
         text(
-            "UPDATE correction_pointers SET current_pointer = :seq, updated_at = now() "
+            "UPDATE ledger_pointers SET current_pointer = :seq, updated_at = now() "
             "WHERE session_id = CAST(:sid AS uuid)"
         ),
         {"sid": sid, "seq": seq},
@@ -301,7 +301,7 @@ async def find_replace(
             text(
                 """
                 SELECT DISTINCT ON (segment_id) segment_id, new_text
-                  FROM corrections
+                  FROM correction_ledger
                  WHERE session_id = CAST(:sid AS uuid)
                    AND sequence_number <= :ptr
                    AND correction_type = 'text_edit'
@@ -387,7 +387,7 @@ async def find_replace(
             await db.execute(
                 text(
                     """
-                    INSERT INTO corrections
+                    INSERT INTO correction_ledger
                         (session_id, segment_id, correction_type,
                          old_text, new_text, applied_by, action_id, sequence_number)
                     VALUES
@@ -422,7 +422,7 @@ async def find_replace(
 
     await db.execute(
         text(
-            "UPDATE correction_pointers SET current_pointer = :seq, updated_at = now() "
+            "UPDATE ledger_pointers SET current_pointer = :seq, updated_at = now() "
             "WHERE session_id = CAST(:sid AS uuid)"
         ),
         {"sid": sid, "seq": seq - 1},
@@ -461,7 +461,7 @@ async def list_corrections(session_id: UUID, db: DbSession, _u: CurrentUser) -> 
                 SELECT id, segment_id, correction_type,
                        old_slide_id, new_slide_id, old_text, new_text,
                        applied_by, applied_at, action_id, sequence_number
-                  FROM corrections
+                  FROM correction_ledger
                  WHERE session_id = CAST(:sid AS uuid)
                  ORDER BY sequence_number
                 """
@@ -472,7 +472,7 @@ async def list_corrections(session_id: UUID, db: DbSession, _u: CurrentUser) -> 
 
     ptr_row = (
         await db.execute(
-            text("SELECT current_pointer FROM correction_pointers WHERE session_id = CAST(:sid AS uuid)"),
+            text("SELECT current_pointer FROM ledger_pointers WHERE session_id = CAST(:sid AS uuid)"),
             {"sid": sid},
         )
     ).mappings().first()
@@ -511,7 +511,7 @@ async def undo_correction(session_id: UUID, db: DbSession, _u: CurrentUser) -> d
     new_ptr = current_ptr - 1
     await db.execute(
         text(
-            "UPDATE correction_pointers SET current_pointer = :p, updated_at = now() "
+            "UPDATE ledger_pointers SET current_pointer = :p, updated_at = now() "
             "WHERE session_id = CAST(:sid AS uuid)"
         ),
         {"sid": sid, "p": new_ptr},
@@ -528,7 +528,7 @@ async def redo_correction(session_id: UUID, db: DbSession, _u: CurrentUser) -> d
     current_ptr = await _ensure_pointer(db, sid)
     max_row = (
         await db.execute(
-            text("SELECT MAX(sequence_number) AS m FROM corrections WHERE session_id = CAST(:sid AS uuid)"),
+            text("SELECT MAX(sequence_number) AS m FROM correction_ledger WHERE session_id = CAST(:sid AS uuid)"),
             {"sid": sid},
         )
     ).mappings().first()
@@ -539,7 +539,7 @@ async def redo_correction(session_id: UUID, db: DbSession, _u: CurrentUser) -> d
     new_ptr = current_ptr + 1
     await db.execute(
         text(
-            "UPDATE correction_pointers SET current_pointer = :p, updated_at = now() "
+            "UPDATE ledger_pointers SET current_pointer = :p, updated_at = now() "
             "WHERE session_id = CAST(:sid AS uuid)"
         ),
         {"sid": sid, "p": new_ptr},

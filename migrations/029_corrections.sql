@@ -1,44 +1,91 @@
--- 029_corrections — append-only correction ledger + undo/redo pointer.
+-- 029_corrections — Phase 4 MIC-parity append-only correction ledger.
 --
--- Consolidates MIC migrations:
---   * base corrections + correction_pointers from MIC schema.sql:132-156
---   * 021_relabel_legacy_operator_corrections (no-op for fresh deploys)
---   * 024_add_chat_correction_types     (added chat_insert/chat_remove)
---   * 026_add_poll_correction_types     (added poll_insert/poll_remove)
---   * 027_add_speaker_reassignment      (added speaker_reassignment)
---   * 028_add_chat_edit_correction_type (added chat_edit — final form)
+-- TABLE NAME COLLISION FIX: migration 002 already declares a table called
+-- `corrections` (with columns actor_email/kind/was/now_/occurred_at) used
+-- by app/api/segments.py + audit.py for inline-save edit logging. The
+-- first version of this migration tried to take the same name and
+-- collided — partial state from those failed deploys is cleaned up by
+-- the DO block below.
 --
--- Phase 4 of audit remediation. Invariant: corrections are APPEND-ONLY.
--- UPDATE / DELETE on this table is forbidden. Undo/redo moves
--- `correction_pointers.current_pointer`; the rows themselves are never
--- mutated.
+-- This migration creates Phase 4's MIC-parity tables under DIFFERENT
+-- names so both schemas coexist:
+--   • correction_ledger  — Phase 4 MIC-parity append-only ledger
+--   • ledger_pointers    — Phase 4 undo/redo pointer
+--   • 002's corrections  — legacy edit-log (preserved verbatim)
 --
--- DEFENSIVE RESET: the initial deploy of this migration left the DB in
--- a partial state (corrections table existed without sequence_number
--- column — psycopg2 multi-statement execute apparently bailed
--- mid-CREATE on the first attempt). Drop any prior partial state with
--- CASCADE so the FK on transcription_discrepancies.resolution_correction_id
--- (added later in this file) goes with it, then recreate cleanly. Safe
--- because:
---   • corrections + correction_pointers are new tables — no live data
---   • The 3 ALTER columns on transcription_discrepancies were added by
---     the same failed migration attempt — no live data either
--- DROP CASCADE is idempotent on fresh databases (IF EXISTS).
+-- segments.py + audit.py will be migrated to correction_ledger in a
+-- follow-up scope; until then both schemas coexist.
+--
+-- Consolidates MIC migrations: schema.sql:132-156 base + 024 + 026 + 027 + 028
+-- (final 11-type enum). Invariant: APPEND-ONLY. UPDATE/DELETE forbidden.
 
-DROP TABLE IF EXISTS corrections CASCADE;
-DROP TABLE IF EXISTS correction_pointers CASCADE;
+-- ───────────────────────────────────────────────────────────────────────
+-- STEP 1 — clean up partial state from prior failed deploy attempts.
+-- Idempotent: no-op on fresh databases.
+-- ───────────────────────────────────────────────────────────────────────
+DO $$
+BEGIN
+    -- If `corrections` exists with Phase 4 schema (no occurred_at column —
+    -- only the failed-deploy state would look like this), drop it so
+    -- migration 002 can re-create its legacy version on this deploy.
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+         WHERE table_schema = 'public' AND table_name = 'corrections'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'corrections'
+           AND column_name = 'occurred_at'
+    ) THEN
+        DROP TABLE corrections CASCADE;
+    END IF;
 
-ALTER TABLE transcription_discrepancies DROP COLUMN IF EXISTS resolution_correction_id;
-ALTER TABLE transcription_discrepancies DROP COLUMN IF EXISTS resolved;
-ALTER TABLE transcription_discrepancies DROP COLUMN IF EXISTS resolved_at;
+    -- Drop the orphan Phase 4 pointer table if it exists under the old name.
+    IF EXISTS (
+        SELECT 1 FROM information_schema.tables
+         WHERE table_schema = 'public' AND table_name = 'correction_pointers'
+    ) THEN
+        DROP TABLE correction_pointers CASCADE;
+    END IF;
+
+    -- Drop transcription_discrepancies columns added by failed-deploy
+    -- attempts (FK targeted the wrong corrections table; CASCADE above
+    -- already dropped the FK constraint, but the column remains until
+    -- explicitly dropped).
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'transcription_discrepancies'
+           AND column_name = 'resolution_correction_id'
+    ) THEN
+        ALTER TABLE transcription_discrepancies DROP COLUMN resolution_correction_id;
+    END IF;
+
+    -- The other two columns (resolved + resolved_at) don't need explicit
+    -- handling — ADD COLUMN IF NOT EXISTS below is idempotent. Drop them
+    -- anyway for cleanliness, since their values would carry leftover
+    -- state from a partial run.
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'transcription_discrepancies'
+           AND column_name = 'resolved'
+    ) THEN
+        ALTER TABLE transcription_discrepancies DROP COLUMN resolved;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'transcription_discrepancies'
+           AND column_name = 'resolved_at'
+    ) THEN
+        ALTER TABLE transcription_discrepancies DROP COLUMN resolved_at;
+    END IF;
+END $$;
 
 
--- Rounds schema adaptation vs MIC:
---   • segment_id is UUID NOT NULL (MIC used TEXT — Rounds segments.id is UUID since 001)
---   • old/new_slide_id are UUID REFERENCES slides(id) ON DELETE SET NULL
---     (survives slide deletion since corrections are append-only history)
---   • CASCADE on session_id (matches the rest of Rounds schema)
-CREATE TABLE corrections (
+-- ───────────────────────────────────────────────────────────────────────
+-- STEP 2 — create Phase 4's MIC-parity tables under their distinct names.
+-- Idempotent via CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS.
+-- ───────────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS correction_ledger (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id      UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     segment_id      UUID NOT NULL REFERENCES segments(id) ON DELETE CASCADE,
@@ -53,43 +100,53 @@ CREATE TABLE corrections (
     sequence_number INTEGER NOT NULL
 );
 
-ALTER TABLE corrections ADD CONSTRAINT corrections_type_enum
-    CHECK (correction_type IN (
-        'slide_reassignment',
-        'text_edit',
-        'split',
-        'merge',
-        'mark_ok',
-        'chat_insert',
-        'chat_edit',
-        'chat_remove',
-        'poll_insert',
-        'poll_remove',
-        'speaker_reassignment'
-    ));
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+         WHERE constraint_schema = 'public' AND constraint_name = 'correction_ledger_type_enum'
+    ) THEN
+        ALTER TABLE correction_ledger ADD CONSTRAINT correction_ledger_type_enum
+            CHECK (correction_type IN (
+                'slide_reassignment',
+                'text_edit',
+                'split',
+                'merge',
+                'mark_ok',
+                'chat_insert',
+                'chat_edit',
+                'chat_remove',
+                'poll_insert',
+                'poll_remove',
+                'speaker_reassignment'
+            ));
+    END IF;
+END $$;
 
-CREATE INDEX corrections_session_idx        ON corrections (session_id);
-CREATE INDEX corrections_session_seq_idx    ON corrections (session_id, sequence_number);
-CREATE INDEX corrections_session_action_idx ON corrections (session_id, action_id);
-CREATE INDEX corrections_segment_idx        ON corrections (segment_id);
+CREATE INDEX IF NOT EXISTS correction_ledger_session_idx        ON correction_ledger (session_id);
+CREATE INDEX IF NOT EXISTS correction_ledger_session_seq_idx    ON correction_ledger (session_id, sequence_number);
+CREATE INDEX IF NOT EXISTS correction_ledger_session_action_idx ON correction_ledger (session_id, action_id);
+CREATE INDEX IF NOT EXISTS correction_ledger_segment_idx        ON correction_ledger (segment_id);
 
 
-CREATE TABLE correction_pointers (
+CREATE TABLE IF NOT EXISTS ledger_pointers (
     session_id      UUID PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
     current_pointer INTEGER NOT NULL DEFAULT -1,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 
--- transcription_discrepancies needs resolved + resolution_correction_id
--- so apply_correction (text_edit / mark_ok on a flagged segment) can mark
--- the discrepancy resolved and back-link to the closing correction.
+-- ───────────────────────────────────────────────────────────────────────
+-- STEP 3 — augment transcription_discrepancies for discrepancy resolution.
+-- ADD COLUMN IF NOT EXISTS is idempotent.
+-- ───────────────────────────────────────────────────────────────────────
 ALTER TABLE transcription_discrepancies
-    ADD COLUMN resolved                 BOOLEAN NOT NULL DEFAULT FALSE;
+    ADD COLUMN IF NOT EXISTS resolved BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE transcription_discrepancies
-    ADD COLUMN resolution_correction_id UUID    REFERENCES corrections(id) ON DELETE SET NULL;
+    ADD COLUMN IF NOT EXISTS resolution_correction_id UUID
+        REFERENCES correction_ledger(id) ON DELETE SET NULL;
 ALTER TABLE transcription_discrepancies
-    ADD COLUMN resolved_at              TIMESTAMPTZ;
+    ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS transcription_discrepancies_unresolved_idx
     ON transcription_discrepancies (session_id) WHERE resolved = FALSE;
