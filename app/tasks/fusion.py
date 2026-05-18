@@ -129,9 +129,10 @@ def fusion_task(self, session_id: str) -> dict:
             for s in semantic_dataclasses
         ]
 
+        # MIC-verbatim signature: no slide_count, no proportional padding.
+        # Fusion emits however many boundaries clear the 0.35 threshold.
         result = run_fusion(
             session_id=session_id,
-            slide_count=slide_count,
             visual_signals=visual_signals,
             anchor_signals=anchor_signals,
             semantic_shifts=semantic_shifts,
@@ -143,16 +144,21 @@ def fusion_task(self, session_id: str) -> dict:
             soft_window=settings.SOFT_WINDOW_EXPANSION,
         )
 
-        # Map slide_id by slide_index for FK population
-        slide_id_by_index = {row[1]: str(row[0]) for row in slide_rows}
+        # Map fusion's positional slide_number (1..N) to DB slide ids by
+        # slide_index ASC. If fusion produces fewer boundaries than slides,
+        # only the first N slides get time-ranges (matches MIC). If more
+        # boundaries than slides, the extras have slide_id=NULL.
+        slide_id_by_position = {
+            i + 1: str(row[0]) for i, row in enumerate(slide_rows)
+        }
 
-        # Gate
-        run_fusion_gate(result.slide_time_ranges, total_duration, slide_count)
+        # Gate — segments arg None means slide_count-derived path; bounded check only
+        run_fusion_gate(result.slide_time_ranges, total_duration, segments=None)
 
         # Write atomically
         with engine.begin() as conn:
             for r in result.slide_time_ranges:
-                slide_id = slide_id_by_index.get(r.slide_number)
+                slide_id = slide_id_by_position.get(r.slide_number)
                 conn.execute(
                     text(
                         """

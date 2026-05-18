@@ -133,12 +133,14 @@ def normalize_task(self, session_id: str) -> dict:
             _next_or_stub(session_id)
             return {"session_id": session_id, "segments": 0}
 
-        # ── Per-segment normalize via 3-tier engine (RULE 0-8) ─────────────
-        from app.iil.normalization import normalize as iil_normalize
+        # ── Per-segment normalize + validate-and-repair (MIC verbatim) ──────
+        # validate_and_repair internally calls normalize(), then runs 4 named
+        # content checks. On failure it deterministically repairs (restore
+        # words from words[] SSOT for check1/2, re-normalize for check3/4)
+        # up to MAX_REPAIR_ATTEMPTS=2. Terminal failure → raw_text fallback
+        # — the clinical-safety invariant for drug-name / dose preservation.
+        # ZERO LLM calls.
         from app.iil.validation import validate_and_repair
-
-        # Filler-word list from template (MIC §6) — used by validator + tier removal.
-        filler_words_list = list(cfg_row[8] or []) if cfg_row[8] is not None else []
 
         results: list[tuple] = []
         for seg_id, seg_text, slide_id, stt_words in seg_rows:
@@ -146,61 +148,60 @@ def normalize_task(self, session_id: str) -> dict:
                 {"word": w} for w in (stt_words or []) if w
             ] or [{"word": tok} for tok in (seg_text or "").split() if tok]
             slide_context = slide_context_by_id.get(str(slide_id) if slide_id else "", "")
-            r = iil_normalize(
+            raw_text = (seg_text or "").strip()
+
+            nr = validate_and_repair(
                 segment_id=str(seg_id),
                 words=words_list,
-                template_config=template_config,
+                raw_text=raw_text,
                 slide_context=slide_context,
+                template_config=template_config,
+                key_points=[],
                 iil_config=effective_iil_cfg,
             )
 
-            # 🟠 #16 — Wire validate_and_repair into the normalize pipeline.
-            # MIC §6: normalization output passes 4 checks; failures trigger
-            # one repair attempt then accept the best-effort output.
-            source_text = (seg_text or "").strip()
-            final_text, vresult = validate_and_repair(
-                source_text=source_text,
-                normalized_text=r.normalized_text,
-                filler_words=filler_words_list,
-                repair_fn=None,  # LLM-repair not wired here; in-stream rules only.
-            )
-
             audit = {
-                "passed":            vresult.passed,
-                "word_count_ratio":  round(vresult.word_count_ratio, 3),
-                "token_overlap":     round(vresult.token_overlap, 3),
-                "filler_remaining":  vresult.filler_remaining,
-                "missing_terminology": vresult.missing_terminology,
-                "repaired":          vresult.repaired,
-                "filler_count":      r.filler_count,
-                "compression":       r.compression_ratio,
-                "tier1_removed":     r.tier1_removed,
-                "tier2_removed":     r.tier2_removed,
-                "tier2_kept":        r.tier2_kept,
-                "tier3_compressed":  r.tier3_compressed,
+                "validation_checks": nr.validation_checks,   # {check1..4: pass/fail/repaired}
+                "repair_applied":    nr.repair_applied,
+                "repair_attempts":   nr.repair_attempts,
+                "filler_count":      nr.filler_count,
+                "compression":       nr.compression_ratio,
+                "tier1_removed":     nr.tier1_removed,
+                "tier2_removed":     nr.tier2_removed,
+                "tier2_kept":        nr.tier2_kept,
+                "tier3_compressed":  nr.tier3_compressed,
             }
-            results.append((str(seg_id), final_text, audit))
+            results.append((str(seg_id), nr.normalized_text, audit, nr.repair_applied, nr.repair_attempts))
 
         # ── Write normalization_results + update segments.text ───────────
         # Updating segments.text means downstream consumers (editor, exports)
-        # read the cleaned text without joining normalization_results.
+        # read the cleaned text without joining normalization_results. On
+        # terminal validation failure, segments.text is the raw STT verbatim
+        # (clinical-safety invariant — broken normalization NEVER ships).
         with engine.begin() as conn:
-            for seg_id, normalized, validation in results:
+            for seg_id, normalized, validation, repair_applied, repair_attempts in results:
                 conn.execute(
                     text(
                         """
                         INSERT INTO normalization_results
-                            (session_id, segment_id, normalized_text, template_id, validation_results)
+                            (session_id, segment_id, normalized_text, template_id,
+                             validation_results, repair_applied, repair_attempts)
                         VALUES
-                            (CAST(:sid AS uuid), CAST(:seg AS uuid), :nt, :tpl, CAST(:v AS jsonb))
+                            (CAST(:sid AS uuid), CAST(:seg AS uuid), :nt, :tpl,
+                             CAST(:v AS jsonb), :ra, :rn)
                         ON CONFLICT (session_id, segment_id) DO UPDATE
                           SET normalized_text    = EXCLUDED.normalized_text,
                               template_id        = EXCLUDED.template_id,
-                              validation_results = EXCLUDED.validation_results
+                              validation_results = EXCLUDED.validation_results,
+                              repair_applied     = EXCLUDED.repair_applied,
+                              repair_attempts    = EXCLUDED.repair_attempts
                         """
                     ),
-                    {"sid": session_id, "seg": seg_id, "nt": normalized,
-                     "tpl": template_id, "v": json.dumps(validation)},
+                    {
+                        "sid": session_id, "seg": seg_id, "nt": normalized,
+                        "tpl": template_id, "v": json.dumps(validation),
+                        "ra": repair_applied, "rn": repair_attempts,
+                    },
                 )
                 conn.execute(
                     text("UPDATE segments SET text = :nt, updated_at = now() WHERE id = CAST(:seg AS uuid)"),
@@ -213,10 +214,16 @@ def normalize_task(self, session_id: str) -> dict:
         except ConflictError:
             pass  # may already be normalizing if anchor triggered it
 
-        total_fillers = sum(v.get("filler_count", 0) for _, _, v in results)
+        total_fillers = sum(v.get("filler_count", 0) for _, _, v, _, _ in results)
+        repaired_count = sum(1 for _, _, _, ra, _ in results if ra)
+        raw_fallback_count = sum(
+            1 for _, _, v, _, ra_n in results
+            if ra_n == 2 and all(s == "fail" for s in (v.get("validation_checks") or {}).values())
+        )
         logger.info(
             f"normalize: session={session_id} segments={len(results)} "
-            f"fillers_removed={total_fillers} template={template_id} "
+            f"fillers_removed={total_fillers} repaired={repaired_count} "
+            f"raw_fallback={raw_fallback_count} template={template_id} "
             f"tiers=[{int(tier1_on)},{int(tier2_on)},{int(tier3_on)}]"
         )
         _next_or_stub(session_id)
@@ -224,6 +231,8 @@ def normalize_task(self, session_id: str) -> dict:
             "session_id":      session_id,
             "segments":        len(results),
             "fillers_removed": total_fillers,
+            "repaired":        repaired_count,
+            "raw_fallback":    raw_fallback_count,
             "template":        template_id,
         }
 
