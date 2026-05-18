@@ -63,7 +63,11 @@ def _wait_for_file_active(client, uploaded_file, timeout_sec: int = 300) -> None
 def call_gemini_multimodal(
     file_paths: list[tuple[str, str]],
     system_prompt: str,
-    model_id: str = "gemini-2.5-flash",
+    # 2.5-pro (2M context) is the only model that fits a typical CE session
+    # (30-60 min video + 100+ slide deck = up to ~1.5M tokens). 2.5-flash
+    # (1M context) rejects these uploads with 400 INVALID_ARGUMENT. Callers
+    # may still pass model_id=gemini-2.5-flash explicitly for short clips.
+    model_id: str = "gemini-2.5-pro",
     max_retries: int = 2,
 ) -> str:
     """Send local files + a prompt to Gemini. Returns raw response text."""
