@@ -39,12 +39,17 @@ class LLMError(Exception):
 TERMINAL_LLM_CATEGORIES = frozenset({
     "gemini_context_overflow",
     "gemini_config",
+    "gemini_model_deprecated",
     "validation_error",
 })
 
 
 def _categorize_gemini_error(exc_text: str) -> str:
     t = (exc_text or "").lower()
+    # Model deprecated / removed: 404 NOT_FOUND with "no longer available".
+    # Permanent — every retry with the same model id will fail.
+    if ("no longer available" in t) or ("404" in t and "not_found" in t) or ("404" in t and "not found" in t):
+        return "gemini_model_deprecated"
     # Context overflow: 400 INVALID_ARGUMENT with "token count exceeds" — permanent
     # for the given input. Retrying with the same files always fails.
     if "token count exceeds" in t or "input token count" in t:

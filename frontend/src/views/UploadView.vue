@@ -20,6 +20,7 @@ import Icon from '@/components/shared/Icon.vue';
 import { toast } from '@/composables/useToast';
 import { sessions as sessionsApi, gcs as gcsApi, settingsApi, type PipelineConfig } from '@/services/api';
 import { ApiError } from '@/services/http';
+import { AI_MODELS } from '@/fixtures/settings';
 
 const router = useRouter();
 
@@ -421,11 +422,7 @@ Verbatim-minus-fillers · preserve drug names · annotate uncertainty.`;
             <Icon name="globe" :size="12" /> AI Model
           </label>
           <select v-model="model" class="upload-field__select">
-            <option value="gemini-2.5-pro">Gemini 2.5 Pro (recommended)</option>
-            <option value="gemini-2.5-flash">Gemini 2.5 Flash (faster, lower quality)</option>
-            <option value="gemini-2.5-flash-lite">Gemini 2.5 Flash Lite (cheapest)</option>
-            <option value="gpt-5">GPT-5</option>
-            <option value="claude-opus-4-5">Claude Opus 4.5</option>
+            <option v-for="m in AI_MODELS" :key="m.v" :value="m.v">{{ m.label }}</option>
           </select>
         </div>
 
