@@ -1,62 +1,44 @@
 <script setup lang="ts">
 /**
- * Settings (E pattern). IMPLEMENTATION.md §10 / §11.
- * 12 sections + drill-ins. Phase 8 part 3: General + Discrepancy classification
- * are live; remaining sections show their scope but defer detail until needed.
+ * SettingsView — verbatim port of settings-pages.jsx::SettingsRouterPane (827-843).
+ * Sidebar + 12 dispatched sections. Sub-page drill-ins live inside their
+ * respective section component (Email→Builder, Diagnostics→GCS/Email Debug,
+ * Prompt Templates→New).
  */
-import { onMounted, ref, computed } from 'vue';
-import { settingsApi } from '@/services/api';
-import { useUiStore } from '@/stores/ui';
-import { toast } from '@/composables/useToast';
+import { computed } from 'vue';
+import { RouterLink } from 'vue-router';
+import SectionGeneral from '@/components/settings/SectionGeneral.vue';
+import SectionTeam from '@/components/settings/SectionTeam.vue';
+import SectionTypes from '@/components/settings/SectionTypes.vue';
+import SectionAIModels from '@/components/settings/SectionAIModels.vue';
+import SectionUpload from '@/components/settings/SectionUpload.vue';
+import SectionDiscrepancy from '@/components/settings/SectionDiscrepancy.vue';
+import SectionExport from '@/components/settings/SectionExport.vue';
+import SectionPromptTemplates from '@/components/settings/SectionPromptTemplates.vue';
+import SectionManifest from '@/components/settings/SectionManifest.vue';
+import SectionEmail from '@/components/settings/SectionEmail.vue';
+import SectionDiagnostics from '@/components/settings/SectionDiagnostics.vue';
+import SectionDeleted from '@/components/settings/SectionDeleted.vue';
 
 const props = defineProps<{ section?: string }>();
-const uiStore = useUiStore();
 
-const SECTIONS = [
-  { id: 'general',          label: 'General' },
-  { id: 'team',             label: 'Team & roles' },
-  { id: 'types',            label: 'Types & stage defaults' },
-  { id: 'ai-models',        label: 'AI models' },
-  { id: 'upload-storage',   label: 'Upload & storage' },
-  { id: 'classification',   label: 'Discrepancy classification' },
-  { id: 'export',           label: 'Export' },
-  { id: 'prompts',          label: 'Prompt templates' },
-  { id: 'manifest',         label: 'Session manifest' },
-  { id: 'email',            label: 'Email' },
-  { id: 'diagnostics',      label: 'Diagnostics' },
-  { id: 'deleted-sessions', label: 'Deleted sessions' },
-];
+interface SectionItem { id: string; label: string }
+const SECTIONS: readonly SectionItem[] = Object.freeze([
+  { id: 'general',     label: 'General' },
+  { id: 'team',        label: 'Team & roles' },
+  { id: 'types',       label: 'Types & stage defaults' },
+  { id: 'ai-models',   label: 'AI models' },
+  { id: 'upload',      label: 'Upload & storage' },
+  { id: 'discrepancy', label: 'Discrepancy classification' },
+  { id: 'export',      label: 'Export' },
+  { id: 'prompts',     label: 'Prompt templates' },
+  { id: 'manifest',    label: 'Session manifest' },
+  { id: 'email',       label: 'Email' },
+  { id: 'diagnostics', label: 'Diagnostics' },
+  { id: 'deleted',     label: 'Deleted sessions' },
+]);
 
-const activeSection = computed(() => props.section ?? 'general');
-
-const orgSettings = ref<Record<string, unknown>>({});
-const loading = ref(true);
-
-async function load(): Promise<void> {
-  loading.value = true;
-  try {
-    orgSettings.value = await settingsApi.list();
-  } catch {
-    orgSettings.value = {};
-  } finally {
-    loading.value = false;
-  }
-}
-
-async function saveSetting(key: string, value: unknown): Promise<void> {
-  try {
-    await settingsApi.set(key, value);
-    orgSettings.value[key] = value;
-    toast.push(`Saved ${key}`, { tone: 'success' });
-  } catch {
-    toast.push(`Failed to save ${key}`, { tone: 'error' });
-  }
-}
-
-const orgName       = computed({ get: () => (orgSettings.value.org_name as string) ?? '', set: v => saveSetting('org_name', v) });
-const defaultLocale = computed({ get: () => (orgSettings.value.default_locale as string) ?? 'en-US', set: v => saveSetting('default_locale', v) });
-
-onMounted(load);
+const active = computed(() => props.section ?? 'general');
 </script>
 
 <template>
@@ -66,59 +48,24 @@ onMounted(load);
         v-for="s in SECTIONS"
         :key="s.id"
         :to="`/settings/${s.id}`"
-        :class="{ 'is-active': activeSection === s.id }"
+        :class="{ 'is-active': active === s.id }"
       >{{ s.label }}</RouterLink>
     </aside>
 
     <main class="settings__content">
-      <header style="margin-bottom: var(--space-5);">
-        <h1 class="settings-header__title">{{ SECTIONS.find(s => s.id === activeSection)?.label ?? 'Settings' }}</h1>
-        <p class="settings-header__lead">
-          {{ activeSection === 'general' ? 'Organization-wide defaults and locale.'
-            : activeSection === 'classification' ? 'Choose which backend classifies discrepancies — Gemini Developer API (default) or Vertex AI.'
-            : 'Section scaffolded; full editor lands in upcoming Phase 8 commits.' }}
-        </p>
-      </header>
-
-      <div v-if="activeSection === 'general'" class="settings-form">
-        <p v-if="loading" style="color: var(--fg2);">Loading…</p>
-        <template v-else>
-          <label><span>Organization name</span>
-            <input type="text" :value="orgName" @change="(e) => orgName = (e.target as HTMLInputElement).value" />
-          </label>
-          <label><span>Default locale</span>
-            <select :value="defaultLocale" @change="(e) => defaultLocale = (e.target as HTMLSelectElement).value">
-              <option value="en-US">English (US)</option>
-              <option value="en-GB">English (UK)</option>
-            </select>
-          </label>
-        </template>
-      </div>
-
-      <div v-else-if="activeSection === 'classification'" class="settings-form">
-        <label><span>Backend</span>
-          <select v-model="uiStore.classifyBackend">
-            <option value="gemini_dev">Gemini Developer API</option>
-            <option value="vertex_ai">Vertex AI</option>
-          </select>
-        </label>
-        <label><span>Model</span>
-          <select v-model="uiStore.classifyModel">
-            <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
-            <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-            <option value="gemini-2.5-pro">gemini-2.5-pro</option>
-          </select>
-        </label>
-        <p style="margin-top: var(--space-4); padding: var(--space-3); background: var(--color-warm-light); border-radius: var(--radius-sm); font-size: var(--fs-xs); color: var(--fg1);">
-          Setting persists to local storage; backend route at /v1/diag/classify-route confirms which backend is active.
-        </p>
-      </div>
-
-      <div v-else class="card">
-        <p style="margin: 0; color: var(--fg2); font-size: var(--fs-sm);">
-          Section <span class="mono">{{ activeSection }}</span> — backend endpoints are live at <span class="mono">/v1/settings/*</span>; UI for this section lands in a subsequent Phase 8 commit.
-        </p>
-      </div>
+      <SectionGeneral v-if="active === 'general'" />
+      <SectionTeam v-else-if="active === 'team'" />
+      <SectionTypes v-else-if="active === 'types'" />
+      <SectionAIModels v-else-if="active === 'ai-models'" />
+      <SectionUpload v-else-if="active === 'upload'" />
+      <SectionDiscrepancy v-else-if="active === 'discrepancy'" />
+      <SectionExport v-else-if="active === 'export'" />
+      <SectionPromptTemplates v-else-if="active === 'prompts'" />
+      <SectionManifest v-else-if="active === 'manifest'" />
+      <SectionEmail v-else-if="active === 'email'" />
+      <SectionDiagnostics v-else-if="active === 'diagnostics'" />
+      <SectionDeleted v-else-if="active === 'deleted'" />
+      <SectionGeneral v-else />
     </main>
   </div>
 </template>
