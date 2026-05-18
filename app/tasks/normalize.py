@@ -89,44 +89,87 @@ def normalize_task(self, session_id: str) -> dict:
             template_id   = cfg_row[0]
             iil_config    = cfg_row[1] if isinstance(cfg_row[1], dict) else json.loads(cfg_row[1])
             filler_policy = cfg_row[2]
-            template_filler_words = cfg_row[8] if isinstance(cfg_row[8], list) else json.loads(cfg_row[8])
+            template_config = {
+                "filler_policy":        cfg_row[2],
+                "structure_extraction": cfg_row[3],
+                "key_points":           cfg_row[4],
+                "tone":                 cfg_row[5],
+                "terminology":          cfg_row[6],
+                "rewrite":              cfg_row[7],
+            }
 
             # ── Resolve effective tier config (LOCKED policy-floor rule) ──
             tier1_on, tier2_on, tier3_on = _effective_tiers(iil_config, filler_policy)
+            effective_iil_cfg = {
+                "enabled": iil_config.get("enabled", True),
+                "tier1":   tier1_on,
+                "tier2":   tier2_on,
+                "tier3":   tier3_on,
+            }
 
-            # ── Load segments ─────────────────────────────────────────────
-            segs = conn.execute(
+            # ── Load segments + their words + slide context (for RULE 3) ──
+            seg_rows = conn.execute(
                 text(
                     """
-                    SELECT id, text FROM segments
-                     WHERE session_id = CAST(:sid AS uuid)
-                     ORDER BY seq ASC
+                    SELECT s.id, s.text, s.slide_id,
+                           coalesce(array_agg(w.word ORDER BY w.seq) FILTER (WHERE w.word IS NOT NULL), '{}')
+                      FROM segments s
+                      LEFT JOIN words w ON w.segment_id = s.id
+                     WHERE s.session_id = CAST(:sid AS uuid)
+                     GROUP BY s.id, s.text, s.slide_id, s.seq
+                     ORDER BY s.seq ASC
                     """
                 ),
                 {"sid": session_id},
             ).fetchall()
+            # Slide-context cache: slide_id → full_text + bullets joined
+            slide_context_rows = conn.execute(
+                text(
+                    """
+                    SELECT sl.id,
+                           coalesce(sl.full_text, '') || ' ' ||
+                           coalesce(string_agg(b.text, ' '), '')
+                      FROM slides sl
+                      LEFT JOIN bullets b ON b.slide_id = sl.id
+                     WHERE sl.session_id = CAST(:sid AS uuid)
+                     GROUP BY sl.id, sl.full_text
+                    """
+                ),
+                {"sid": session_id},
+            ).fetchall()
+            slide_context_by_id = {str(r[0]): r[1] for r in slide_context_rows}
 
-        if not segs:
+        if not seg_rows:
             logger.info(f"normalize: no segments for {session_id} — advancing pipeline anyway")
             _next_or_stub(session_id)
             return {"session_id": session_id, "segments": 0}
 
-        # ── Per-segment normalize ────────────────────────────────────────
-        results: list[tuple] = []
-        active_filler_words = list(template_filler_words)
-        if tier2_on:
-            active_filler_words.extend(_TIER2)
+        # ── Per-segment normalize via 3-tier engine (RULE 0-8) ─────────────
+        from app.iil.normalization import normalize as iil_normalize
 
-        for seg_id, seg_text in segs:
-            normalized = _normalize_text(
-                seg_text or "",
-                tier1=tier1_on,
-                tier2=tier2_on,
-                tier3=tier3_on,
-                filler_words=active_filler_words,
+        results: list[tuple] = []
+        for seg_id, seg_text, slide_id, stt_words in seg_rows:
+            words_list = [
+                {"word": w} for w in (stt_words or []) if w
+            ] or [{"word": tok} for tok in (seg_text or "").split() if tok]
+            slide_context = slide_context_by_id.get(str(slide_id) if slide_id else "", "")
+            r = iil_normalize(
+                segment_id=str(seg_id),
+                words=words_list,
+                template_config=template_config,
+                slide_context=slide_context,
+                iil_config=effective_iil_cfg,
             )
-            v = validate(seg_text or "", normalized, active_filler_words)
-            results.append((str(seg_id), normalized, v.to_dict()))
+            audit = {
+                "passed":           True,
+                "filler_count":     r.filler_count,
+                "compression":      r.compression_ratio,
+                "tier1_removed":    r.tier1_removed,
+                "tier2_removed":    r.tier2_removed,
+                "tier2_kept":       r.tier2_kept,
+                "tier3_compressed": r.tier3_compressed,
+            }
+            results.append((str(seg_id), r.normalized_text, audit))
 
         # ── Write normalization_results + update segments.text ───────────
         # Updating segments.text means downstream consumers (editor, exports)
@@ -160,17 +203,18 @@ def normalize_task(self, session_id: str) -> dict:
         except ConflictError:
             pass  # may already be normalizing if anchor triggered it
 
-        passed = sum(1 for _, _, v in results if v["passed"])
+        total_fillers = sum(v.get("filler_count", 0) for _, _, v in results)
         logger.info(
-            f"normalize: session={session_id} segments={len(results)} passed={passed} "
-            f"template={template_id} tiers=[{int(tier1_on)},{int(tier2_on)},{int(tier3_on)}]"
+            f"normalize: session={session_id} segments={len(results)} "
+            f"fillers_removed={total_fillers} template={template_id} "
+            f"tiers=[{int(tier1_on)},{int(tier2_on)},{int(tier3_on)}]"
         )
         _next_or_stub(session_id)
         return {
-            "session_id": session_id,
-            "segments":   len(results),
-            "passed":     passed,
-            "template":   template_id,
+            "session_id":      session_id,
+            "segments":        len(results),
+            "fillers_removed": total_fillers,
+            "template":        template_id,
         }
 
     except Exception as exc:  # noqa: BLE001
