@@ -41,10 +41,39 @@ case "$role" in
       --forwarded-allow-ips='*'
     ;;
   worker)
-    exec celery -A app.tasks.celery_app.celery_app worker \
+    # Celery doesn't serve HTTP. Railway's healthcheck path /v1/health
+    # would mark the worker UNHEALTHY → endless restart loop. We run
+    # Celery as a background process and a tiny stdlib HTTP server in
+    # the foreground to satisfy the healthcheck.
+    celery -A app.tasks.celery_app.celery_app worker \
       --loglevel=info \
       --concurrency="${CELERY_CONCURRENCY:-2}" \
-      --queues=celery
+      --queues=celery &
+    CELERY_PID=$!
+    echo "[start.sh] celery pid=$CELERY_PID" >&2
+    # Background watchdog — if Celery dies, kill the container so Railway
+    # restarts cleanly (instead of healthcheck staying green on a zombie).
+    (
+      wait $CELERY_PID
+      echo "[start.sh] celery exited — terminating healthcheck server" >&2
+      kill -TERM 1 2>/dev/null || true
+    ) &
+    exec python -c "
+import os, sys
+from http.server import HTTPServer, BaseHTTPRequestHandler
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(b'{\"status\":\"ok\",\"role\":\"worker\"}')
+    def do_HEAD(self):
+        self.send_response(200); self.end_headers()
+    def log_message(self, *a, **kw): pass
+port = int(os.environ.get('PORT', '8000'))
+print(f'[worker-health] listening on :{port}', flush=True)
+HTTPServer(('0.0.0.0', port), H).serve_forever()
+"
     ;;
   migrate)
     exec python scripts/migrate.py
