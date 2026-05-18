@@ -137,10 +137,17 @@ def _process_pdf(engine, session_id: str, gcs_uri: str, index_base: int) -> tupl
         slides_written = 0
         bullets_written = 0
 
+        from app.engines.ws_bridge import publish_ws_event_sync
+
         for page_idx in range(doc.page_count):
             page = doc.load_page(page_idx)
             full_text = page.get_text("text") or ""
             title = _derive_slide_title(full_text, page_idx + 1)
+            publish_ws_event_sync(session_id, {
+                "type":  "slide_progress",
+                "slide": page_idx + 1,
+                "total": doc.page_count,
+            })
 
             # Render thumbnail (PNG) + upload
             pix = page.get_pixmap(dpi=120)

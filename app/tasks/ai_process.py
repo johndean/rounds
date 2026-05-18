@@ -115,7 +115,19 @@ def _process_direct(
     from app.config import settings
     from app.engines.llm_client import LLMError, call_gemini_multimodal
     from app.engines.state_machine import transition_session_sync
+    from app.engines.ws_bridge import publish_ws_event_sync
     from app.prompts import get_prompt_for_mode, parse_transcript_response
+
+    def _emit(progress: int, substage: str) -> None:
+        """Emit a processing_update WS event with progress + substage label."""
+        publish_ws_event_sync(session_id, {
+            "type":     "processing_update",
+            "stage":    "ai_processing",
+            "progress": progress,
+            "substage": substage,
+        })
+
+    _emit(5, "Initializing AI pipeline…")
 
     # ── 1. Source selection ───────────────────────────────────────────────
     with engine.connect() as conn:
@@ -155,6 +167,7 @@ def _process_direct(
     )
 
     # ── 2. Download for Gemini ────────────────────────────────────────────
+    _emit(10, f"Downloading media + {len(slide_sources)} slide file(s)…")
     downloaded: list[tuple[str, str]] = []
     try:
         media_local = _download_from_gcs(media_source[0])
@@ -166,14 +179,24 @@ def _process_direct(
             slide_mime = s[2] or "application/pdf"
             downloaded.append((slide_local, slide_mime))
 
+        _emit(20, f"Files downloaded ({len(downloaded)})")
+
         # ── 3. Gemini call ────────────────────────────────────────────────
         system_prompt = get_prompt_for_mode(prompt_mode or ai_mode, custom_prompt)
+        _emit(30, f"Uploading to Gemini ({ai_model})…")
+        _emit(40, "AI analyzing audio + slides…")
         raw = call_gemini_multimodal(downloaded, system_prompt, model_id=ai_model)
 
         # ── 4. Parse ──────────────────────────────────────────────────────
         parsed = parse_transcript_response(raw)
         if not parsed:
             raise LLMError("Gemini returned an empty transcript", category="gemini_error")
+
+        _emit(70, f"Transcript received ({len(parsed)} segments)")
+        publish_ws_event_sync(session_id, {
+            "type":     "metrics_update",
+            "segments": len(parsed),
+        })
 
         # ── 5. Filler safety-net ─────────────────────────────────────────
         filler_rx = re.compile(_FILLER_RX_PATTERN, re.IGNORECASE)
@@ -217,6 +240,8 @@ def _process_direct(
                 os.unlink(path)
             except Exception as e:  # noqa: BLE001
                 logger.debug(f"cleanup ignored: {e}")
+
+    _emit(85, f"Saving {len(parsed)} segments…")
 
     # ── 7. Persist segments + slides + speakers + alignments atomically ──
     with engine.begin() as conn:
@@ -323,12 +348,22 @@ def _process_direct(
             },
         )
 
+    _emit(95, f"Saved {len(parsed)} segments / {len(slide_id_by_marker)} slides / {len(speaker_id_by_name)} speakers")
+    publish_ws_event_sync(session_id, {
+        "type":          "metrics_update",
+        "segments":      len(parsed),
+        "slides_total":  len(slide_id_by_marker),
+        "speakers":      len(speaker_id_by_name),
+        "duration_sec":  int(round(duration_sec)),
+    })
+
     # ── 8. State transition uploading → ready (AI MODE direct shortcut) ──
     transition_session_sync(
         session_id, "ready",
         actor="ai_process_task",
         reason=f"direct/{ai_mode}/{ai_model}",
     )
+    _emit(100, "Ready")
 
     # Release rate-limit slot (6o) + kick IIL learning (6q).
     try:
