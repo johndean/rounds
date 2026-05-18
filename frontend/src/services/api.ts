@@ -410,6 +410,65 @@ export const gcs = {
     ),
 };
 
+// ─── Email diagnostics (Phase 7 — admin-only SMTP probe + test send + log) ──
+export interface SmtpConfigCheck {
+  host:         { present: boolean; value: string | null };
+  port:         { present: boolean; value: string | null };
+  from_address: { present: boolean; value: string | null };
+  username:     { present: boolean; value: null };
+  password:     { present: boolean; value: null };
+}
+
+export interface SmtpConnectivityStep {
+  ok: boolean | null;
+  latency_ms: number | null;
+  error: string | null;
+}
+
+export interface SmtpConnectivityResult {
+  connect: SmtpConnectivityStep;
+  starttls: SmtpConnectivityStep;
+  login: SmtpConnectivityStep;
+  noop: SmtpConnectivityStep;
+  quit: SmtpConnectivityStep;
+}
+
+export interface SmtpSendResult {
+  sent: boolean;
+  to: string;
+  subject: string;
+  latency_ms: number;
+  error: string | null;
+  smtp_log: string;
+}
+
+export interface EmailAttemptRow {
+  id: string;
+  attempted_at: string | null;
+  from_address: string;
+  to_address: string;
+  subject: string | null;
+  trigger: string;
+  sop_session_id: string | null;
+  stage: string | null;
+  result: 'sent' | 'failed';
+  error_code: string | null;
+  error_message: string | null;
+  latency_ms: number | null;
+  smtp_log: string | null;
+  operator_email: string | null;
+}
+
+export const emailDebug = {
+  config: () => http<SmtpConfigCheck>('/v1/admin/email-debug/config'),
+  connectivity: () => http<SmtpConnectivityResult>('/v1/admin/email-debug/connectivity', { method: 'POST' }),
+  send: (body: { to: string; subject?: string; text_body?: string; html_body?: string }) =>
+    http<SmtpSendResult>('/v1/admin/email-debug/send', { body, method: 'POST' }),
+  attempts: (params: { limit?: number; to?: string; result?: 'sent' | 'failed'; since_hours?: number } = {}) =>
+    http<EmailAttemptRow[]>(`/v1/admin/email-debug/attempts${_q(params as Record<string, string | number | undefined>)}`),
+};
+
+
 // ─── Diagnostics ─────────────────────────────────────────────────────────
 export interface ClearSlotsResult {
   email: string;
