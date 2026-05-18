@@ -71,6 +71,112 @@ async def list_slides(session_id: UUID, db: DbSession, _user: CurrentUser) -> li
     return [dict(r) for r in rows]
 
 
+# ─── captions burn-in (Phase 10.1) ─────────────────────────────────────
+class BurnCaptionsRequest(BaseModel):
+    """Optional ASS-style overrides forwarded to burn_captions_task.
+    See app/tasks/burn_captions.py:style_config_to_ass for keys."""
+    style_config: Optional[dict[str, Any]] = None
+
+
+class CaptionedVideoArtifact(BaseModel):
+    artifact_id: str
+    gcs_uri: str
+    download_url: Optional[str] = None
+    bytes: Optional[int] = None
+    version: int
+    is_current: bool
+    generated_at: Optional[str] = None
+    style_config: Optional[dict[str, Any]] = None
+
+
+@router.post("/captions/burn")
+async def burn_captions(
+    session_id: UUID, body: BurnCaptionsRequest, db: DbSession, _user: CurrentUser,
+) -> dict:
+    """Phase 10.1: kick off `burn_captions_task` which produces a captioned
+    MP4 in GCS. Frontend listens for `captioned_video_ready` WS event with
+    the signed download URL (24h expiry). Non-critical: failure does NOT
+    mark the session as failed — the original transcript remains the
+    canonical output.
+    """
+    from fastapi import HTTPException
+    # Verify a video source exists before enqueueing
+    row = (
+        await db.execute(
+            text(
+                "SELECT COUNT(*) AS n FROM sources WHERE session_id = CAST(:sid AS uuid) "
+                "AND role = 'video'"
+            ),
+            {"sid": str(session_id)},
+        )
+    ).mappings().first()
+    if not row or int(row["n"]) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="No video source available — captions can only be burned into video sessions.",
+        )
+
+    try:
+        from app.tasks.burn_captions import burn_captions_task
+        burn_captions_task.apply_async(
+            kwargs={"session_id": str(session_id), "style_config": body.style_config or {}},
+            queue="celery",
+        )
+        return {"enqueued": True, "session_id": str(session_id)}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to enqueue burn task: {exc.__class__.__name__}: {exc}")
+
+
+@router.get("/captioned-video", response_model=Optional[CaptionedVideoArtifact])
+async def get_captioned_video(
+    session_id: UUID, db: DbSession, _user: CurrentUser,
+) -> Optional[dict]:
+    """Phase 10.1: returns the current captioned-video artifact for this
+    session (or null if none has been burned yet). Generates a fresh 1-hour
+    signed URL on every call so links don't expire silently between page
+    loads.
+    """
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT id, gcs_uri, bytes, version, is_current, style_config,
+                       generated_at
+                  FROM artifacts
+                 WHERE session_id = CAST(:sid AS uuid)
+                   AND kind = 'captioned_video'
+                   AND is_current = TRUE
+                 ORDER BY generated_at DESC
+                 LIMIT 1
+                """
+            ),
+            {"sid": str(session_id)},
+        )
+    ).mappings().first()
+    if not row:
+        return None
+
+    # Generate a short-lived signed URL (1h) on the fly so the link is
+    # always fresh per page load.
+    signed_url: Optional[str] = None
+    try:
+        from app.tasks.burn_captions import _generate_signed_url
+        signed_url = _generate_signed_url(row["gcs_uri"], hours=1)
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "artifact_id":  str(row["id"]),
+        "gcs_uri":      row["gcs_uri"],
+        "download_url": signed_url,
+        "bytes":        int(row["bytes"]) if row["bytes"] is not None else None,
+        "version":      int(row["version"]),
+        "is_current":   bool(row["is_current"]),
+        "generated_at": row["generated_at"].isoformat() if row["generated_at"] else None,
+        "style_config": row["style_config"],
+    }
+
+
 # ─── speakers ──────────────────────────────────────────────────────────
 class SpeakerOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)

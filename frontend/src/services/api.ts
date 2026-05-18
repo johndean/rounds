@@ -133,6 +133,18 @@ export const sessions = {
   },
   addManifest: (id: string, body: { gcs_uri: string }, mode?: 'use_new' | 'keep_current') =>
     http(`/v1/sessions/${encodeURIComponent(id)}/add/manifest${mode ? `?mode=${mode}` : ''}`, { body, method: 'POST' }),
+  // Phase 10.1 — caption burn-in to MP4
+  burnCaptions: (id: string, styleConfig?: Record<string, unknown>) =>
+    http<{ enqueued: boolean; session_id: string }>(
+      `/v1/sessions/${encodeURIComponent(id)}/captions/burn`,
+      { body: { style_config: styleConfig || null }, method: 'POST' },
+    ),
+  captionedVideo: (id: string) =>
+    http<{
+      artifact_id: string; gcs_uri: string; download_url: string | null;
+      bytes: number | null; version: number; is_current: boolean;
+      generated_at: string | null; style_config: Record<string, unknown> | null;
+    } | null>(`/v1/sessions/${encodeURIComponent(id)}/captioned-video`),
 };
 
 // ─── Speakers (Phase 9 — per-session speaker CRUD + bulk segment reassign) ──

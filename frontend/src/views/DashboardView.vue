@@ -112,7 +112,11 @@ function openClaim(e: Event): void {
         </p>
       </div>
       <div class="page-actions">
-        <button class="btn btn--secondary" data-test-id="dash-filters" @click="toast.push('Filter panel — coming soon')">
+        <button
+          class="btn btn--secondary"
+          data-test-id="dash-filters"
+          @click="toast.push('Dashboard filter panel ships with Phase 10.4 stats endpoint.', { tone: 'warn' })"
+        >
           <Icon name="filter" /> Filters
         </button>
         <button class="btn btn--primary" @click="router.push('/upload')">

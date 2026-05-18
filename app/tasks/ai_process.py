@@ -773,13 +773,21 @@ stt_background_task.Task = _SttBackgroundTask  # type: ignore[attr-defined]
 )
 def template_autodetect_task(self, session_id: str) -> dict:
     """
-    Non-blocking, non-fatal classification of session content into a template.
-    Runs on first 60s of audio. Failure → lecture_v1 + confidence 0.0 (TIL Rule 7).
+    Phase 10.3: classify the session's likely template based on title +
+    filename keywords. Replaces the previous 0.0-confidence stub with a
+    real (heuristic) classifier.
 
-    Updates session_templates.auto_detected_template_id + confidence. Never
-    auto-applies — surfaced as a suggestion in the UI.
+    Available templates (per migration 009): lecture_v1, training_v1,
+    technical_v1, podcast_v1, sales_v1.
 
-    Phase 6m / U128.
+    Signals (each adds confidence; capped at 0.85):
+      • Filename keywords on the primary source
+      • Session title keywords
+      • Source role distribution (chat + multiple speakers → conversational)
+
+    Non-blocking, non-fatal. Failure → lecture_v1 + confidence 0.0
+    (TIL Rule 7). Never auto-applies; surfaced as a UI suggestion via
+    auto_detected_template_id + auto_detected_confidence columns.
     """
     from sqlalchemy import create_engine, text
 
@@ -788,10 +796,68 @@ def template_autodetect_task(self, session_id: str) -> dict:
     sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
     engine = create_engine(sync_url)
     try:
-        # Phase 6m: confidence=0.0 fallback. Full classifier feature set is
-        # OQ-008 (audit reference). Lecture_v1 is the safest default.
-        detected_id = "lecture_v1"
-        detected_conf = 0.0
+        # Gather signals: title, filename of primary source, role-of-sources distribution.
+        with engine.connect() as conn:
+            sess = conn.execute(
+                text(
+                    "SELECT title, code FROM sessions WHERE id = CAST(:sid AS uuid)"
+                ),
+                {"sid": session_id},
+            ).fetchone()
+            srcs = conn.execute(
+                text(
+                    """
+                    SELECT role, COALESCE(filename, gcs_uri) AS name
+                      FROM sources
+                     WHERE session_id = CAST(:sid AS uuid)
+                    """
+                ),
+                {"sid": session_id},
+            ).fetchall()
+
+        title = (sess[0] if sess else "") or ""
+        code = (sess[1] if sess else "") or ""
+        roles = {r[0] for r in srcs}
+        names = [r[1] or "" for r in srcs]
+        haystack = " ".join([title, code, *names]).lower()
+
+        # Heuristic scoring — each rule contributes confidence.
+        scores: dict[str, float] = {
+            "lecture_v1":   0.40,   # baseline (most VIN content)
+            "training_v1":  0.0,
+            "technical_v1": 0.0,
+            "podcast_v1":   0.0,
+            "sales_v1":     0.0,
+        }
+
+        # Training / workshop signals
+        for kw in ("workshop", "training", "course", "hands-on", "practicum", "lab"):
+            if kw in haystack:
+                scores["training_v1"] += 0.30
+
+        # Technical deep-dive signals
+        for kw in ("deep dive", "deep-dive", "architecture", "internals", "implementation",
+                   "advanced", "tech talk"):
+            if kw in haystack:
+                scores["technical_v1"] += 0.30
+
+        # Podcast / panel / rounds / conversation signals (Rounds-style)
+        for kw in ("podcast", "panel", "interview", "discussion", "rounds", "q&a", "ask me anything"):
+            if kw in haystack:
+                scores["podcast_v1"] += 0.30
+
+        # Sales / presentation signals
+        for kw in ("sales", "pitch", "demo day", "intro to", "overview", "kickoff"):
+            if kw in haystack:
+                scores["sales_v1"] += 0.30
+
+        # Multi-speaker chat → conversational
+        if "chat" in roles:
+            scores["podcast_v1"] += 0.15
+
+        # Pick the highest-scoring template; cap confidence at 0.85.
+        detected_id = max(scores, key=lambda k: scores[k])
+        detected_conf = min(0.85, scores[detected_id])
 
         with engine.begin() as conn:
             conn.execute(
@@ -806,10 +872,8 @@ def template_autodetect_task(self, session_id: str) -> dict:
                 {"tid": detected_id, "conf": detected_conf, "sid": session_id},
             )
 
-        # Emit WS event (no-op until 6n)
         try:
-            from app.engines.ws_bridge import publish_ws_event_sync  # type: ignore
-
+            from app.engines.ws_bridge import publish_ws_event_sync
             publish_ws_event_sync(
                 session_id,
                 {"type": "template_autodetect", "template_id": detected_id, "confidence": detected_conf},
@@ -817,6 +881,9 @@ def template_autodetect_task(self, session_id: str) -> dict:
         except ImportError:
             pass
 
+        logger.info(
+            f"template_autodetect: session={session_id} → {detected_id} (conf={detected_conf:.2f})"
+        )
         return {"session_id": session_id, "template_id": detected_id, "confidence": detected_conf}
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"template_autodetect: non-fatal failure — {exc}")
