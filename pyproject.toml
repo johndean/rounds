@@ -28,6 +28,8 @@ google-cloud-aiplatform = "^1.71"
 google-genai = "^0.3"      # Gemini Dev API + Vertex AI client
 # --- media ---
 ffmpeg-python = "^0.2"
+opencv-python-headless = "^4.10"   # frame_task visual change detection (6e)
+numpy = "^1.26"                     # required by opencv + frame diff arithmetic
 # --- auth + config ---
 python-jose = { extras = ["cryptography"], version = "^3.3" }
 passlib = { extras = ["bcrypt"], version = "^1.7" }

@@ -40,6 +40,7 @@ def ingest_task(self, session_id: str) -> dict:  # noqa: ARG001
 
     from app.config import settings
     from app.tasks.finalize import finalize_task
+    from app.tasks.frame_task import frame_task
     from app.tasks.slide_extract import slide_extract_task
     from app.tasks.transcribe import transcribe_task
 
@@ -106,16 +107,32 @@ def ingest_task(self, session_id: str) -> dict:  # noqa: ARG001
             }
 
         # Standard STT-enhanced chain.
-        # uploading → transcribing transition happens at the start of the chain.
+        # frame_task runs IN PARALLEL with the main chain — anchor_task
+        # (triggered by transcribe on completion) reads frame's output
+        # from Redis at its moment of execution. Graceful degradation
+        # if frame hasn't finished yet (empty visual signals).
+        # slide_extract similarly runs in parallel — alignment reads its
+        # rows from DB whenever it runs.
         transition_session_sync(session_id, "transcribing", actor="ingest_task")
-        tasks = [transcribe_task.s(session_id)]
+
+        frame_task.apply_async(args=[session_id], queue="celery")
         if slide_src_count > 0:
-            tasks.append(slide_extract_task.s(session_id))
-        tasks.append(finalize_task.s(session_id))
+            slide_extract_task.apply_async(args=[session_id], queue="celery")
+
+        # Main chain: transcribe → anchor (triggered inside transcribe) →
+        # normalize (when 6g lands) → fusion (when 6h) → align (when 6i) →
+        # finalize. Today transcribe triggers anchor which would trigger
+        # normalize — until 6g normalize doesn't import so anchor logs a
+        # skip. We still need finalize to run after the chain. Pattern:
+        # transcribe and anchor are linked via internal triggers;
+        # finalize chains explicitly after transcribe so it always runs
+        # regardless of normalize/fusion/align presence.
+        tasks = [transcribe_task.s(session_id), finalize_task.s(session_id)]
         chain(*tasks).apply_async()
 
         logger.info(
-            f"ingest[enhanced]: enqueued chain for {session_id} (slides={slide_src_count})"
+            f"ingest[enhanced]: enqueued chain (+ frame fanout) for {session_id} "
+            f"(slides={slide_src_count})"
         )
         return {
             "session_id":    session_id,

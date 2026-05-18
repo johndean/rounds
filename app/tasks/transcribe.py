@@ -136,6 +136,16 @@ def transcribe_task(self, session_id: str) -> dict:  # noqa: ARG001  (bind=True 
             )
 
         logger.info(f"transcribe: session={session_id} wrote {len(segments)} segments / {word_count} words")
+
+        # Trigger anchor_task — reads frame_task's Redis output (or empty if
+        # frame hasn't finished) and writes confirmed AnchorHit[] for fusion.
+        try:
+            from app.tasks.anchor_task import anchor_task
+
+            anchor_task.apply_async(args=[session_id], queue="celery")
+        except Exception as anchor_err:  # noqa: BLE001
+            logger.warning(f"transcribe: failed to trigger anchor_task: {anchor_err}")
+
         return {"session_id": session_id, "segment_count": len(segments), "word_count": word_count}
 
     except Exception as exc:  # noqa: BLE001
