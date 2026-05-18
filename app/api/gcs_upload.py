@@ -9,8 +9,10 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
 from app.auth import CurrentUser
+from app.db import DbSession
 from app.services.gcs import (
     find_out_of_scope_uri,
     make_signed_put_url,
@@ -68,11 +70,21 @@ class UploadCompleteResponse(BaseModel):
 
 
 @router.post("/upload-complete", response_model=UploadCompleteResponse)
-async def upload_complete(payload: UploadCompleteRequest, _user: CurrentUser) -> UploadCompleteResponse:
+async def upload_complete(
+    payload: UploadCompleteRequest,
+    db: DbSession,
+    _user: CurrentUser,
+) -> UploadCompleteResponse:
     """
     Confirm upload. Enforces R7: every gcs_uri MUST start with the session's
     scoped prefix. Out-of-scope uris are rejected with 400 VALIDATION_FAILED
     (matches MIC audit §2.7 / `_find_out_of_scope_uri`).
+
+    Persists one row per uploaded file in the `sources` table. ON CONFLICT
+    (gcs_uri) DO NOTHING — uploading the same blob twice is idempotent.
+
+    Celery ingest enqueue lands in Phase 6 / U37-U45. For now sessions stay
+    in `status='ingesting'` and rows accumulate in `sources` for inspection.
     """
     files_as_dicts = [f.model_dump() for f in payload.files]
     out_of_scope = find_out_of_scope_uri(files_as_dicts, payload.session_id)
@@ -87,7 +99,26 @@ async def upload_complete(payload: UploadCompleteRequest, _user: CurrentUser) ->
             },
         )
 
-    # Persisting Source rows + enqueueing ingest task lands in Phase 6 / U38-U40.
-    # For now: validate, audit, return accepted URIs.
-    accepted = [f.gcs_uri for f in payload.files]
+    accepted: list[str] = []
+    for f in payload.files:
+        await db.execute(
+            text(
+                """
+                INSERT INTO sources (session_id, role, filename, gcs_uri, content_type, size_bytes, duration_sec)
+                VALUES (CAST(:session_id AS uuid), :role, :filename, :gcs_uri, :content_type, :size_bytes, :duration_sec)
+                ON CONFLICT (gcs_uri) DO NOTHING
+                """
+            ),
+            {
+                "session_id":   payload.session_id,
+                "role":         f.role or "other",
+                "filename":     f.filename or f.gcs_uri.rsplit("/", 1)[-1],
+                "gcs_uri":      f.gcs_uri,
+                "content_type": f.content_type,
+                "size_bytes":   f.size_bytes,
+                "duration_sec": f.duration_sec,
+            },
+        )
+        accepted.append(f.gcs_uri)
+    await db.commit()
     return UploadCompleteResponse(session_id=payload.session_id, accepted=accepted)
