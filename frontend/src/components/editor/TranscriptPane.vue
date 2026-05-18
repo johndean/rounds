@@ -92,18 +92,23 @@ function startSpeaker(seg: Segment): void {
 }
 function closeInline(): void { inline.value = null; }
 
+// Phase 1 (audit remediation): saveEdit / saveReassign / saveSpeaker
+// previously toasted "Segment saved" with no backend call — operators
+// believed their edit persisted across reload, but the next page load
+// revealed the original text. Per Phase 4 plan, real persistence wires
+// through segments.edit / segments.reassign once the corrections API
+// + audit trail land. Until then, surface honest pending warnings so
+// operators know their work is preview-only.
 function saveEdit(_seg: Segment): void {
-  toast.push('Segment saved', { tone: 'success' });
+  toast.push('Edit not persisted — segment editing ships with Phase 4 corrections audit.', { tone: 'warn' });
   closeInline();
 }
-function saveReassign(_seg: Segment, slideId: string): void {
-  const sl = SLIDES.find((s) => s.id === slideId);
-  toast.push(`Reassigned to slide ${sl?.n}`, { tone: 'success' });
+function saveReassign(_seg: Segment, _slideId: string): void {
+  toast.push('Reassign not persisted — slide reassign ships with Phase 4 corrections audit.', { tone: 'warn' });
   closeInline();
 }
-function saveSpeaker(_seg: Segment, speakerKey: SpeakerKey): void {
-  const sp = SPEAKERS[speakerKey];
-  toast.push(`Speaker → ${sp?.short}`, { tone: 'success' });
+function saveSpeaker(_seg: Segment, _speakerKey: SpeakerKey): void {
+  toast.push('Speaker change not persisted — speaker reassign ships with Phase 4 corrections audit.', { tone: 'warn' });
   closeInline();
 }
 

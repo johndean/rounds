@@ -36,7 +36,6 @@ import { http } from '@/services/http';
 import type { Segment, Slide } from '@/fixtures/transcript';
 import type { ChatMessage, Poll } from '@/fixtures/chat_polls';
 import { SOP_STAGES } from '@/fixtures/sop_stages';
-import { toast } from '@/composables/useToast';
 import { modal } from '@/composables/useModal';
 import FindReplaceModal from '@/components/overlays/FindReplaceModal.vue';
 import { useSyncController } from '@/composables/useSyncController';
@@ -371,9 +370,10 @@ const flaggedSecondary = computed(() => ([
   { id: 'low_conf',  label: 'Low conf',  n: flagCounts.value.low_conf },
 ]));
 
-function onUndo(): void  { toast.push('Undone', { tone: 'info' }); }
-function onRedo(): void  { toast.push('Redone', { tone: 'info' }); }
-function onResult(): void { toast.push('Last AI result — opening side-by-side compare (mock)', { tone: 'info' }); }
+// Phase 1 (audit remediation): Undo / Redo / Result handlers + buttons
+// removed. Prior versions toasted "Undone"/"Redone" but mutated nothing —
+// a data-integrity lie. Phase 4 (corrections API) re-introduces them with
+// real undo-stack persistence + AI-result history.
 function onPreview(): void { router.push(`/v/${props.id}`); }
 function openFind(): void { void modal.open(FindReplaceModal); }
 
@@ -414,6 +414,10 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
       <div class="editor__title-row">
         <h1 class="editor__title editor__title--mono">{{ sessionCode }}</h1>
         <div class="page-actions">
+          <!--
+            Phase 1 audit cleanup: Result / Undo / Redo hidden until Phase 4
+            (corrections API) provides real persistence + reversal. Markup
+            preserved (commented) so re-enable in Phase 4 is a comment-strip.
           <button class="btn btn--ghost btn--sm" data-test-id="editor-result" title="Show last AI result" @click="onResult">
             <Icon name="chevron-left" /> Result
           </button>
@@ -423,6 +427,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
           <button class="btn btn--ghost btn--sm" data-test-id="editor-redo" title="Redo (⇧⌘Z)" :style="{ transform: 'scaleX(-1)' }" @click="onRedo">
             <Icon name="history" />
           </button>
+          -->
           <button class="btn btn--secondary btn--sm" data-test-id="editor-preview" title="Preview rendered output" @click="onPreview">
             <Icon name="external" /> Preview
           </button>

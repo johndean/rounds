@@ -39,8 +39,12 @@ const maxVotes = computed(() => {
   return Math.max(...(props.item as Poll).options.map((o) => o.votes));
 });
 
+// Phase 1 (audit remediation): the prior save toasted success with no
+// backend call. Demoted to an honest "not persisted" warning until
+// Phase 4 wires chat-edit / poll-edit corrections through the audit API.
 function save(): void {
-  toast.push(props.kind === 'chat' ? 'Chat message saved' : 'Poll saved', { tone: 'success' });
+  const label = props.kind === 'chat' ? 'Chat edit' : 'Poll edit';
+  toast.push(`${label} not persisted — anchor editing ships with Phase 4 corrections audit.`, { tone: 'warn' });
   editing.value = false;
 }
 

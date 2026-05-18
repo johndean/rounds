@@ -54,8 +54,10 @@ const minimapRects = computed<MapRect[]>(() => {
 
 const headLeft = computed(() => `${(props.time / props.totalDuration) * 100}%`);
 
+// Phase 1 (audit remediation): used to toast a mock; demoted to an
+// honest warning. Real bulk-reassign ships with Phase 4 corrections.
 function reassign(): void {
-  toast.push('Slide reassignment picker (mock)', { tone: 'info' });
+  toast.push('Bulk slide reassign ships with Phase 4 corrections audit.', { tone: 'warn' });
 }
 </script>
 
