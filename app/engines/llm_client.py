@@ -79,7 +79,13 @@ def call_gemini_multimodal(
     for local_path, mime in file_paths:
         logger.info(f"gemini upload: {local_path} ({mime})")
         try:
-            uf = client.files.upload(file=local_path, config={"mime_type": mime})
+            # google-genai SDK renamed `file=` to `path=`. Try `path=` first
+            # (new SDK) and fall back to `file=` for older installs so the
+            # code works against both.
+            try:
+                uf = client.files.upload(path=local_path, config={"mime_type": mime})
+            except TypeError:
+                uf = client.files.upload(file=local_path, config={"mime_type": mime})
             uploaded.append(uf)
         except Exception as e:
             for prev in uploaded:
