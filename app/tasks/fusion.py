@@ -100,15 +100,30 @@ def fusion_task(self, session_id: str) -> dict:
             VisualSignal(timestamp=v.timestamp, strength=v.strength, frame_idx=v.frame_idx)
             for v in visual_dataclasses
         ]
-        anchor_signals = [
-            AnchorSignal(
+        # REG-1 fix: engines.anchor.AnchorHit shape changed in parity-3 (#83)
+        # to (timestamp, phrase, confidence, visual_confirmed, speculative).
+        # Map to engines.fusion.AnchorSignal which fusion's run_fusion expects.
+        anchor_signals = []
+        for a in anchor_dataclasses:
+            # Backwards-compat: tolerate either the new AnchorHit fields or the
+            # legacy AnchorSignal-shaped object (some Redis blobs may still be
+            # mid-rollover).
+            confirmed_attr = getattr(a, "confirmed", None)
+            if confirmed_attr is None:
+                # New AnchorHit shape — derive confirmed = not speculative.
+                confirmed = not getattr(a, "speculative", True)
+                visual_validated = getattr(a, "visual_confirmed", False)
+            else:
+                confirmed = confirmed_attr
+                visual_validated = getattr(a, "visual_validated", False)
+            anchor_signals.append(AnchorSignal(
                 timestamp=a.timestamp,
-                confirmed=a.confirmed,
-                visual_validated=a.visual_validated,
-                semantic_score=a.semantic_score,
-            )
-            for a in anchor_dataclasses
-        ]
+                confirmed=confirmed,
+                visual_validated=visual_validated,
+                semantic_score=getattr(a, "semantic_score", 0.0),
+                phrase=getattr(a, "phrase", ""),
+                confidence=getattr(a, "confidence", 0.0),
+            ))
         semantic_shifts = [
             SemanticShift(timestamp=s.timestamp, shift_score=s.shift_score)
             for s in semantic_dataclasses

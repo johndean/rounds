@@ -116,7 +116,6 @@ async def upload_complete(
     t0 = time.monotonic()
 
     validate_files(payload.files, payload.session_id)
-    reserve_slot(_user.email, payload.session_id)
 
     files_as_dicts = [f.model_dump() for f in payload.files]
     out_of_scope = find_out_of_scope_uri(files_as_dicts, payload.session_id)
@@ -131,12 +130,15 @@ async def upload_complete(
         )
 
     # 🟠 #41 — session must exist before we insert orphan sources / fail on FK.
+    # Run BEFORE reserve_slot so a 404 doesn't leak a rate-limit slot.
     exists = (await db.execute(
         text("SELECT 1 FROM sessions WHERE id = CAST(:sid AS uuid)"),
         {"sid": payload.session_id},
     )).first()
     if not exists:
         raise NotFoundError(f"session not found: {payload.session_id}")
+
+    reserve_slot(_user.email, payload.session_id)
 
     accepted: list[str] = []
     for f in payload.files:
