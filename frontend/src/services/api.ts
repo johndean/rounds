@@ -135,6 +135,41 @@ export const sessions = {
     http(`/v1/sessions/${encodeURIComponent(id)}/add/manifest${mode ? `?mode=${mode}` : ''}`, { body, method: 'POST' }),
 };
 
+// ─── Speakers (Phase 9 — per-session speaker CRUD + bulk segment reassign) ──
+export interface SessionSpeaker {
+  id: string;
+  short: string | null;
+  name: string | null;
+  role: string | null;
+  avatar_color?: string | null;
+}
+
+export const speakers = {
+  list: (sessionId: string) =>
+    http<SessionSpeaker[]>(`/v1/sessions/${encodeURIComponent(sessionId)}/speakers`),
+  add: (sessionId: string, body: { name: string; role?: string; avatar_color?: string }) =>
+    http<SessionSpeaker>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/speakers`,
+      { body, method: 'POST' },
+    ),
+  edit: (sessionId: string, speakerId: string, body: { name?: string; role?: string; avatar_color?: string }) =>
+    http<SessionSpeaker>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/speakers/${encodeURIComponent(speakerId)}`,
+      { body, method: 'PATCH' },
+    ),
+  remove: (sessionId: string, speakerId: string) =>
+    http<void>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/speakers/${encodeURIComponent(speakerId)}`,
+      { method: 'DELETE' },
+    ),
+  reassignSegment: (sessionId: string, segmentId: string, speakerId: string) =>
+    http<SessionSpeaker>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/segments/${encodeURIComponent(segmentId)}/speaker-reassign`,
+      { body: { speaker_id: speakerId }, method: 'POST' },
+    ),
+};
+
+
 // ─── Corrections (Phase 4 — append-only ledger with undo/redo pointer) ──
 export interface CorrectionRow {
   correction_id: string;
