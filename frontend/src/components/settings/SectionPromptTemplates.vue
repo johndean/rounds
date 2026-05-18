@@ -13,13 +13,25 @@ const view = ref<'catalog' | 'new'>('catalog');
 
 const cats = ['Education', 'Technical', 'Conversational', 'Business', 'Custom'];
 
+// Phase 2 audit remediation: prompt-template CRUD is fully fixture-driven
+// (PROMPT_TEMPLATES from @/fixtures/settings). Real persistence depends on
+// the /v1/templates endpoints (Phase 8). All write-shaped handlers are now
+// warn-tone so operators don't believe their work persisted.
 function backToCatalog(): void { view.value = 'catalog'; }
 function goNew(): void { view.value = 'new'; }
 function backToSettings(): void { toast.push('Back to Settings', { tone: 'info' }); }
-function editCustom(): void { toast.push('Editing Custom template (mock)', { tone: 'info' }); }
-function duplicateTpl(name: string): void { toast.push(`Duplicated ${name}`, { tone: 'success' }); }
-function viewTpl(): void { toast.push('Viewing template', { tone: 'info' }); }
-function editTpl(): void { toast.push('Editing template', { tone: 'info' }); }
+function editCustom(): void {
+  toast.push('Prompt template editing ships with Phase 8 templates port.', { tone: 'warn' });
+}
+function duplicateTpl(_name: string): void {
+  toast.push('Template duplicate not persisted — ships with Phase 8 templates port.', { tone: 'warn' });
+}
+function viewTpl(): void {
+  toast.push('Template viewer not yet implemented — Phase 8.', { tone: 'warn' });
+}
+function editTpl(): void {
+  toast.push('Template editor not yet implemented — Phase 8.', { tone: 'warn' });
+}
 
 // New-template form state
 const ntype = ref<'processing' | 'ai-prompt'>('processing');
@@ -36,8 +48,11 @@ const nkeypoints = ref(true);
 const nprompt = ref('');
 
 function saveNew(): void {
+  // Phase 2 audit remediation: navigating back used to claim "Template saved"
+  // with no API call. Demoted to a warn-tone so operators know it's not
+  // persisted until Phase 8 ships /v1/templates.
+  toast.push('New template not persisted — ships with Phase 8 templates port.', { tone: 'warn' });
   view.value = 'catalog';
-  toast.push('Template saved', { tone: 'success' });
 }
 </script>
 

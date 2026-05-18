@@ -36,14 +36,14 @@ async function onToggleKeyPoints(v: boolean): Promise<void> {
 }
 
 function downloadMacro(): void {
-  const blob = new Blob(["' VBA macro placeholder"], { type: 'application/zip' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'macro_COMPLETE_v5.zip';
-  a.click();
-  URL.revokeObjectURL(url);
-  toast.push('Macro downloaded', { tone: 'success' });
+  // Phase 2 audit remediation: was previously claiming "Macro downloaded"
+  // success while delivering a placeholder zip with `' VBA macro placeholder`
+  // inside. Demoted to warn — real macro distribution ships with Phase 10
+  // coverage closure (or via static asset hosted alongside the docs).
+  toast.push(
+    'Macro zip not yet bundled — Word macro distribution ships with Phase 10.',
+    { tone: 'warn' },
+  );
 }
 </script>
 

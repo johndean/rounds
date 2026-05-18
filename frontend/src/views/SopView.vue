@@ -134,7 +134,16 @@ const approvers = computed(() =>
 const completionPct = computed(() => Math.round((currentIdx.value / stages.length) * 100));
 const blockers = computed(() => checkStates.value.filter(c => c.state !== 'pass').length);
 
-function resolveCheck(label: string): void { toast.push(`Resolve "${label.slice(0, 40)}…" (mock)`); }
+function resolveCheck(label: string): void {
+  // Phase 2 audit remediation: checkStates are hardcoded pending (no real
+  // check infrastructure yet — see line 78 `meta: 'awaiting check
+  // infrastructure (Phase 7)'`). Resolve action depends on Phase 7 ports
+  // shipping real check_ids first; until then, warn-toast.
+  toast.push(
+    `Check resolve "${label.slice(0, 40)}…" not yet wired — ships with Phase 6/7 SOP plane.`,
+    { tone: 'warn' },
+  );
+}
 async function advance(): Promise<void> {
   if (!nextStage.value) return;
   const ok = await confirm.open({
@@ -152,8 +161,18 @@ async function advance(): Promise<void> {
     toast.push(e instanceof Error ? e.message : 'Advance failed', { tone: 'error' });
   }
 }
-function reassign(name: string): void { toast.push(`Reassign ${name} — picker (mock)`); }
-function ping(name: string): void { toast.push(`Pinged ${name} on Slack (mock)`); }
+function reassign(name: string): void {
+  toast.push(
+    `Stage reassign for ${name} not yet wired — ships with Phase 6 SOP control plane.`,
+    { tone: 'warn' },
+  );
+}
+function ping(name: string): void {
+  toast.push(
+    `Slack ping for ${name} not yet wired — depends on Slack integration (out of scope).`,
+    { tone: 'warn' },
+  );
+}
 
 function fmtIso(iso: string): string {
   try { return new Date(iso).toISOString().slice(0, 16).replace('T', ' '); }
@@ -372,8 +391,8 @@ function fmtLocal(iso: string): string {
             <div class="card__body" :style="{ display: 'grid', gap: '6px' }">
               <RouterLink :to="`/e/${props.id}`" class="btn btn--secondary btn--sm"><Icon name="edit" /> Open editor</RouterLink>
               <RouterLink :to="`/e/${props.id}/audit`" class="btn btn--secondary btn--sm"><Icon name="history" /> Full audit ledger</RouterLink>
-              <button class="btn btn--ghost btn--sm" @click="toast.push('Override modal (mock)')"><Icon name="alert" /> Override with reason</button>
-              <button class="btn btn--ghost btn--sm" @click="toast.push('Stage notes (mock)')"><Icon name="doc" /> Stage notes</button>
+              <button class="btn btn--ghost btn--sm" @click="toast.push('Override with reason not yet wired — ships with Phase 6 SOP control plane.', { tone: 'warn' })"><Icon name="alert" /> Override with reason</button>
+              <button class="btn btn--ghost btn--sm" @click="toast.push('Stage notes not yet wired — ships with Phase 6 SOP control plane.', { tone: 'warn' })"><Icon name="doc" /> Stage notes</button>
             </div>
           </div>
         </div>

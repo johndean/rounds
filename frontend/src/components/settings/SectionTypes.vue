@@ -2,16 +2,24 @@
 /**
  * SectionTypes — verbatim port of settings-pages.jsx::SectionTypes (143-190).
  * Two-pane: Type list + 8-stage assignee matrix with email-on-entry checkbox.
+ *
+ * Phase 2 (audit remediation): types hydrate from /v1/settings/types (real
+ * DB rows). saveMatrix persists to /v1/settings/{stage_matrix.<active>}
+ * via settingsApi.set. Add/remove type require POST/DELETE /v1/settings/types
+ * which Phase 2.2 / Phase 6 will add — those handlers now warn-toast.
  */
-import { ref } from 'vue';
+import { onMounted, ref } from 'vue';
 import SettingsHeader from './SettingsHeader.vue';
 import { TEAM_PEOPLE, SESSION_TYPES, SOP_STAGE_KEYS } from '@/fixtures/settings';
+import { settingsApi } from '@/services/api';
 import { toast } from '@/composables/useToast';
 import { confirm } from '@/composables/useConfirm';
+import { ApiError } from '@/services/http';
 
 const types = ref<string[]>([...SESSION_TYPES]);
 const active = ref<string>('default');
 const newType = ref('');
+const saving = ref(false);
 
 const allAssignees: string[] = [
   '(unassigned)',
@@ -31,22 +39,43 @@ const matrix = ref<Record<string, string>>({
 });
 const emails = ref<Record<string, boolean>>({ complete: true });
 
+onMounted(async () => {
+  try {
+    const rows = await settingsApi.types();
+    if (rows && rows.length) {
+      // Replace fixture list with real type codes; preserve 'default' if not in DB.
+      const codes = rows.map((r) => r.code);
+      types.value = codes.includes('default') ? codes : ['default', ...codes];
+    }
+  } catch { /* fall back to fixture list */ }
+});
+
 function addType(): void {
   if (!newType.value) return;
-  types.value = [...types.value, newType.value];
-  active.value = newType.value;
-  toast.push(`${newType.value} added`, { tone: 'success' });
-  newType.value = '';
+  // Backend has no POST /v1/settings/types yet (Phase 2.2 / Phase 6).
+  toast.push('Add Type not persisted — type management ships with Phase 6 SOP plane.', { tone: 'warn' });
 }
 async function removeType(t: string): Promise<void> {
   const ok = await confirm.open({ title: `Remove ${t}?`, danger: true, confirmLabel: 'Remove' });
   if (!ok) return;
-  types.value = types.value.filter((x) => x !== t);
-  if (active.value === t) active.value = 'default';
-  toast.push('Type removed', { tone: 'success' });
+  toast.push('Remove Type not persisted — type management ships with Phase 6 SOP plane.', { tone: 'warn' });
 }
-function saveMatrix(): void {
-  toast.push('Matrix saved', { tone: 'success' });
+async function saveMatrix(): Promise<void> {
+  if (saving.value) return;
+  saving.value = true;
+  try {
+    // Persist as a single jsonb blob under stage_matrix.<active>.
+    await settingsApi.set(`stage_matrix.${active.value}`, {
+      assignees: matrix.value,
+      emails:    emails.value,
+    });
+    toast.push(`Matrix saved for ${active.value}`, { tone: 'success' });
+  } catch (e) {
+    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : (e instanceof Error ? e.message : 'Save failed');
+    toast.push(msg, { tone: 'error' });
+  } finally {
+    saving.value = false;
+  }
 }
 </script>
 
@@ -101,7 +130,9 @@ function saveMatrix(): void {
         </label>
       </div>
       <div :style="{ textAlign: 'right', marginTop: '14px' }">
-        <button class="btn btn--tertiary" @click="saveMatrix">Save matrix</button>
+        <button class="btn btn--tertiary" :disabled="saving" @click="saveMatrix">
+          {{ saving ? 'Saving…' : 'Save matrix' }}
+        </button>
       </div>
     </div>
   </div>

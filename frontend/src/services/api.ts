@@ -183,13 +183,30 @@ export const improvements = {
 };
 
 // ─── Settings ────────────────────────────────────────────────────────────
+export interface SettingsPerson {
+  id: string; email: string; name: string;
+  role?: string | null; avatar_color?: string | null; is_active?: boolean;
+}
+export interface SettingsGroup {
+  id: string; name: string; description?: string | null;
+}
+export interface SettingsType {
+  id: string; code: string; label: string;
+}
+
 export const settingsApi = {
   list: () => http<Record<string, unknown>>('/v1/settings'),
   set: (key: string, value: unknown) =>
     http(`/v1/settings/${encodeURIComponent(key)}`, { body: { key, value }, method: 'PUT' }),
-  people: () => http<unknown[]>('/v1/settings/people'),
-  groups: () => http<unknown[]>('/v1/settings/groups'),
-  types: () => http<unknown[]>('/v1/settings/types'),
+  people: () => http<SettingsPerson[]>('/v1/settings/people'),
+  peopleAdd: (payload: { email: string; name: string; role?: string; avatar_color?: string }) =>
+    http<SettingsPerson>('/v1/settings/people', { body: payload, method: 'POST' }),
+  peopleRemove: (id: string) =>
+    http(`/v1/settings/people/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  groups: () => http<SettingsGroup[]>('/v1/settings/groups'),
+  groupsAdd: (payload: { name: string; description?: string }) =>
+    http<SettingsGroup>('/v1/settings/groups', { body: payload, method: 'POST' }),
+  types: () => http<SettingsType[]>('/v1/settings/types'),
   emailTemplates: () => http<unknown[]>('/v1/settings/email-templates'),
 };
 

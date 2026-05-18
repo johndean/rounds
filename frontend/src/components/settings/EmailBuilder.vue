@@ -57,13 +57,20 @@ const varCategories: VarCategory[] = [
 function insertVar(v: string): void {
   subject.value = subject.value + ` {{ ${v} }}`;
 }
-function saveForType(): void { toast.push('Saved for this Type', { tone: 'success' }); }
+// Phase 2 audit remediation: saveForType + sendTest used to fake success.
+// Real email-template CRUD + SMTP test ship with Phase 7. Revert is a
+// local-only undo so it stays an info toast (legitimate behavior).
+function saveForType(): void {
+  toast.push('Email template save not yet wired — ships with Phase 7 stage-notification email.', { tone: 'warn' });
+}
 function revert(): void {
   subject.value = DEFAULTS[stage.value]!.subject;
   body.value = DEFAULTS[stage.value]!.body;
   toast.push('Reverted to default', { tone: 'info' });
 }
-function sendTest(): void { toast.push('Test email sent', { tone: 'success' }); }
+function sendTest(): void {
+  toast.push('SMTP test not yet wired — ships with Phase 7 stage-notification email.', { tone: 'warn' });
+}
 
 const previewSessionCode = '041526_JepsenGrant';
 const previewSubject = computed(() => subject.value.split('{{ session_code }}').join(previewSessionCode));

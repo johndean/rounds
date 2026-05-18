@@ -82,12 +82,21 @@ const publishing = [
   { label: 'Session page',   href: '#' },
 ];
 
+// Phase 2 audit remediation: download + pub-link previously toasted
+// info/success but did nothing. Demoted to honest warn — real downloads
+// and publishing-link navigation arrive with Phase 10 coverage closure.
 function downloadFile(ext: string): void {
-  toast.push(`Download ${ext.slice(1).toUpperCase()} — pending exports endpoint`, { tone: 'info' });
+  toast.push(
+    `${ext.slice(1).toUpperCase()} export not yet wired — ships with Phase 10 exports endpoint.`,
+    { tone: 'warn' },
+  );
 }
 function openPub(p: { label: string }, e: Event): void {
   e.preventDefault();
-  toast.push(`Open ${p.label} (mock)`);
+  toast.push(
+    `${p.label} link not yet wired — publishing links land with Phase 10.`,
+    { tone: 'warn' },
+  );
 }
 </script>
 

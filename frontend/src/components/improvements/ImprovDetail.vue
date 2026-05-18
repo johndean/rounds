@@ -128,13 +128,23 @@ function exportMd(): void {
   toast.push('.md exported', { tone: 'success' });
 }
 
+// Phase 2 audit remediation: both regenerate (fake setTimeout success)
+// and save (no API call) demoted to honest warn. Real wiring uses
+// improvementsApi.admin / improvementsApi.saveStep — full Action Plan
+// Builder integration ships with Phase 8 prompt-template port + the
+// matching backend handlers.
 function regenerate(): void {
-  toast.push('Regenerating…');
-  setTimeout(() => toast.push('Regenerated', { tone: 'success' }), 600);
+  toast.push(
+    'AI prompt regeneration not yet wired — ships with Phase 8 templates port.',
+    { tone: 'warn' },
+  );
 }
 
 function save(): void {
-  toast.push('Changes saved', { tone: 'success' });
+  toast.push(
+    'Improvement detail save not yet wired — ships with Phase 8 admin patch endpoints.',
+    { tone: 'warn' },
+  );
 }
 
 const reviewSections = computed(() => [

@@ -17,10 +17,17 @@ function daysElapsed(iso: string): number {
   return Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
 }
 
+// Phase 2 audit remediation: restore + purge previously toasted success
+// with no backend call (the endpoints don't exist yet). Both demoted to
+// honest "not persisted — Phase 3 dep" warnings until Phase 3 ships
+// GET /v1/sessions/deleted + POST /restore + DELETE /permanent.
 async function restore(it: DeletedItem): Promise<void> {
   const ok = await confirm.open({ title: `Restore ${it.code}?`, confirmLabel: 'Restore' });
   if (!ok) return;
-  toast.push(`${it.code} restored`, { tone: 'success' });
+  toast.push(
+    'Session restore not yet wired — endpoint ships with Phase 3 session lifecycle.',
+    { tone: 'warn' },
+  );
 }
 
 async function purge(_it: DeletedItem): Promise<void> {
@@ -31,7 +38,10 @@ async function purge(_it: DeletedItem): Promise<void> {
     confirmLabel: 'Purge',
   });
   if (!ok) return;
-  toast.push('Purged permanently', { tone: 'warn' });
+  toast.push(
+    'Permanent purge not yet wired — endpoint ships with Phase 3 session lifecycle.',
+    { tone: 'warn' },
+  );
 }
 </script>
 

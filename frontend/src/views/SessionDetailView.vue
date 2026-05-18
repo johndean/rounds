@@ -123,10 +123,20 @@ function durationLabel(): string {
   return h > 0 ? `${h}h ${String(m).padStart(2, '0')}m` : `${m}m`;
 }
 
+// Phase 2 audit remediation: downloadFile + reassignStage previously
+// info-toasted but did nothing. Demoted to honest warn.
 function downloadFile(ext: string): void {
-  toast.push(`Download ${ext.slice(1).toUpperCase()} (lands once exports endpoint is wired)`, { tone: 'info' });
+  toast.push(
+    `${ext.slice(1).toUpperCase()} export not yet wired — ships with Phase 10 exports endpoint.`,
+    { tone: 'warn' },
+  );
 }
-function reassignStage(name: string): void { toast.push(`Reassign ${name} — picker (mock)`); }
+function reassignStage(name: string): void {
+  toast.push(
+    `Stage reassign for ${name} not yet wired — ships with Phase 6 SOP control plane.`,
+    { tone: 'warn' },
+  );
+}
 
 // ─── Session-files modal wiring (MIC AddFileModal port) ──────────────
 const modalOpen = ref(false);
@@ -149,7 +159,13 @@ function onFileSuccess(payload: { type: string; data: unknown }): void {
   void load();   // refetch sources + slides
 }
 
-function pubLink(p: string): void { toast.push(`${p} — link saved (mock)`, { tone: 'success' }); }
+function pubLink(p: string): void {
+  // Phase 2 audit remediation: was success-toast with no backend persistence.
+  toast.push(
+    `${p} link not persisted — publishing-link CRUD ships with Phase 10.`,
+    { tone: 'warn' },
+  );
+}
 </script>
 
 <template>

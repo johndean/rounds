@@ -36,12 +36,21 @@ async function signIn(e?: Event): Promise<void> {
   router.replace(target);
 }
 
+// Phase 2 audit remediation: forgot used to claim "email sent" with no
+// backend call. Demoted to warn — password reset endpoint not yet implemented.
+// Status / Privacy links removed from real routing until those pages exist.
 function forgot(e: Event): void {
   e.preventDefault();
-  toast.push('Password reset — email sent', { tone: 'success' });
+  toast.push('Password reset is not yet available. Contact your admin.', { tone: 'warn' });
 }
-function statusLink(e: Event): void { e.preventDefault(); toast.push('Status page (mock)'); }
-function privacyLink(e: Event): void { e.preventDefault(); toast.push('Privacy policy (mock)'); }
+function statusLink(e: Event): void {
+  e.preventDefault();
+  toast.push('Status page not yet available.', { tone: 'info' });
+}
+function privacyLink(e: Event): void {
+  e.preventDefault();
+  toast.push('Privacy policy not yet available.', { tone: 'info' });
+}
 </script>
 
 <template>

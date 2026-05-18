@@ -2,82 +2,137 @@
 /**
  * SectionTeam — verbatim port of settings-pages.jsx::SectionTeam (80-141).
  * Two-pane: People list + Groups list with chip member-add.
+ *
+ * Phase 2 (audit remediation): people add/delete + group add are wired
+ * to real backend endpoints (/v1/settings/people POST/DELETE, /v1/settings/groups
+ * POST — already exist in app/api/settings.py). People-edit, group-delete,
+ * and group-member edit have no backend yet — those handlers now toast
+ * honest warn-tone "not persisted" instead of fake success.
  */
-import { ref } from 'vue';
+import { onMounted, ref } from 'vue';
 import SettingsHeader from './SettingsHeader.vue';
-import { TEAM_PEOPLE, TEAM_GROUPS, type TeamPerson, type TeamGroup } from '@/fixtures/settings';
+import { settingsApi, type SettingsPerson, type SettingsGroup } from '@/services/api';
 import { toast } from '@/composables/useToast';
 import { confirm } from '@/composables/useConfirm';
+import { ApiError } from '@/services/http';
 
-const people = ref<TeamPerson[]>([...TEAM_PEOPLE]);
-const groups = ref<TeamGroup[]>(TEAM_GROUPS.map((g) => ({ ...g, members: [...g.members] })));
+interface UiPerson { id: string; name: string; email: string }
+interface UiGroup { id: string; name: string; members: string[] }
+
+const people = ref<UiPerson[]>([]);
+const groups = ref<UiGroup[]>([]);
 const newGroup = ref('');
+const loading = ref(true);
 
-function addPerson(): void {
-  const n = window.prompt('Name?');
-  if (!n) return;
-  const e = window.prompt('Email?') || '';
-  people.value = [...people.value, { name: n, email: e }];
-  toast.push(`${n} added`, { tone: 'success' });
+async function hydrate(): Promise<void> {
+  loading.value = true;
+  try {
+    const [pp, gg] = await Promise.all([
+      settingsApi.people().catch(() => [] as SettingsPerson[]),
+      settingsApi.groups().catch(() => [] as SettingsGroup[]),
+    ]);
+    people.value = pp.map((p) => ({ id: p.id, name: p.name, email: p.email }));
+    // Backend has no group_members table yet → members stay empty UI-side until Phase 6 wiring.
+    groups.value = gg.map((g) => ({ id: g.id, name: g.name, members: [] }));
+  } finally {
+    loading.value = false;
+  }
 }
+
+onMounted(hydrate);
+
+function err(e: unknown): string {
+  if (e instanceof ApiError) return `${e.status} — ${e.message}`;
+  return e instanceof Error ? e.message : 'Request failed';
+}
+
+async function addPerson(): Promise<void> {
+  const name = window.prompt('Name?');
+  if (!name) return;
+  const email = window.prompt('Email?') || '';
+  if (!email) {
+    toast.push('Email required to add a person', { tone: 'warn' });
+    return;
+  }
+  try {
+    const created = await settingsApi.peopleAdd({ name, email });
+    people.value = [...people.value, { id: created.id, name: created.name, email: created.email }];
+    toast.push(`${created.name} added`, { tone: 'success' });
+  } catch (e) {
+    toast.push(err(e), { tone: 'error' });
+  }
+}
+
 function editPerson(i: number): void {
-  const n = window.prompt('Name?', people.value[i]!.name);
-  if (!n) return;
-  people.value = people.value.map((x, j) => (j === i ? { ...x, name: n } : x));
-  toast.push('Updated', { tone: 'success' });
-}
-async function delPerson(i: number): Promise<void> {
-  const ok = await confirm.open({
-    title: `Delete ${people.value[i]!.name}?`,
-    danger: true,
-    confirmLabel: 'Delete',
-  });
-  if (!ok) return;
-  const nm = people.value[i]!.name;
-  people.value = people.value.filter((_, j) => j !== i);
-  toast.push(`${nm} deleted`, { tone: 'success' });
+  // Backend has no PATCH /v1/settings/people/{id}. Honest warn-toast.
+  toast.push('Person edit not persisted — name/email edit ships with Phase 9 team CRUD.', { tone: 'warn' });
+  void i;
 }
 
-function addGroup(): void {
-  if (!newGroup.value) return;
-  groups.value = [...groups.value, { name: newGroup.value, members: [] }];
-  toast.push(`${newGroup.value} added`, { tone: 'success' });
-  newGroup.value = '';
-}
-async function delGroup(gi: number): Promise<void> {
+async function delPerson(i: number): Promise<void> {
+  const person = people.value[i];
+  if (!person) return;
   const ok = await confirm.open({
-    title: `Delete group ${groups.value[gi]!.name}?`,
+    title: `Delete ${person.name}?`,
     danger: true,
     confirmLabel: 'Delete',
   });
   if (!ok) return;
-  groups.value = groups.value.filter((_, i) => i !== gi);
-  toast.push('Group deleted', { tone: 'success' });
+  try {
+    await settingsApi.peopleRemove(person.id);
+    people.value = people.value.filter((_, j) => j !== i);
+    toast.push(`${person.name} deleted`, { tone: 'success' });
+  } catch (e) {
+    toast.push(err(e), { tone: 'error' });
+  }
 }
-function removeMember(gi: number, mi: number): void {
-  groups.value = groups.value.map((x, i) =>
-    i === gi ? { ...x, members: x.members.filter((_, j) => j !== mi) } : x
-  );
+
+async function addGroup(): Promise<void> {
+  if (!newGroup.value) return;
+  const name = newGroup.value;
+  try {
+    const created = await settingsApi.groupsAdd({ name });
+    groups.value = [...groups.value, { id: created.id, name: created.name, members: [] }];
+    toast.push(`${created.name} added`, { tone: 'success' });
+    newGroup.value = '';
+  } catch (e) {
+    toast.push(err(e), { tone: 'error' });
+  }
 }
-function addMember(gi: number, e: Event): void {
+
+async function delGroup(gi: number): Promise<void> {
+  const group = groups.value[gi];
+  if (!group) return;
+  const ok = await confirm.open({
+    title: `Delete group ${group.name}?`,
+    danger: true,
+    confirmLabel: 'Delete',
+  });
+  if (!ok) return;
+  // Backend has no DELETE /v1/settings/groups/{id}. Honest warn.
+  toast.push('Group delete not persisted — group removal ships with Phase 6 SOP plane.', { tone: 'warn' });
+}
+
+function removeMember(_gi: number, _mi: number): void {
+  toast.push('Group member edits ship with Phase 6 SOP plane — change not persisted.', { tone: 'warn' });
+}
+function addMember(_gi: number, e: Event): void {
   const sel = e.target as HTMLSelectElement;
-  const v = sel.value;
-  if (!v) return;
-  if (groups.value[gi]!.members.includes(v)) return;
-  groups.value = groups.value.map((x, i) => (i === gi ? { ...x, members: [...x.members, v] } : x));
   sel.value = '';
+  toast.push('Group member edits ship with Phase 6 SOP plane — change not persisted.', { tone: 'warn' });
 }
 </script>
 
 <template>
   <SettingsHeader title="Team & roles" lead="People who can be assigned stages, and groups used for routing." />
-  <div class="set-twocol">
+  <div v-if="loading" :style="{ padding: '20px', color: 'var(--fg2)' }">Loading team…</div>
+  <div v-else class="set-twocol">
     <div class="set-pane">
       <div class="set-pane__head">
         <span class="set-eyebrow">PEOPLE · {{ people.length }}</span>
         <button class="btn btn--tertiary" @click="addPerson">+ Add person</button>
       </div>
-      <div v-for="(p, i) in people" :key="i" class="set-row">
+      <div v-for="(p, i) in people" :key="p.id" class="set-row">
         <div>
           <div class="set-row__name">{{ p.name }}</div>
           <div class="set-row__sub">{{ p.email }}</div>
@@ -96,7 +151,7 @@ function addMember(gi: number, e: Event): void {
           <button class="btn btn--tertiary" @click="addGroup">+ Add</button>
         </span>
       </div>
-      <div v-for="(g, gi) in groups" :key="gi" class="set-row set-row--col">
+      <div v-for="(g, gi) in groups" :key="g.id" class="set-row set-row--col">
         <div class="set-row__top">
           <div class="set-row__name">{{ g.name }}</div>
           <button class="set-link set-link--danger" @click="delGroup(gi)">Delete</button>
