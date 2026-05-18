@@ -115,7 +115,7 @@ async def create_session(payload: SessionIn, db: DbSession, user: CurrentUser) -
             text(
                 """
                 INSERT INTO sessions (code, title, presenter, duration_sec, attendee_count, taxonomy, status)
-                VALUES (:code, :title, :presenter, :duration_sec, :attendee_count, CAST(:taxonomy AS jsonb), 'ingesting')
+                VALUES (:code, :title, :presenter, :duration_sec, :attendee_count, CAST(:taxonomy AS jsonb), 'uploading')
                 RETURNING id, code, title, presenter, status, duration_sec, word_count, segment_count, attendee_count, taxonomy
                 """
             ),
@@ -163,6 +163,23 @@ async def create_session(payload: SessionIn, db: DbSession, user: CurrentUser) -
 class PipelineConfigOut(PipelineConfig):
     auto_detected_template_id: Optional[str] = None
     auto_detected_confidence: Optional[float] = None
+
+
+@router.get("/{session_id}/audit-log")
+async def get_audit_log(session_id: UUID, db: DbSession, _u: CurrentUser) -> list[dict]:
+    """Returns the append-only state-transition log written by the state machine."""
+    from sqlalchemy import text
+
+    row = (
+        await db.execute(
+            text("SELECT processing_log FROM session_audit WHERE session_id = :sid"),
+            {"sid": str(session_id)},
+        )
+    ).mappings().first()
+    if not row:
+        return []
+    log = row["processing_log"]
+    return log if isinstance(log, list) else []
 
 
 @router.get("/{session_id}/pipeline-config", response_model=PipelineConfigOut)

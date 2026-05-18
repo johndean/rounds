@@ -102,10 +102,13 @@ async def reingest(session_id: str, db: DbSession, _u: CurrentUser) -> ReingestR
         raise HTTPException(status_code=404, detail=f"session {session_id} not found")
     status_before = row[0]
 
+    # Reingest is the one explicit operator escape — bypass the state
+    # machine since `failed`/`ready` are terminal but reingest is exactly
+    # the operation that should be able to push them back to `uploading`.
     await db.execute(
         text(
             """
-            UPDATE sessions SET status = 'ingesting', updated_at = now()
+            UPDATE sessions SET status = 'uploading', updated_at = now()
              WHERE id = CAST(:sid AS uuid)
             """
         ),
@@ -116,6 +119,28 @@ async def reingest(session_id: str, db: DbSession, _u: CurrentUser) -> ReingestR
     await db.execute(
         text("DELETE FROM segments WHERE session_id = CAST(:sid AS uuid)"),
         {"sid": session_id},
+    )
+    # Append an audit log entry documenting the reingest reset.
+    import json as _json
+    from datetime import datetime, timezone
+    entry = {
+        "ts":     datetime.now(timezone.utc).isoformat(),
+        "prev":   status_before,
+        "next":   "uploading",
+        "actor":  "diag/reingest",
+        "reason": "operator reset",
+    }
+    await db.execute(
+        text(
+            """
+            INSERT INTO session_audit (session_id, processing_log)
+            VALUES (CAST(:sid AS uuid), CAST(:e AS jsonb))
+            ON CONFLICT (session_id) DO UPDATE
+              SET processing_log = session_audit.processing_log || EXCLUDED.processing_log,
+                  updated_at = now()
+            """
+        ),
+        {"sid": session_id, "e": _json.dumps([entry])},
     )
     await db.commit()
 

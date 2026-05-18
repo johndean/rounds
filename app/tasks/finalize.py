@@ -52,42 +52,40 @@ def finalize_task(self, prev_result: dict | None = None, session_id: str | None 
     sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
     engine = create_engine(sync_url)
     try:
-        # align runs in-process so we can flip status atomically with the
-        # alignment results visible. We call the pure function (not the
-        # bound Celery task) — calling `.run()` on a `bind=True` task
-        # passes `session_id` into the `self` slot and crashes.
-        align_result = _align_session(session_id)
-        logger.info(f"finalize: align={align_result}")
+        from app.engines.state_machine import ConflictError, transition_session_sync
+
+        # Walk through every intermediate state so the audit log captures the
+        # full MIC pipeline transitions even when 6g/6h haven't shipped yet.
+        # When normalize_task (6g) lands, it owns transcribing→normalizing.
+        # When fusion_task (6h) lands, it owns normalizing→fusing→aligning.
+        # Until then, finalize emits all transitions with reason="stub".
 
         with engine.begin() as conn:
             seg_count = conn.execute(
                 text("SELECT COUNT(*) FROM segments WHERE session_id = CAST(:sid AS uuid)"),
                 {"sid": session_id},
             ).scalar() or 0
-            if seg_count == 0:
-                conn.execute(
-                    text(
-                        """
-                        UPDATE sessions
-                           SET status = 'failed', updated_at = now()
-                         WHERE id = CAST(:sid AS uuid)
-                        """
-                    ),
-                    {"sid": session_id},
-                )
-                logger.error(f"finalize: session {session_id} has 0 segments — marked failed")
-                return {"session_id": session_id, "status": "failed", "reason": "no_segments"}
+        if seg_count == 0:
+            try:
+                transition_session_sync(session_id, "failed", actor="finalize_task", reason="no_segments")
+            except ConflictError as e:
+                logger.warning(f"finalize: cannot mark failed: {e}")
+            logger.error(f"finalize: session {session_id} has 0 segments — marked failed")
+            return {"session_id": session_id, "status": "failed", "reason": "no_segments"}
 
-            conn.execute(
-                text(
-                    """
-                    UPDATE sessions
-                       SET status = 'ready', updated_at = now()
-                     WHERE id = CAST(:sid AS uuid)
-                    """
-                ),
-                {"sid": session_id},
-            )
+        # transcribing → normalizing (stub until 6g lands)
+        transition_session_sync(session_id, "normalizing", actor="finalize_task", reason="stub:pre-6g")
+        # normalizing → fusing (stub until 6h lands)
+        transition_session_sync(session_id, "fusing", actor="finalize_task", reason="stub:pre-6h")
+        # fusing → aligning
+        transition_session_sync(session_id, "aligning", actor="finalize_task")
+
+        # align runs in-process — pure function call, not Celery dispatch.
+        align_result = _align_session(session_id)
+        logger.info(f"finalize: align={align_result}")
+
+        # aligning → ready
+        transition_session_sync(session_id, "ready", actor="finalize_task")
         logger.info(f"finalize: session {session_id} marked ready")
         return {"session_id": session_id, "status": "ready"}
     except Exception as exc:

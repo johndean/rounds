@@ -46,6 +46,8 @@ def ingest_task(self, session_id: str) -> dict:  # noqa: ARG001
     sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
     engine = create_engine(sync_url)
 
+    from app.engines.state_machine import ConflictError, transition_session_sync
+
     try:
         with engine.connect() as conn:
             row = conn.execute(
@@ -55,9 +57,14 @@ def ingest_task(self, session_id: str) -> dict:  # noqa: ARG001
         if not row:
             logger.warning(f"ingest: session {session_id} not found")
             return {"skipped": True, "reason": "not_found"}
-        if row[0] != "ingesting":
+        if row[0] != "uploading":
             logger.info(f"ingest: skip — session {session_id} status={row[0]}")
             return {"skipped": True, "reason": f"status={row[0]}"}
+
+        # uploading → transcribing happens here so the audit log records the
+        # entry into the pipeline. Failure to transition (e.g. terminal state)
+        # raises and aborts ingest.
+        transition_session_sync(session_id, "transcribing", actor="ingest_task")
 
         with engine.connect() as conn:
             slide_src_count = conn.execute(

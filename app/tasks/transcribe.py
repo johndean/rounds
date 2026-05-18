@@ -373,25 +373,11 @@ def _group_words_to_segments(words: list[dict]) -> list[dict]:
 
 
 def _mark_session_failed(session_id: str, reason: str) -> None:
-    from sqlalchemy import create_engine, text
+    from app.engines.state_machine import ConflictError, transition_session_sync
 
-    from app.config import settings
-
-    sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
-    eng = create_engine(sync_url)
     try:
-        with eng.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                    UPDATE sessions
-                       SET status = 'failed',
-                           updated_at = now()
-                     WHERE id = CAST(:sid AS uuid)
-                    """
-                ),
-                {"sid": session_id},
-            )
-        logger.error(f"session {session_id} marked failed: {reason}")
-    finally:
-        eng.dispose()
+        transition_session_sync(session_id, "failed", actor="transcribe_task", reason=reason)
+    except ConflictError as e:
+        # Already terminal — log and continue. Failure cleanup must not raise.
+        logger.warning(f"transcribe: cannot mark {session_id} failed: {e}")
+    logger.error(f"session {session_id} marked failed: {reason}")
