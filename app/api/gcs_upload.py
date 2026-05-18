@@ -250,6 +250,55 @@ async def _parse_manifest_and_chat_sources(
                      "c": sp.credentials, "b": sp.bio, "so": sp.sort_order},
                 )
 
+            # Bridge polls_parsed JSONB → structured polls + poll_options rows
+            # so the editor's Polls panel and discrepancy classifier can read
+            # them via the normal /v1/sessions/{id}/polls endpoint.
+            for poll in parsed.polls_parsed:
+                question = (poll.get("question") or "").strip()
+                if not question:
+                    continue
+                total_votes = sum(int(o.get("count") or 0) for o in poll.get("options") or [])
+                poll_row = (await db.execute(
+                    text(
+                        """
+                        INSERT INTO polls
+                            (session_id, question, opened_at_ms, status, total_votes, placed, metadata)
+                        VALUES
+                            (CAST(:sid AS uuid), :q, :ts, 'closed', :tv, FALSE, CAST(:meta AS jsonb))
+                        RETURNING id
+                        """
+                    ),
+                    {
+                        "sid":  session_id,
+                        "q":    question,
+                        "ts":   0,
+                        "tv":   total_votes,
+                        "meta": json.dumps({
+                            "slide_n": poll.get("slide_n"),
+                            "q_n":     poll.get("q_n"),
+                            "source":  "extras2",
+                        }),
+                    },
+                )).first()
+                if poll_row is None:
+                    continue
+                poll_id = poll_row[0]
+                for seq, opt in enumerate(poll.get("options") or []):
+                    label = (opt.get("label") or "").strip()
+                    if not label:
+                        continue
+                    await db.execute(
+                        text(
+                            """
+                            INSERT INTO poll_options (poll_id, label, seq, votes)
+                            VALUES (:pid, :l, :s, :v)
+                            ON CONFLICT (poll_id, seq) DO NOTHING
+                            """
+                        ),
+                        {"pid": poll_id, "l": label, "s": seq,
+                         "v": int(opt.get("count") or 0)},
+                    )
+
             for rs in parsed.slide_resources:
                 await db.execute(
                     text(

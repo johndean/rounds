@@ -185,8 +185,23 @@ export const TOTAL_DURATION = SEGMENTS.length ? SEGMENTS[SEGMENTS.length - 1]!.e
 const SLIDE_PALETTE = ['#2563eb', '#7c3aed', '#059669', '#d97706', '#dc2626', '#0891b2', '#6366f1', '#ea580c', '#0d9488', '#be185d'];
 const _slideAccentMap = new Map(SLIDES.map((s, i) => [s.id, SLIDE_PALETTE[i % SLIDE_PALETTE.length]!]));
 const _slideByIdMap = new Map(SLIDES.map(s => [s.id, s]));
+
+// Deterministic FNV-1a-ish hash so any string (UUID, slug, fixture id) maps to
+// a stable palette index. Used as fallback when a slide id isn't in the fixture
+// map — real backend slides have UUIDs, not s01/s02/etc.
+function _hashStr(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
 export function slideAccent(slideId: string | null | undefined): string {
   if (!slideId) return '#4D6995';
-  return _slideAccentMap.get(slideId) || '#4D6995';
+  const fromFixture = _slideAccentMap.get(slideId);
+  if (fromFixture) return fromFixture;
+  return SLIDE_PALETTE[_hashStr(slideId) % SLIDE_PALETTE.length]!;
 }
 export function slideById(slideId: string): Slide | undefined { return _slideByIdMap.get(slideId); }
