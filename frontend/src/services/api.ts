@@ -371,6 +371,12 @@ export interface SettingsGroup {
 export interface SettingsType {
   id: string; code: string; label: string;
 }
+export interface StageAssigneeRow {
+  id?: string;
+  stage: string;
+  assignee_email: string;
+  notify_email: boolean;
+}
 
 export const settingsApi = {
   list: () => http<Record<string, unknown>>('/v1/settings'),
@@ -385,6 +391,17 @@ export const settingsApi = {
   groupsAdd: (payload: { name: string; description?: string }) =>
     http<SettingsGroup>('/v1/settings/groups', { body: payload, method: 'POST' }),
   types: () => http<SettingsType[]>('/v1/settings/types'),
+  typesAdd: (payload: { code: string; label?: string }) =>
+    http<SettingsType>('/v1/settings/types', { body: payload, method: 'POST' }),
+  typesRemove: (id: string) =>
+    http(`/v1/settings/types/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  typeAssignees: (id: string) =>
+    http<StageAssigneeRow[]>(`/v1/settings/types/${encodeURIComponent(id)}/assignees`),
+  setTypeAssignees: (id: string, rows: StageAssigneeRow[]) =>
+    http<StageAssigneeRow[]>(
+      `/v1/settings/types/${encodeURIComponent(id)}/assignees`,
+      { body: { rows }, method: 'PUT' },
+    ),
   emailTemplates: () => http<unknown[]>('/v1/settings/email-templates'),
 };
 

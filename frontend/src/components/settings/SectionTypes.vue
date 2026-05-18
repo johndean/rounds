@@ -3,23 +3,32 @@
  * SectionTypes — verbatim port of settings-pages.jsx::SectionTypes (143-190).
  * Two-pane: Type list + 8-stage assignee matrix with email-on-entry checkbox.
  *
- * Phase 2 (audit remediation): types hydrate from /v1/settings/types (real
- * DB rows). saveMatrix persists to /v1/settings/{stage_matrix.<active>}
- * via settingsApi.set. Add/remove type require POST/DELETE /v1/settings/types
- * which Phase 2.2 / Phase 6 will add — those handlers now warn-toast.
+ * Phase C wiring:
+ *   - On mount: GET /v1/settings/types → real DB rows (seeded by migration 031).
+ *   - On active-Type click: GET /v1/settings/types/{id}/assignees → rebuild
+ *     `matrix` + `emails` from real rows so each Type shows its own assignees.
+ *   - Save matrix → PUT /v1/settings/types/{id}/assignees with all 8 stages.
+ *   - Add/Remove type → POST/DELETE /v1/settings/types (admin-gated server-side).
  */
-import { onMounted, ref } from 'vue';
+import { onMounted, ref, watch } from 'vue';
 import SettingsHeader from './SettingsHeader.vue';
 import { TEAM_PEOPLE, SESSION_TYPES, SOP_STAGE_KEYS } from '@/fixtures/settings';
-import { settingsApi } from '@/services/api';
+import { settingsApi, type StageAssigneeRow } from '@/services/api';
 import { toast } from '@/composables/useToast';
 import { confirm } from '@/composables/useConfirm';
 import { ApiError } from '@/services/http';
 
-const types = ref<string[]>([...SESSION_TYPES]);
-const active = ref<string>('default');
+interface TypeRow {
+  id: string | null;        // null until persisted
+  code: string;
+  label: string;
+}
+
+const types = ref<TypeRow[]>(SESSION_TYPES.map((c) => ({ id: null, code: c, label: c })));
+const active = ref<TypeRow>(types.value[0]!);
 const newType = ref('');
 const saving = ref(false);
+const loadingMatrix = ref(false);
 
 const allAssignees: string[] = [
   '(unassigned)',
@@ -27,51 +36,118 @@ const allAssignees: string[] = [
   'Group: Content Team', 'Group: External', 'Group: V@V', 'Group: Main Contact',
 ];
 
-const matrix = ref<Record<string, string>>({
-  prep: 'Tina Payton',
-  copy_draft: 'Tina Payton',
-  medical: 'Group: External',
-  copy_final: 'Tina Payton',
-  cms: 'Tina Payton',
-  captions: 'Erica Hulse',
-  qa: 'Lacy Sanders',
-  complete: 'Carla Burris',
-});
-const emails = ref<Record<string, boolean>>({ complete: true });
+// Per-stage assignee email + notify flag for the CURRENT active Type.
+const matrix = ref<Record<string, string>>({});      // stage_id → display name
+const emails = ref<Record<string, boolean>>({});
+
+// Reverse lookup: display name → email (for serializing back to server).
+function _emailForName(name: string): string {
+  if (!name || name === '(unassigned)') return '';
+  if (name.startsWith('Group: ')) return name;        // groups stored as "Group: X"
+  const person = TEAM_PEOPLE.find((p) => p.name === name);
+  return person ? person.email : name;
+}
+function _nameForEmail(email: string): string {
+  if (!email) return '(unassigned)';
+  if (email.startsWith('Group: ')) return email;
+  const person = TEAM_PEOPLE.find((p) => p.email === email);
+  return person ? person.name : email;
+}
+
+function _resetMatrix(): void {
+  matrix.value = Object.fromEntries(SOP_STAGE_KEYS.map((s) => [s.id, '(unassigned)']));
+  emails.value = Object.fromEntries(SOP_STAGE_KEYS.map((s) => [s.id, false]));
+}
+
+async function _loadMatrixFor(typeRow: TypeRow): Promise<void> {
+  _resetMatrix();
+  if (!typeRow.id) return;     // fixture-only row (not persisted yet)
+  loadingMatrix.value = true;
+  try {
+    const rows = await settingsApi.typeAssignees(typeRow.id);
+    for (const r of rows) {
+      matrix.value[r.stage] = _nameForEmail(r.assignee_email);
+      emails.value[r.stage] = r.notify_email;
+    }
+  } catch (e) {
+    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Load matrix failed';
+    toast.push(msg, { tone: 'error' });
+  } finally {
+    loadingMatrix.value = false;
+  }
+}
 
 onMounted(async () => {
   try {
     const rows = await settingsApi.types();
     if (rows && rows.length) {
-      // Replace fixture list with real type codes; preserve 'default' if not in DB.
-      const codes = rows.map((r) => r.code);
-      types.value = codes.includes('default') ? codes : ['default', ...codes];
+      types.value = rows.map((r) => ({ id: r.id, code: r.code, label: r.label }));
+      // Preserve current active selection by code if possible; default to first.
+      const found = types.value.find((t) => t.code === active.value.code) ?? types.value[0]!;
+      active.value = found;
+      await _loadMatrixFor(active.value);
+    } else {
+      _resetMatrix();
     }
-  } catch { /* fall back to fixture list */ }
+  } catch {
+    _resetMatrix();
+  }
 });
 
-function addType(): void {
-  if (!newType.value) return;
-  // Backend has no POST /v1/settings/types yet (Phase 2.2 / Phase 6).
-  toast.push('Add Type not persisted — type management ships with Phase 6 SOP plane.', { tone: 'warn' });
+watch(active, (t) => { void _loadMatrixFor(t); });
+
+async function addType(): Promise<void> {
+  const code = newType.value.trim();
+  if (!code) return;
+  try {
+    const row = await settingsApi.typesAdd({ code, label: code });
+    types.value = [...types.value.filter((t) => t.code !== code), { id: row.id, code: row.code, label: row.label }];
+    newType.value = '';
+    active.value = types.value.find((t) => t.code === code)!;
+    toast.push(`Added type ${code}`, { tone: 'success' });
+  } catch (e) {
+    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Add type failed';
+    toast.push(msg, { tone: 'error' });
+  }
 }
-async function removeType(t: string): Promise<void> {
-  const ok = await confirm.open({ title: `Remove ${t}?`, danger: true, confirmLabel: 'Remove' });
+
+async function removeType(t: TypeRow): Promise<void> {
+  if (t.code === 'default') return;
+  const ok = await confirm.open({ title: `Remove ${t.code}?`, danger: true, confirmLabel: 'Remove' });
   if (!ok) return;
-  toast.push('Remove Type not persisted — type management ships with Phase 6 SOP plane.', { tone: 'warn' });
+  if (!t.id) {
+    // Fixture-only row; just drop locally.
+    types.value = types.value.filter((x) => x.code !== t.code);
+    return;
+  }
+  try {
+    await settingsApi.typesRemove(t.id);
+    types.value = types.value.filter((x) => x.id !== t.id);
+    if (active.value.id === t.id) active.value = types.value[0]!;
+    toast.push(`Removed type ${t.code}`, { tone: 'success' });
+  } catch (e) {
+    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Remove failed';
+    toast.push(msg, { tone: 'error' });
+  }
 }
+
 async function saveMatrix(): Promise<void> {
   if (saving.value) return;
+  if (!active.value.id) {
+    toast.push('Type not yet persisted — Add it first.', { tone: 'warn' });
+    return;
+  }
   saving.value = true;
   try {
-    // Persist as a single jsonb blob under stage_matrix.<active>.
-    await settingsApi.set(`stage_matrix.${active.value}`, {
-      assignees: matrix.value,
-      emails:    emails.value,
-    });
-    toast.push(`Matrix saved for ${active.value}`, { tone: 'success' });
+    const rows: StageAssigneeRow[] = SOP_STAGE_KEYS.map((s) => ({
+      stage:          s.id,
+      assignee_email: _emailForName(matrix.value[s.id] || '(unassigned)'),
+      notify_email:   !!emails.value[s.id],
+    })).filter((r) => r.assignee_email);
+    await settingsApi.setTypeAssignees(active.value.id, rows);
+    toast.push(`Matrix saved for ${active.value.code}`, { tone: 'success' });
   } catch (e) {
-    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : (e instanceof Error ? e.message : 'Save failed');
+    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Save failed';
     toast.push(msg, { tone: 'error' });
   } finally {
     saving.value = false;
@@ -92,16 +168,16 @@ async function saveMatrix(): Promise<void> {
       </div>
       <div
         v-for="t in types"
-        :key="t"
-        :class="['set-row', 'set-row--clickable', active === t ? 'is-active' : '']"
+        :key="t.code"
+        :class="['set-row', 'set-row--clickable', active.code === t.code ? 'is-active' : '']"
         @click="active = t"
       >
         <span>
-          {{ t }}
-          <span v-if="t === 'default'" class="set-default-pill">DEFAULT</span>
+          {{ t.code }}
+          <span v-if="t.code === 'default'" class="set-default-pill">DEFAULT</span>
         </span>
         <button
-          v-if="t !== 'default'"
+          v-if="t.code !== 'default'"
           class="set-link set-link--danger"
           @click.stop="removeType(t)"
         >Remove</button>
@@ -109,7 +185,10 @@ async function saveMatrix(): Promise<void> {
     </div>
     <div class="set-pane">
       <div class="set-pane__head">
-        <span class="set-eyebrow">STAGE ASSIGNEES FOR <strong :style="{ color: 'var(--fg1)' }">{{ active }}</strong></span>
+        <span class="set-eyebrow">
+          STAGE ASSIGNEES FOR <strong :style="{ color: 'var(--fg1)' }">{{ active.code }}</strong>
+          <em v-if="loadingMatrix" :style="{ marginLeft: '8px', color: 'var(--fg2)' }">loading…</em>
+        </span>
       </div>
       <div v-for="s in SOP_STAGE_KEYS" :key="s.id" class="set-matrix-row">
         <label>{{ s.label }}</label>
@@ -130,7 +209,7 @@ async function saveMatrix(): Promise<void> {
         </label>
       </div>
       <div :style="{ textAlign: 'right', marginTop: '14px' }">
-        <button class="btn btn--tertiary" :disabled="saving" @click="saveMatrix">
+        <button class="btn btn--tertiary" :disabled="saving || !active.id" @click="saveMatrix">
           {{ saving ? 'Saving…' : 'Save matrix' }}
         </button>
       </div>
