@@ -216,10 +216,20 @@ export const gcs = {
 };
 
 // ─── Diagnostics ─────────────────────────────────────────────────────────
+export interface ClearSlotsResult {
+  email: string;
+  removed_count: number;
+  removed_session_ids: string[];
+  cap: number;
+  remaining: number;
+}
+
 export const diag = {
   gcs: () => http('/v1/diag/gcs'),
   classifyRoute: () => http('/v1/diag/classify-route'),
   health: () => http<{ status: string; version: string; env: string }>('/v1/health'),
+  clearRateLimitSlots: () =>
+    http<ClearSlotsResult>('/v1/diag/clear-rate-limit-slots', { method: 'POST' }),
 };
 
 export type Api = typeof auth & typeof sessions; // ergonomic export
