@@ -13,16 +13,16 @@ from __future__ import annotations
 
 import logging
 
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import RoundsTask, celery_app
 
 logger = logging.getLogger(__name__)
 
 
 @celery_app.task(
     bind=True,
+    base=RoundsTask,
     name="rounds.tasks.finalize",
     max_retries=1,
-    default_retry_delay=15,
 )
 def finalize_task(self, prev_result: dict | None = None, session_id: str | None = None) -> dict:  # noqa: ARG001
     """

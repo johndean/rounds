@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 from typing import Optional
 
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import RoundsTask, celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -36,9 +36,9 @@ _SEGMENT_SILENCE_GAP_SECONDS = 0.65
 
 @celery_app.task(
     bind=True,
+    base=RoundsTask,
     name="rounds.tasks.transcribe",
     max_retries=3,
-    default_retry_delay=60,
 )
 def transcribe_task(self, session_id: str) -> dict:  # noqa: ARG001  (bind=True needs self)
     from sqlalchemy import create_engine, text
@@ -142,9 +142,8 @@ def transcribe_task(self, session_id: str) -> dict:  # noqa: ARG001  (bind=True 
         attempt = self.request.retries
         if attempt < self.max_retries:
             logger.warning(f"transcribe failed (attempt {attempt + 1}): {exc} — retrying")
-            raise self.retry(exc=exc, countdown=60 * (attempt + 1))
-        logger.exception(f"transcribe: terminal failure for {session_id}")
-        _mark_session_failed(session_id, f"transcribe: {exc.__class__.__name__}: {exc}")
+            self.retry_with_backoff(exc, attempt)
+        # Terminal — RoundsTask.on_failure runs after this re-raise.
         raise
     finally:
         engine.dispose()

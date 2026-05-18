@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import RoundsTask, celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -130,9 +130,9 @@ def _align_session(session_id: str) -> dict:
 
 @celery_app.task(
     bind=True,
+    base=RoundsTask,
     name="rounds.tasks.align",
     max_retries=2,
-    default_retry_delay=30,
 )
 def align_task(self, session_id: str) -> dict:
     try:
@@ -141,6 +141,5 @@ def align_task(self, session_id: str) -> dict:
         attempt = self.request.retries
         if attempt < self.max_retries:
             logger.warning(f"align failed (attempt {attempt + 1}): {exc} — retrying")
-            raise self.retry(exc=exc, countdown=30 * (attempt + 1))
-        logger.exception(f"align: terminal failure for {session_id}")
+            self.retry_with_backoff(exc, attempt)
         raise

@@ -21,16 +21,16 @@ import os
 import subprocess
 import tempfile
 
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import RoundsTask, celery_app
 
 logger = logging.getLogger(__name__)
 
 
 @celery_app.task(
     bind=True,
+    base=RoundsTask,
     name="rounds.tasks.slide_extract",
     max_retries=2,
-    default_retry_delay=60,
 )
 def slide_extract_task(self, session_id: str) -> dict:  # noqa: ARG001
     from sqlalchemy import create_engine, text
@@ -85,9 +85,10 @@ def slide_extract_task(self, session_id: str) -> dict:  # noqa: ARG001
         attempt = self.request.retries
         if attempt < self.max_retries:
             logger.warning(f"slide_extract failed (attempt {attempt + 1}): {exc} — retrying")
-            raise self.retry(exc=exc, countdown=60 * (attempt + 1))
-        logger.exception(f"slide_extract: terminal failure for {session_id}")
-        # Non-fatal: alignment still works without thumbnails.
+            self.retry_with_backoff(exc, attempt)
+        # Non-fatal: alignment still works without thumbnails. Return empty
+        # result instead of raising — keeps the chain alive.
+        logger.exception(f"slide_extract: terminal failure for {session_id} — continuing without slides")
         return {"session_id": session_id, "slide_count": 0, "error": str(exc)}
     finally:
         engine.dispose()

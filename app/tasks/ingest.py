@@ -24,16 +24,16 @@ import logging
 
 from celery import chain
 
-from app.tasks.celery_app import celery_app
+from app.tasks.celery_app import RoundsTask, celery_app
 
 logger = logging.getLogger(__name__)
 
 
 @celery_app.task(
     bind=True,
+    base=RoundsTask,
     name="rounds.tasks.ingest",
     max_retries=2,
-    default_retry_delay=30,
 )
 def ingest_task(self, session_id: str) -> dict:  # noqa: ARG001
     from sqlalchemy import create_engine, text
@@ -95,8 +95,7 @@ def ingest_task(self, session_id: str) -> dict:  # noqa: ARG001
     except Exception as exc:  # noqa: BLE001
         attempt = self.request.retries
         if attempt < self.max_retries:
-            raise self.retry(exc=exc, countdown=30 * (attempt + 1))
-        logger.exception(f"ingest: terminal failure for {session_id}")
+            self.retry_with_backoff(exc, attempt)
         raise
     finally:
         engine.dispose()
