@@ -6,9 +6,11 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import text
 
 from app.auth import CurrentUser
 from app.config import settings
+from app.db import DbSession
 
 router = APIRouter(prefix="/v1/diag", tags=["diagnostics"])
 
@@ -70,4 +72,66 @@ async def classify_route(_u: CurrentUser) -> ClassifyRouteResult:
             healthy = True
     return ClassifyRouteResult(
         backend=backend, model_id=settings.GEMINI_CLASSIFY_MODEL, healthy=healthy, detail=detail,
+    )
+
+
+class ReingestResult(BaseModel):
+    session_id: str
+    status_before: str
+    enqueued: bool
+    detail: str | None = None
+
+
+@router.post("/reingest/{session_id}", response_model=ReingestResult)
+async def reingest(session_id: str, db: DbSession, _u: CurrentUser) -> ReingestResult:
+    """
+    Re-trigger the ingest pipeline for a session. Resets status to
+    'ingesting' (a no-op if it's already there) and enqueues ingest_task.
+
+    Useful when a session was uploaded before the worker was up, or when
+    transcribe failed transiently and the operator wants to retry without
+    re-uploading the source.
+    """
+    row = (
+        await db.execute(
+            text("SELECT status FROM sessions WHERE id = CAST(:sid AS uuid)"),
+            {"sid": session_id},
+        )
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"session {session_id} not found")
+    status_before = row[0]
+
+    await db.execute(
+        text(
+            """
+            UPDATE sessions SET status = 'ingesting', updated_at = now()
+             WHERE id = CAST(:sid AS uuid)
+            """
+        ),
+        {"sid": session_id},
+    )
+    # Wipe prior segments so transcribe doesn't no-op via its
+    # check-before-execute guard.
+    await db.execute(
+        text("DELETE FROM segments WHERE session_id = CAST(:sid AS uuid)"),
+        {"sid": session_id},
+    )
+    await db.commit()
+
+    enqueued = False
+    detail: str | None = None
+    try:
+        from app.tasks.ingest import enqueue_ingest
+
+        enqueue_ingest(session_id)
+        enqueued = True
+    except Exception as exc:  # noqa: BLE001
+        detail = f"{exc.__class__.__name__}: {exc}"
+
+    return ReingestResult(
+        session_id=session_id,
+        status_before=status_before,
+        enqueued=enqueued,
+        detail=detail,
     )

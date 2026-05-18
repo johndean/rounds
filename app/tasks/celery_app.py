@@ -19,7 +19,13 @@ celery_app = Celery(
     "rounds",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
-    include=[],  # Add ports of MIC tasks here as they land
+    include=[
+        "app.tasks.ingest",
+        "app.tasks.transcribe",
+        "app.tasks.slide_extract",
+        "app.tasks.align",
+        "app.tasks.finalize",
+    ],
 )
 
 # Retry posture (LOCKED — audit §6)

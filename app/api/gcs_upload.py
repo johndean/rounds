@@ -83,8 +83,10 @@ async def upload_complete(
     Persists one row per uploaded file in the `sources` table. ON CONFLICT
     (gcs_uri) DO NOTHING — uploading the same blob twice is idempotent.
 
-    Celery ingest enqueue lands in Phase 6 / U37-U45. For now sessions stay
-    in `status='ingesting'` and rows accumulate in `sources` for inspection.
+    After persisting sources, enqueues the Celery `ingest` task which
+    fans out to transcribe + slide_extract + align + finalize. Enqueue
+    failures are non-fatal — the upload still succeeded and the operator
+    can re-trigger ingest via `/v1/diag/reingest/{session_id}` (Phase 6b).
     """
     files_as_dicts = [f.model_dump() for f in payload.files]
     out_of_scope = find_out_of_scope_uri(files_as_dicts, payload.session_id)
@@ -121,4 +123,18 @@ async def upload_complete(
         )
         accepted.append(f.gcs_uri)
     await db.commit()
+
+    # Kick off the Celery ingest pipeline (transcribe + slide_extract → align → ready).
+    # Non-fatal on broker errors — the upload itself succeeded.
+    try:
+        from app.tasks.ingest import enqueue_ingest
+
+        enqueue_ingest(payload.session_id)
+    except Exception as exc:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).warning(
+            f"upload-complete: failed to enqueue ingest for {payload.session_id}: {exc}"
+        )
+
     return UploadCompleteResponse(session_id=payload.session_id, accepted=accepted)

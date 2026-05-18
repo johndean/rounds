@@ -20,6 +20,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
+        poppler-utils \
         ca-certificates \
         curl \
         gnupg \
