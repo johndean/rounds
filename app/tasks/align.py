@@ -28,12 +28,11 @@ def _align_session(session_id: str) -> dict:
     from app.config import settings
     from app.engines.alignment import (
         AlignmentRecord,
-        GateFailure,
         SegmentInput,
         SlideRangeInput,
         align_segment,
-        run_pre_ready_gate,
     )
+    from app.engines.pre_ready_gate import GateFailure, run_pre_ready_gate
 
     sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
     engine = create_engine(sync_url)
@@ -152,13 +151,58 @@ def _align_session(session_id: str) -> dict:
                 if match:
                     prev_slide_number = match.slide_number
 
-        # Pre-ready gate
+        # Phase 7b — pre-ready gate uses the 5 named gates from
+        # app/engines/pre_ready_gate.py. We need to assemble a per-segment
+        # dict with the fields each gate inspects: alignment record + segment
+        # data + template id + normalized_text.
+        with engine.connect() as conn:
+            template_row = conn.execute(
+                text("SELECT template_id, iil_config FROM session_templates WHERE session_id = CAST(:sid AS uuid)"),
+                {"sid": session_id},
+            ).fetchone()
+            norm_rows = conn.execute(
+                text(
+                    """
+                    SELECT segment_id, normalized_text, template_id
+                      FROM normalization_results
+                     WHERE session_id = CAST(:sid AS uuid)
+                    """
+                ),
+                {"sid": session_id},
+            ).fetchall()
+        session_template_id = template_row[0] if template_row else None
+        iil_config = template_row[1] if template_row else {}
+        if isinstance(iil_config, str):
+            iil_config = json.loads(iil_config)
+        norm_by_seg = {str(r[0]): {"normalized_text": r[1], "template_id": r[2]} for r in norm_rows}
+
+        # Build the gate input.
+        gate_input: list[dict] = []
+        seg_by_id = {s.segment_id: s for s in segments}
+        for rec in results:
+            seg = seg_by_id.get(rec.segment_id)
+            norm_info = norm_by_seg.get(rec.segment_id, {})
+            gate_input.append({
+                "segment_id":      rec.segment_id,
+                "start_time":      seg.start_time if seg else 0.0,
+                "end_time":        seg.end_time if seg else 0.0,
+                "text":            seg.text if seg else "",
+                "confidence":      rec.confidence,
+                "status":          rec.status,
+                "slide_id":        rec.slide_id,
+                "template_id":     norm_info.get("template_id") or session_template_id,
+                "normalized_text": norm_info.get("normalized_text"),
+            })
+
+        gate_failures: list[GateFailure] = []
         try:
-            run_pre_ready_gate(results, len(segments), len(slide_ranges))
+            run_pre_ready_gate(gate_input, iil_config or {}, session_template_id or "")
         except GateFailure as gf:
-            logger.warning(f"align: gate failed for {session_id}: {gf} — proceeding with status=review")
+            logger.warning(f"align: gate failed for {session_id}: {gf} — marking review")
+            gate_failures.append(gf)
             for rec in results:
-                rec.status = "review" if rec.status == "assigned" else rec.status
+                if rec.status == "assigned":
+                    rec.status = "review"
 
         # Write alignments + update segments.slide_id + speaker_id
         with engine.begin() as conn:
@@ -210,6 +254,45 @@ def _align_session(session_id: str) -> dict:
                         "slide": rec.slide_id,
                         "spk":   str(speaker_id) if speaker_id else None,
                         "seg":   rec.segment_id,
+                    },
+                )
+
+            # Phase 7b — write validation_results rows for every alignment.
+            # Verdict: APPROVE for assigned/clean, REVIEW for uncertain, ESCALATE
+            # when any pre-ready gate failed (gate_failures non-empty).
+            base_verdict = "ESCALATE" if gate_failures else "APPROVE"
+            for rec in results:
+                if base_verdict == "ESCALATE":
+                    verdict = "ESCALATE"
+                elif rec.uncertain_flag or rec.status == "review":
+                    verdict = "REVIEW"
+                else:
+                    verdict = "APPROVE"
+                details = {
+                    "signals":      rec.signals,
+                    "drift_flag":   rec.drift_flag,
+                    "anchor_hit":   rec.anchor_hit,
+                    "uncertain":    rec.uncertain_flag,
+                    "gate_failures": [
+                        {"gate": gf.gate_id, "reason": gf.reason}
+                        for gf in gate_failures
+                    ],
+                }
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO validation_results (alignment_id, verdict, details)
+                        SELECT a.id, :verdict, CAST(:d AS jsonb)
+                          FROM alignments a
+                         WHERE a.session_id = CAST(:sid AS uuid)
+                           AND a.segment_id = CAST(:seg AS uuid)
+                        """
+                    ),
+                    {
+                        "verdict": verdict,
+                        "d":       json.dumps(details),
+                        "sid":     session_id,
+                        "seg":     rec.segment_id,
                     },
                 )
 
