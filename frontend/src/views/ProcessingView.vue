@@ -295,7 +295,7 @@ onUnmounted(() => {
           Tip: wait 1–2 minutes before retrying — Google's load usually clears.
         </p>
         <p v-else-if="failureCategory === 'gemini_context_overflow'" class="proc-err-tip">
-          Tip: the input exceeds this model's context window. Settings → AI models lets you pick a larger one (Gemini 2.5 Pro = 2M tokens).
+          Tip: upload audio (mp3/m4a) instead of video — audio is ~6× smaller in tokens. Or switch to Gemini 2.5 Pro (2M tokens) in Settings → AI models. Or use a shorter clip.
         </p>
         <div class="proc-err-actions">
           <button class="btn btn--primary" :disabled="retrying" @click="onRetry">

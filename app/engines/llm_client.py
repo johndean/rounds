@@ -34,8 +34,21 @@ class LLMError(Exception):
         self.category = category
 
 
+# Categories where retry will never help — caller should fail-fast and surface
+# a specific failure card instead of burning the Celery retry budget.
+TERMINAL_LLM_CATEGORIES = frozenset({
+    "gemini_context_overflow",
+    "gemini_config",
+    "validation_error",
+})
+
+
 def _categorize_gemini_error(exc_text: str) -> str:
     t = (exc_text or "").lower()
+    # Context overflow: 400 INVALID_ARGUMENT with "token count exceeds" — permanent
+    # for the given input. Retrying with the same files always fails.
+    if "token count exceeds" in t or "input token count" in t:
+        return "gemini_context_overflow"
     if "503" in t or "unavailable" in t or "high demand" in t:
         return "gemini_overloaded"
     if "resource_exhausted" in t or "quota" in t or "billing" in t:
@@ -122,7 +135,17 @@ def call_gemini_multimodal(
             return response.text
         except Exception as e:
             last_err = e
-            logger.warning(f"gemini attempt {attempt + 1} failed: {e}")
+            category = _categorize_gemini_error(str(e))
+            logger.warning(f"gemini attempt {attempt + 1} failed ({category}): {e}")
+            # Permanent errors: retrying with the same inputs can't help. Bail
+            # immediately so the caller can fail-fast with a specific message.
+            if category in TERMINAL_LLM_CATEGORIES:
+                for uf in uploaded:
+                    try:
+                        client.files.delete(name=uf.name)
+                    except Exception as cleanup_err:
+                        logger.debug(f"gemini cleanup ignored: {cleanup_err}")
+                raise LLMError(f"gemini permanent error ({category}): {e}", category=category)
             if attempt < max_retries:
                 time.sleep(2 ** attempt)
 

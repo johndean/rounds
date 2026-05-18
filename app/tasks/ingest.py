@@ -96,7 +96,7 @@ def ingest_task(self, session_id: str) -> dict:  # noqa: ARG001
                         SELECT gcs_uri, role FROM sources
                          WHERE session_id = CAST(:sid AS uuid)
                            AND role IN ('video','audio','audio_enhance')
-                         ORDER BY CASE role WHEN 'video' THEN 0 WHEN 'audio' THEN 1 ELSE 2 END
+                         ORDER BY CASE role WHEN 'audio' THEN 0 WHEN 'audio_enhance' THEN 1 WHEN 'video' THEN 2 ELSE 3 END
                          LIMIT 1
                         """
                     ),

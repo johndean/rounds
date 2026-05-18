@@ -79,12 +79,69 @@ def ai_process_task(self, session_id: str) -> dict:  # noqa: ARG001 — bind=Tru
         )
 
     except Exception as exc:  # noqa: BLE001
+        # Fail-fast on terminal LLM categories: context overflow, missing
+        # config, validation errors — retrying with the same inputs can't help.
+        # Mark the session FAILED with a category-specific user_message so the
+        # ProcessingView failure card shows the right tip + working Retry/Delete.
+        from app.engines.llm_client import LLMError, TERMINAL_LLM_CATEGORIES
+        if isinstance(exc, LLMError) and exc.category in TERMINAL_LLM_CATEGORIES:
+            _fail_session_terminal(session_id, exc)
+            raise
+
         attempt = self.request.retries
         if attempt < self.max_retries:
             self.retry_with_backoff(exc, attempt)
         raise
     finally:
         engine.dispose()
+
+
+def _fail_session_terminal(session_id: str, exc: Exception) -> None:
+    """Transition session to `failed` and publish a session_failed WS event
+    with a category-specific user_message. Best-effort: never raises."""
+    from app.engines.llm_client import LLMError
+
+    category = getattr(exc, "category", "gemini_error") if isinstance(exc, LLMError) else "gemini_error"
+    user_messages = {
+        "gemini_context_overflow": (
+            "The combined video + slides exceed the AI model's context window."
+        ),
+        "gemini_config":    "AI service not configured. Contact support.",
+        "validation_error": f"Invalid input: {exc}",
+    }
+    user_message = user_messages.get(category, f"AI service error: {exc}")
+
+    try:
+        from app.engines.state_machine import transition_session_sync
+        transition_session_sync(
+            session_id, "failed",
+            actor="ai_process_task",
+            reason=f"{category}: {exc}"[:500],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"ai_process: transition to failed raised (non-fatal): {e}")
+
+    try:
+        from app.engines.ws_bridge import publish_ws_event_sync
+        publish_ws_event_sync(session_id, {
+            "type":         "session_failed",
+            "category":     category,
+            "user_message": user_message,
+            "reason":       str(exc)[:500],
+        })
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"ai_process: session_failed WS emit failed (non-fatal): {e}")
+
+    # Release the rate-limit slot so the user can retry without 429.
+    try:
+        from app.middleware.rate_limit import release_slot
+        release_slot(None, session_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"ai_process: release_slot on failure failed: {e}")
+
+    logger.error(
+        f"ai_process: session={session_id} FAILED ({category}) — {exc}"
+    )
 
 
 # ─── Direct path ────────────────────────────────────────────────────────
@@ -139,9 +196,9 @@ def _process_direct(
                  WHERE session_id = CAST(:sid AS uuid)
                  ORDER BY
                    CASE role
-                     WHEN 'video' THEN 0
-                     WHEN 'audio' THEN 1
-                     WHEN 'audio_enhance' THEN 2
+                     WHEN 'audio' THEN 0
+                     WHEN 'audio_enhance' THEN 1
+                     WHEN 'video' THEN 2
                      WHEN 'slide' THEN 3
                      ELSE 9
                    END
