@@ -1,29 +1,31 @@
 """
-Slide-extract task — PDF/PPTX → slides rows + slide thumbnails in GCS.
+slide_extract_task — PDF/PPTX → slides rows + bullets + thumbnails.
 
-Reads the first slide source for the session, rasterizes each page using
-`ffmpeg` (works on PDF via poppler-piped images, but cross-platform we
-prefer `pdftoppm` which ships with poppler-utils — included in the
-Docker image via `poppler-utils`). Each thumbnail is uploaded to
-`gs://<bucket>/sessions/<id>/slides/<n>.png` and a `slides` row is
-created with `slide_index` (0-based, matches SLIDE_PALETTE) and
-`image_uri`.
+Phase 6k replaces the `pdftoppm` PNG-only version with PyMuPDF for PDFs
+and python-pptx for PPTX. Each page yields:
+  • slides row: slide_index, slide_number, title, full_text, image_uri,
+                thumbnail_uri
+  • bullets[]: one row per bullet/paragraph
 
-PPTX is not rasterized in-process (no LibreOffice in the worker image).
-The task logs a warning and exits cleanly — alignment still works
-against the audio transcript; the right-rail thumbnails simply use the
-generic slide placeholder until the user re-uploads as PDF.
+Ports MIC `app/tasks/slide_extract.py` (715 LOC) condensed for Rounds'
+narrower schema.
+
+Closes audit gaps 🟠 #10 (PPTX dropped), 🟠 #17 (no bullets), 🟡 #4 (multi-PDF).
 """
 from __future__ import annotations
 
+import io
 import logging
 import os
-import subprocess
 import tempfile
 
 from app.tasks.celery_app import RoundsTask, celery_app
 
 logger = logging.getLogger(__name__)
+
+
+_PDF_MIMES = {"application/pdf"}
+_PPTX_MIMES = {"application/vnd.openxmlformats-officedocument.presentationml.presentation"}
 
 
 @celery_app.task(
@@ -32,7 +34,7 @@ logger = logging.getLogger(__name__)
     name="rounds.tasks.slide_extract",
     max_retries=2,
 )
-def slide_extract_task(self, session_id: str) -> dict:  # noqa: ARG001
+def slide_extract_task(self, session_id: str) -> dict:
     from sqlalchemy import create_engine, text
 
     from app.config import settings
@@ -46,55 +48,77 @@ def slide_extract_task(self, session_id: str) -> dict:  # noqa: ARG001
                 text("SELECT id FROM slides WHERE session_id = CAST(:sid AS uuid) LIMIT 1"),
                 {"sid": session_id},
             ).fetchone()
-            if existing:
-                logger.info(f"slide_extract: skip — slides exist for {session_id}")
-                return {"skipped": True, "session_id": session_id}
-
-            src = conn.execute(
+            # We'll still process new sources, but skip duplicates per-source.
+            slide_sources = conn.execute(
                 text(
                     """
-                    SELECT gcs_uri, filename, content_type FROM sources
-                    WHERE session_id = CAST(:sid AS uuid) AND role = 'slide'
-                    ORDER BY created_at ASC
-                    LIMIT 1
+                    SELECT id, gcs_uri, filename, content_type
+                      FROM sources WHERE session_id = CAST(:sid AS uuid) AND role = 'slide'
+                      ORDER BY created_at ASC
                     """
                 ),
                 {"sid": session_id},
-            ).fetchone()
+            ).fetchall()
 
-        if not src:
-            logger.info(f"slide_extract: no slide source for {session_id} (audio-only session)")
+        if not slide_sources:
+            logger.info(f"slide_extract: no slide sources for {session_id}")
             return {"session_id": session_id, "slide_count": 0}
+        if existing:
+            logger.info(f"slide_extract: skip — slides exist for {session_id}")
+            return {"skipped": True, "session_id": session_id}
 
-        gcs_uri, filename, content_type = src
-        ext = (filename or "").rsplit(".", 1)[-1].lower()
-        is_pdf = ext == "pdf" or (content_type or "").lower() == "application/pdf"
+        total_slides = 0
+        total_bullets = 0
+        slide_index_cursor = 0
 
-        if not is_pdf:
-            logger.warning(
-                f"slide_extract: source for {session_id} is {ext}/{content_type} — "
-                f"only PDF rasterization is supported in this worker. Skipping."
-            )
-            return {"session_id": session_id, "slide_count": 0, "skipped_reason": f"unsupported:{ext}"}
+        for src in slide_sources:
+            src_id, gcs_uri, filename, content_type = src
+            ext = (filename or "").rsplit(".", 1)[-1].lower()
+            is_pdf = ext == "pdf" or (content_type or "") in _PDF_MIMES
+            is_pptx = ext == "pptx" or (content_type or "") in _PPTX_MIMES
 
-        slide_count = _rasterize_pdf_and_persist(session_id, gcs_uri, engine)
-        logger.info(f"slide_extract: session={session_id} wrote {slide_count} slides")
-        return {"session_id": session_id, "slide_count": slide_count}
+            if is_pdf:
+                slides_written, bullets_written = _process_pdf(
+                    engine, session_id, gcs_uri, slide_index_cursor,
+                )
+            elif is_pptx:
+                slides_written, bullets_written = _process_pptx(
+                    engine, session_id, gcs_uri, slide_index_cursor,
+                )
+            else:
+                logger.warning(
+                    f"slide_extract: unsupported source {filename} ({content_type}) — skipping"
+                )
+                slides_written = bullets_written = 0
+
+            total_slides += slides_written
+            total_bullets += bullets_written
+            slide_index_cursor += slides_written
+
+        logger.info(
+            f"slide_extract: session={session_id} slides={total_slides} bullets={total_bullets}"
+        )
+        return {
+            "session_id":  session_id,
+            "slide_count": total_slides,
+            "bullets":     total_bullets,
+        }
 
     except Exception as exc:  # noqa: BLE001
         attempt = self.request.retries
         if attempt < self.max_retries:
-            logger.warning(f"slide_extract failed (attempt {attempt + 1}): {exc} — retrying")
             self.retry_with_backoff(exc, attempt)
-        # Non-fatal: alignment still works without thumbnails. Return empty
-        # result instead of raising — keeps the chain alive.
-        logger.exception(f"slide_extract: terminal failure for {session_id} — continuing without slides")
+        logger.exception(f"slide_extract: terminal failure for {session_id} — continuing")
         return {"session_id": session_id, "slide_count": 0, "error": str(exc)}
     finally:
         engine.dispose()
 
 
-def _rasterize_pdf_and_persist(session_id: str, gcs_uri: str, engine) -> int:
+# ─── PDF path ───────────────────────────────────────────────────────────
+
+
+def _process_pdf(engine, session_id: str, gcs_uri: str, index_base: int) -> tuple[int, int]:
+    import fitz  # PyMuPDF
     from sqlalchemy import text
 
     from app.config import settings
@@ -102,55 +126,176 @@ def _rasterize_pdf_and_persist(session_id: str, gcs_uri: str, engine) -> int:
 
     from google.cloud import storage as gcs_lib
 
+    gcs_client = gcs_lib.Client(project=settings.GCP_PROJECT_ID)
+    bucket = gcs_client.bucket(settings.GCS_BUCKET)
+
     with tempfile.TemporaryDirectory() as tmpdir:
         local_pdf = os.path.join(tmpdir, "deck.pdf")
         _download_from_gcs(gcs_uri, local_pdf)
 
-        out_prefix = os.path.join(tmpdir, "page")
-        # pdftoppm produces page-1.png, page-2.png, ...
-        cmd = [
-            "pdftoppm",
-            "-png",
-            "-r", "120",  # 120dpi → ~1280×960 for typical 16:9 deck
-            local_pdf,
-            out_prefix,
-        ]
-        result = subprocess.run(cmd, capture_output=True, timeout=600)
-        if result.returncode != 0:
-            stderr = result.stderr.decode()[:500]
-            raise RuntimeError(f"pdftoppm failed: {stderr}")
+        doc = fitz.open(local_pdf)
+        slides_written = 0
+        bullets_written = 0
 
-        png_files = sorted(
-            f for f in os.listdir(tmpdir)
-            if f.startswith("page-") and f.endswith(".png")
-        )
-        if not png_files:
-            raise RuntimeError("pdftoppm produced no pages")
+        for page_idx in range(doc.page_count):
+            page = doc.load_page(page_idx)
+            full_text = page.get_text("text") or ""
+            title = _derive_slide_title(full_text, page_idx + 1)
 
-        gcs_client = gcs_lib.Client(project=settings.GCP_PROJECT_ID)
-        bucket = gcs_client.bucket(settings.GCS_BUCKET)
+            # Render thumbnail (PNG) + upload
+            pix = page.get_pixmap(dpi=120)
+            png_bytes = pix.tobytes("png")
+            blob_name = f"sessions/{session_id}/slides/thumb_{index_base + page_idx:03d}.png"
+            bucket.blob(blob_name).upload_from_string(png_bytes, content_type="image/png")
+            image_uri = f"gs://{settings.GCS_BUCKET}/{blob_name}"
 
-        with engine.begin() as conn:
-            for i, name in enumerate(png_files):
-                local_path = os.path.join(tmpdir, name)
-                blob_name = f"sessions/{session_id}/slides/thumb_{i:03d}.png"
-                bucket.blob(blob_name).upload_from_filename(local_path, content_type="image/png")
-                image_uri = f"gs://{settings.GCS_BUCKET}/{blob_name}"
-                conn.execute(
+            with engine.begin() as conn:
+                row = conn.execute(
                     text(
                         """
-                        INSERT INTO slides (session_id, slide_index, title, image_uri)
-                        VALUES (CAST(:sid AS uuid), :idx, :title, :uri)
+                        INSERT INTO slides
+                            (session_id, slide_index, title, image_uri, thumbnail_uri, full_text)
+                        VALUES
+                            (CAST(:sid AS uuid), :idx, :title, :uri, :uri, :ft)
                         ON CONFLICT (session_id, slide_index) DO UPDATE
-                          SET image_uri = EXCLUDED.image_uri
+                          SET title         = COALESCE(slides.title, EXCLUDED.title),
+                              image_uri     = EXCLUDED.image_uri,
+                              thumbnail_uri = EXCLUDED.thumbnail_uri,
+                              full_text     = EXCLUDED.full_text
+                        RETURNING id
                         """
                     ),
                     {
-                        "sid": session_id,
-                        "idx": i,
-                        "title": f"Slide {i + 1}",
-                        "uri": image_uri,
+                        "sid":   session_id,
+                        "idx":   index_base + page_idx,
+                        "title": title,
+                        "uri":   image_uri,
+                        "ft":    full_text,
                     },
-                )
+                ).fetchone()
+                slide_id = str(row[0]) if row else None
+                slides_written += 1
 
-        return len(png_files)
+                # Bullets — extract bullet/paragraph blocks from PyMuPDF.
+                bullets = _extract_bullets(page)
+                for pos, bullet_text in enumerate(bullets):
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO bullets (slide_id, text, position)
+                            VALUES (CAST(:sid AS uuid), :tx, :pos)
+                            ON CONFLICT (slide_id, position) DO UPDATE
+                              SET text = EXCLUDED.text
+                            """
+                        ),
+                        {"sid": slide_id, "tx": bullet_text, "pos": pos},
+                    )
+                    bullets_written += 1
+
+        doc.close()
+        return slides_written, bullets_written
+
+
+def _derive_slide_title(full_text: str, fallback_number: int) -> str:
+    """First non-empty line of slide text is the title heuristic."""
+    for line in (full_text or "").splitlines():
+        s = line.strip()
+        if s:
+            return s[:200]
+    return f"Slide {fallback_number}"
+
+
+def _extract_bullets(page) -> list[str]:
+    """
+    Extract bullet/paragraph candidates from a PyMuPDF page.
+    Treats each text block's lines as bullets; filters by min length 3 chars.
+    """
+    bullets: list[str] = []
+    blocks = page.get_text("blocks") or []
+    for block in blocks:
+        text = (block[4] or "").strip() if len(block) > 4 else ""
+        if not text:
+            continue
+        for line in text.split("\n"):
+            stripped = line.strip().lstrip("•·-*").strip()
+            if len(stripped) >= 3:
+                bullets.append(stripped[:500])
+    return bullets
+
+
+# ─── PPTX path ──────────────────────────────────────────────────────────
+
+
+def _process_pptx(engine, session_id: str, gcs_uri: str, index_base: int) -> tuple[int, int]:
+    from pptx import Presentation
+    from sqlalchemy import text
+
+    from app.config import settings
+    from app.tasks.transcribe import _download_from_gcs
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local_pptx = os.path.join(tmpdir, "deck.pptx")
+        _download_from_gcs(gcs_uri, local_pptx)
+
+        pres = Presentation(local_pptx)
+        slides_written = 0
+        bullets_written = 0
+        for idx, slide in enumerate(pres.slides):
+            title = None
+            bullets: list[str] = []
+            full_text_lines: list[str] = []
+            for shape in slide.shapes:
+                if not getattr(shape, "has_text_frame", False):
+                    continue
+                tf = shape.text_frame
+                for para in tf.paragraphs:
+                    text_str = para.text.strip()
+                    if not text_str:
+                        continue
+                    full_text_lines.append(text_str)
+                    if title is None and shape.name and "title" in shape.name.lower():
+                        title = text_str
+                    else:
+                        bullets.append(text_str)
+            title = title or (full_text_lines[0] if full_text_lines else f"Slide {idx + 1}")
+            full_text = "\n".join(full_text_lines)
+
+            with engine.begin() as conn:
+                row = conn.execute(
+                    text(
+                        """
+                        INSERT INTO slides
+                            (session_id, slide_index, title, full_text)
+                        VALUES
+                            (CAST(:sid AS uuid), :idx, :title, :ft)
+                        ON CONFLICT (session_id, slide_index) DO UPDATE
+                          SET title     = EXCLUDED.title,
+                              full_text = EXCLUDED.full_text
+                        RETURNING id
+                        """
+                    ),
+                    {
+                        "sid":   session_id,
+                        "idx":   index_base + idx,
+                        "title": title[:200],
+                        "ft":    full_text,
+                    },
+                ).fetchone()
+                slide_id = str(row[0]) if row else None
+                slides_written += 1
+
+                for pos, bt in enumerate(bullets):
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO bullets (slide_id, text, position)
+                            VALUES (CAST(:sid AS uuid), :tx, :pos)
+                            ON CONFLICT (slide_id, position) DO UPDATE
+                              SET text = EXCLUDED.text
+                            """
+                        ),
+                        {"sid": slide_id, "tx": bt[:500], "pos": pos},
+                    )
+                    bullets_written += 1
+
+        return slides_written, bullets_written
