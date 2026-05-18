@@ -11,7 +11,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import Icon from '@/components/shared/Icon.vue';
 import StageBadge from '@/components/shared/StageBadge.vue';
-import { sessions as sessionsApi, type SessionSummary } from '@/services/api';
+import { sessions as sessionsApi, type SessionSummary, type SessionFailureReason } from '@/services/api';
 import { SOP_STAGE_BY_ID } from '@/fixtures/sop_stages';
 import { toast } from '@/composables/useToast';
 import { confirm } from '@/composables/useConfirm';
@@ -109,9 +109,32 @@ async function deleteRow(s: SessionSummary, e: Event): Promise<void> {
     confirmLabel: 'Delete',
   });
   if (!ok) return;
-  toast.push(`Deleted ${s.code} (mock — DELETE endpoint pending)`, { tone: 'success' });
-  await load();
+  try {
+    await sessionsApi.remove(s.id);
+    sessions.value = sessions.value.filter((x) => x.id !== s.id);
+    toast.push(`Deleted ${s.code}`, { tone: 'success' });
+  } catch (err) {
+    const msg = err instanceof ApiError ? `${err.status} — ${err.message}` : (err instanceof Error ? err.message : 'Delete failed');
+    toast.push(`Failed to delete ${s.code}: ${msg}`, { tone: 'error' });
+  }
 }
+
+// ─── Failure-detail modal (click "Failed" status pill on a row) ─────────
+const failureModal = ref<SessionFailureReason | null>(null);
+const failureLoading = ref(false);
+
+async function showFailureReason(s: SessionSummary, e: Event): Promise<void> {
+  e.stopPropagation();
+  failureLoading.value = true;
+  try {
+    failureModal.value = await sessionsApi.failureReason(s.id);
+  } catch (err) {
+    toast.push('Could not load failure reason', { tone: 'error' });
+  } finally {
+    failureLoading.value = false;
+  }
+}
+function closeFailureModal(): void { failureModal.value = null; }
 </script>
 
 <template>
@@ -214,7 +237,18 @@ async function deleteRow(s: SessionSummary, e: Event): Promise<void> {
           <div class="sessions-table__sub">{{ s.presenter || '—' }}</div>
         </div>
         <div>
-          <span :class="['chip', `chip--${aiStatusFor(s).chip}`]">
+          <button
+            v-if="s.status === 'failed'"
+            type="button"
+            :class="['chip', 'chip--red']"
+            :data-test-id="`sessions-failure-${s.id}`"
+            :style="{ cursor: 'pointer', border: 'none' }"
+            title="Click for failure details"
+            @click="(e) => showFailureReason(s, e)"
+          >
+            <span class="chip__dot" /> Failed · why?
+          </button>
+          <span v-else :class="['chip', `chip--${aiStatusFor(s).chip}`]">
             <span class="chip__dot" /> {{ aiStatusFor(s).label }}
           </span>
         </div>
@@ -240,6 +274,74 @@ async function deleteRow(s: SessionSummary, e: Event): Promise<void> {
           <button class="btn btn--ghost btn--sm" :style="{ marginLeft: '6px' }" @click="router.push('/upload')">upload one</button>
         </template>
         <template v-else>No sessions match this filter.</template>
+      </div>
+    </div>
+
+    <!-- Failure-detail modal — surfaced from clicking the "Failed · why?" pill -->
+    <div
+      v-if="failureModal"
+      class="modal-overlay"
+      role="dialog"
+      aria-modal="true"
+      :style="{ position: 'fixed', inset: 0, background: 'rgba(8, 14, 24, 0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }"
+      @click.self="closeFailureModal"
+      @keydown.esc="closeFailureModal"
+    >
+      <div
+        class="card"
+        :style="{ background: 'var(--surface)', maxWidth: '640px', width: '90%', maxHeight: '80vh', overflowY: 'auto', padding: '20px 24px', borderRadius: '8px', boxShadow: '0 12px 32px rgba(8, 14, 24, 0.25)' }"
+      >
+        <div :style="{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px', gap: '12px' }">
+          <div>
+            <div :style="{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '.08em', color: 'var(--fg2)', fontWeight: 700, marginBottom: '4px' }">Session failed</div>
+            <h3 :style="{ margin: 0, fontSize: '17px', fontWeight: 700, color: 'var(--fg1)' }">{{ failureModal.title }}</h3>
+            <div :style="{ fontSize: '12px', color: 'var(--fg2)', fontFamily: 'var(--font-mono)', marginTop: '2px' }">{{ failureModal.code }}</div>
+          </div>
+          <button
+            class="btn btn--ghost btn--icon btn--sm"
+            data-test-id="failure-modal-close"
+            title="Close"
+            @click="closeFailureModal"
+          ><Icon name="x" :size="12" /></button>
+        </div>
+
+        <div v-if="failureModal.reason || failureModal.category" :style="{ background: 'var(--surface-bg)', border: '1px solid var(--border-subtle)', borderRadius: '6px', padding: '12px 14px', marginTop: '12px' }">
+          <div v-if="failureModal.category" :style="{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '.06em', color: 'var(--color-red)', fontWeight: 700, marginBottom: '6px' }">
+            {{ failureModal.category }}
+          </div>
+          <div :style="{ fontSize: '13px', color: 'var(--fg1)', lineHeight: 1.55, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }">
+            {{ failureModal.reason || '(no reason recorded)' }}
+          </div>
+          <div v-if="failureModal.ts || failureModal.actor" :style="{ fontSize: '11px', color: 'var(--fg2)', marginTop: '8px', fontFamily: 'var(--font-mono)' }">
+            <span v-if="failureModal.ts">{{ failureModal.ts }}</span>
+            <span v-if="failureModal.actor" :style="{ marginLeft: '10px' }">· {{ failureModal.actor }}</span>
+          </div>
+        </div>
+        <div v-else :style="{ padding: '12px 0', color: 'var(--fg2)', fontSize: '13px' }">
+          No specific failure reason recorded — check audit log for the full trail.
+        </div>
+
+        <div v-if="failureModal.log_tail && failureModal.log_tail.length" :style="{ marginTop: '16px' }">
+          <div :style="{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '.06em', color: 'var(--fg2)', fontWeight: 700, marginBottom: '6px' }">Recent transitions</div>
+          <div
+            v-for="(entry, i) in failureModal.log_tail.slice().reverse()"
+            :key="i"
+            :style="{ fontSize: '11.5px', fontFamily: 'var(--font-mono)', color: 'var(--fg2)', padding: '4px 0', borderTop: i > 0 ? '1px dashed var(--border-subtle)' : 'none' }"
+          >
+            <span v-if="entry.ts">{{ entry.ts }}</span>
+            <span v-if="entry.prev || entry.next" :style="{ marginLeft: '8px', color: 'var(--fg1)' }">
+              {{ entry.prev || '—' }} → {{ entry.next || '—' }}
+            </span>
+            <span v-if="entry.reason" :style="{ marginLeft: '8px' }">· {{ entry.reason }}</span>
+          </div>
+        </div>
+
+        <div :style="{ marginTop: '18px', display: 'flex', justifyContent: 'flex-end', gap: '8px' }">
+          <RouterLink :to="`/e/${failureModal.session_id}/audit`" class="btn btn--secondary btn--sm" @click="closeFailureModal">
+            Open audit log
+          </RouterLink>
+          <button class="btn btn--primary btn--sm" @click="closeFailureModal">Close</button>
+        </div>
       </div>
     </div>
   </main>

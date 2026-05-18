@@ -64,6 +64,18 @@ export interface PipelineConfig {
   iil_config: { enabled: boolean; tier1: boolean; tier2: boolean; tier3: boolean };
 }
 
+export interface SessionFailureReason {
+  session_id: string;
+  code: string;
+  title: string;
+  status: string;
+  reason: string | null;
+  category: string | null;
+  ts: string | null;
+  actor: string | null;
+  log_tail: Array<Record<string, unknown>>;
+}
+
 export const sessions = {
   list: (filters: SessionFilters = {}) =>
     http<SessionSummary[]>(`/v1/sessions${_q({ ...filters })}`),
@@ -71,10 +83,35 @@ export const sessions = {
     http<SessionSummary>(`/v1/sessions/${encodeURIComponent(id)}`),
   create: (payload: { code: string; title: string; presenter?: string; duration_sec?: number | null; attendee_count?: number | null; taxonomy?: string[]; pipeline_config?: PipelineConfig }) =>
     http<SessionSummary>('/v1/sessions', { body: payload, method: 'POST' }),
+  remove: (id: string) =>
+    http<{ session_id: string; deleted: boolean }>(`/v1/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  failureReason: (id: string) =>
+    http<SessionFailureReason>(`/v1/sessions/${encodeURIComponent(id)}/failure-reason`),
   pipelineConfig: (id: string) =>
     http<PipelineConfig & { auto_detected_template_id: string | null; auto_detected_confidence: number | null }>(
       `/v1/sessions/${encodeURIComponent(id)}/pipeline-config`,
     ),
+  // Session-files panel (MIC add_to_session.py port)
+  missing: (id: string) =>
+    http<{ has_slides: boolean; has_chat: boolean; has_manifest: boolean; has_bios: boolean }>(
+      `/v1/sessions/${encodeURIComponent(id)}/missing`,
+    ),
+  addSignedUrl: (id: string, body: { filename: string; mime_type: string; type: 'slides' | 'chat' | 'manifest' }) =>
+    http<{ signed_url: string; gcs_uri: string; blob_name: string; mime_type: string; expires_in: number }>(
+      `/v1/sessions/${encodeURIComponent(id)}/add/signed-url`,
+      { body, method: 'POST' },
+    ),
+  addSlides: (id: string, body: { gcs_uri: string; slide_numbers?: number[] }, mode?: 'replace' | 'append' | 'replace_selected') =>
+    http(`/v1/sessions/${encodeURIComponent(id)}/add/slides${mode ? `?mode=${mode}` : ''}`, { body, method: 'POST' }),
+  addChat: (id: string, body: { gcs_uri: string }, opts: { confirm?: boolean; start_time?: string } = {}) => {
+    const qs = new URLSearchParams();
+    if (opts.confirm) qs.set('confirm', 'true');
+    if (opts.start_time) qs.set('start_time', opts.start_time);
+    const q = qs.toString();
+    return http(`/v1/sessions/${encodeURIComponent(id)}/add/chat${q ? `?${q}` : ''}`, { body, method: 'POST' });
+  },
+  addManifest: (id: string, body: { gcs_uri: string }, mode?: 'use_new' | 'keep_current') =>
+    http(`/v1/sessions/${encodeURIComponent(id)}/add/manifest${mode ? `?mode=${mode}` : ''}`, { body, method: 'POST' }),
 };
 
 // ─── Segments ────────────────────────────────────────────────────────────

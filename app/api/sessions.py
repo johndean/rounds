@@ -243,3 +243,88 @@ async def get_session(session_id: UUID, db: DbSession, _user: CurrentUser) -> di
     if not row:
         raise HTTPException(status_code=404, detail="Session not found")
     return dict(row)
+
+
+@router.delete("/{session_id}")
+async def delete_session(session_id: UUID, db: DbSession, _user: CurrentUser) -> dict:
+    """
+    Soft-delete a session. Sets `deleted_at`; data preserved for 30 days.
+
+    Mirrors MIC `DELETE /v1/sessions/{id}` semantics. Permission gating is
+    intentionally absent for parity with Rounds Phase-A — every authenticated
+    user can soft-delete; restore lives under Settings → Deleted Sessions.
+    """
+    from sqlalchemy import text
+
+    row = (
+        await db.execute(
+            text("SELECT id, deleted_at FROM sessions WHERE id = :id"),
+            {"id": str(session_id)},
+        )
+    ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if row["deleted_at"] is not None:
+        from app.middleware.envelope import ConflictError
+        raise ConflictError(message="Session is already deleted")
+
+    await db.execute(
+        text("UPDATE sessions SET deleted_at = now(), updated_at = now() WHERE id = :id"),
+        {"id": str(session_id)},
+    )
+    await db.commit()
+    return {"session_id": str(session_id), "deleted": True}
+
+
+@router.get("/{session_id}/failure-reason")
+async def get_failure_reason(session_id: UUID, db: DbSession, _u: CurrentUser) -> dict:
+    """
+    Surfaces the reason a session is in `failed` status. Returns the last
+    audit-log transition that flipped the session into `failed`, plus the
+    raw `reason` string the worker wrote.
+
+    Used by the Sessions list page's failure-detail modal.
+    """
+    from sqlalchemy import text
+
+    sess = (
+        await db.execute(
+            text(
+                """
+                SELECT id, code, title, status, deleted_at, created_at, updated_at
+                FROM sessions WHERE id = :id
+                """
+            ),
+            {"id": str(session_id)},
+        )
+    ).mappings().first()
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    audit = (
+        await db.execute(
+            text("SELECT processing_log FROM session_audit WHERE session_id = :sid"),
+            {"sid": str(session_id)},
+        )
+    ).mappings().first()
+    log = (audit or {}).get("processing_log") or []
+    if not isinstance(log, list):
+        log = []
+
+    last_failed = None
+    for entry in reversed(log):
+        if isinstance(entry, dict) and (entry.get("next") == "failed" or entry.get("status") == "failed"):
+            last_failed = entry
+            break
+
+    return {
+        "session_id": str(session_id),
+        "code":       sess["code"],
+        "title":      sess["title"],
+        "status":     sess["status"],
+        "reason":     (last_failed or {}).get("reason") if last_failed else None,
+        "category":   (last_failed or {}).get("category") if last_failed else None,
+        "ts":         (last_failed or {}).get("ts") if last_failed else None,
+        "actor":      (last_failed or {}).get("actor") if last_failed else None,
+        "log_tail":   log[-10:],
+    }

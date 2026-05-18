@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api import add_to_session as add_to_session_router
 from app.api import audit as audit_router
 from app.api import auth as auth_router
 from app.api import diagnostics as diag_router
@@ -138,6 +139,7 @@ async def session_ws(websocket: WebSocket, session_id: str):
 app.include_router(auth_router.router)
 app.include_router(gcs_router.router)
 app.include_router(sessions_router.router)
+app.include_router(add_to_session_router.router)
 app.include_router(session_resources_router.router)
 app.include_router(segments_router.router)
 app.include_router(disc_router.router)

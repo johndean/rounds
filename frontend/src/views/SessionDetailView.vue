@@ -13,6 +13,7 @@
  */
 import { computed, onMounted, ref } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
+import AddFileModal from '@/components/session/AddFileModal.vue';
 import { SOP_STAGES } from '@/fixtures/sop_stages';
 import {
   sessions as sessionsApi,
@@ -126,9 +127,28 @@ function downloadFile(ext: string): void {
   toast.push(`Download ${ext.slice(1).toUpperCase()} (lands once exports endpoint is wired)`, { tone: 'info' });
 }
 function reassignStage(name: string): void { toast.push(`Reassign ${name} — picker (mock)`); }
+
+// ─── Session-files modal wiring (MIC AddFileModal port) ──────────────
+const modalOpen = ref(false);
+const modalType = ref<'slides' | 'chat' | 'manifest' | 'bios'>('slides');
+
+const ROLE_TO_MODAL_TYPE: Record<string, 'slides' | 'chat' | 'manifest' | 'bios'> = {
+  slide:    'slides',
+  chat:     'chat',
+  manifest: 'manifest',
+  bios:     'bios',
+};
+
 function fileAction(f: { name: string; role: string }): void {
-  toast.push(`${hasFile(f.role) ? 'Update' : 'Add'} ${f.name} — file picker pending`);
+  modalType.value = ROLE_TO_MODAL_TYPE[f.role] || 'slides';
+  modalOpen.value = true;
 }
+
+function onFileSuccess(payload: { type: string; data: unknown }): void {
+  toast.push(`${payload.type} saved`, { tone: 'success' });
+  void load();   // refetch sources + slides
+}
+
 function pubLink(p: string): void { toast.push(`${p} — link saved (mock)`, { tone: 'success' }); }
 </script>
 
@@ -393,5 +413,15 @@ function pubLink(p: string): void { toast.push(`${p} — link saved (mock)`, { t
         </div>
       </div>
     </template>
+
+    <AddFileModal
+      v-if="session"
+      :open="modalOpen"
+      :session-id="session.id"
+      :type="modalType"
+      :has-existing="hasFile(modalType === 'slides' ? 'slide' : modalType)"
+      @close="modalOpen = false"
+      @success="onFileSuccess"
+    />
   </main>
 </template>

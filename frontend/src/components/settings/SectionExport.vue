@@ -1,14 +1,39 @@
 <script setup lang="ts">
 /**
- * SectionExport — verbatim port of settings-pages.jsx::SectionExport (252-276).
+ * SectionExport — persists `export_include_keypoints` to org_settings.
  */
-import { ref } from 'vue';
+import { onMounted, ref } from 'vue';
 import SettingsHeader from './SettingsHeader.vue';
 import FormRow from './FormRow.vue';
 import TogglePill from './TogglePill.vue';
+import { settingsApi } from '@/services/api';
 import { toast } from '@/composables/useToast';
 
 const keyPoints = ref(false);
+const loading = ref(true);
+
+onMounted(async () => {
+  try {
+    const s = (await settingsApi.list()) as Record<string, unknown>;
+    if (typeof s.export_include_keypoints === 'boolean') keyPoints.value = s.export_include_keypoints;
+  } catch {
+    /* fall back to default */
+  } finally {
+    loading.value = false;
+  }
+});
+
+async function onToggleKeyPoints(v: boolean): Promise<void> {
+  const prev = keyPoints.value;
+  keyPoints.value = v;
+  try {
+    await settingsApi.set('export_include_keypoints', v);
+    toast.push(`Key points in export: ${v ? 'on' : 'off'}`, { tone: 'success' });
+  } catch {
+    keyPoints.value = prev;
+    toast.push('Failed to save export setting', { tone: 'error' });
+  }
+}
 
 function downloadMacro(): void {
   const blob = new Blob(["' VBA macro placeholder"], { type: 'application/zip' });
@@ -27,7 +52,7 @@ function downloadMacro(): void {
   <div class="set-form">
     <FormRow label="Include key points" sub="Add suggested key points to exported documents.">
       <template #control>
-        <TogglePill :on="keyPoints" @update:on="(v) => (keyPoints = v)" />
+        <TogglePill :on="keyPoints" @update:on="onToggleKeyPoints" />
       </template>
     </FormRow>
     <div class="set-card-block">
