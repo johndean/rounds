@@ -12,13 +12,22 @@ import { withAlpha, fmtTime } from '@/utils/editorHelpers';
 
 interface Token { kind: 'filler' | 'drift' | null; text: string; t: number; }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   segments: readonly Segment[];
   activeSegmentId: string | null | undefined;
   activeWordIdx: number;
   focusedSlideId: string | null;
   slideRailMode: 'focus' | 'filter';
-}>();
+  // AI MODE direct: the session is `ready` before Cloud STT finishes. The
+  // STT Raw tab shows "processing in background" until the WS `stt_ready`
+  // event arrives. Defaults preserve old behavior (always-ready) for
+  // standard / enhanced pipelines that finish STT before the editor opens.
+  sttReady?: boolean;
+  sttFailed?: boolean;
+}>(), {
+  sttReady: true,
+  sttFailed: false,
+});
 
 const emit = defineEmits<{
   (e: 'segmentClick', id: string): void;
@@ -119,6 +128,46 @@ function confSecondStyle(accent: string): Record<string, string> {
     aria-label="STT reference"
     data-screen-label="STT Reference"
   >
+    <!-- Background-STT placeholder (MIC parity: ai_process completes first,
+         editor opens immediately, stt_background_task runs in parallel and
+         emits stt_ready when done). -->
+    <div
+      v-if="!sttReady && !sttFailed"
+      class="stt-pane__loading"
+      role="status"
+      :style="{
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        gap: '12px', padding: '60px 24px', color: 'var(--fg2)',
+        fontSize: '13px', fontFamily: 'var(--font-family)', textAlign: 'center'
+      }"
+    >
+      <div
+        :style="{
+          width: '18px', height: '18px', borderRadius: '50%',
+          border: '2px solid rgba(255,255,255,0.15)', borderTopColor: '#2563eb',
+          animation: 'stt-spin 0.8s linear infinite'
+        }"
+      />
+      <span>Speech-to-text processing in background.</span>
+    </div>
+
+    <div
+      v-else-if="sttFailed"
+      class="stt-pane__failed"
+      role="status"
+      :style="{
+        padding: '40px 24px', textAlign: 'center', color: 'var(--color-red)',
+        fontSize: '13px', fontFamily: 'var(--font-family)'
+      }"
+    >
+      <Icon name="alert" :size="16" />
+      <div :style="{ marginTop: '8px' }">
+        STT processing failed — the AI transcript above is your primary source.
+      </div>
+    </div>
+
+    <template v-else>
+
     <div class="stt-pane__banner" role="note">
       <Icon name="alert" :size="16" />
       <div>
@@ -172,5 +221,11 @@ function confSecondStyle(accent: string): Record<string, string> {
     <div :style="{ padding: '24px 12px', textAlign: 'center', color: 'rgba(255,255,255,0.4)', fontSize: '11px', fontFamily: 'var(--font-family)' }">
       End of STT stream · {{ visible.length }} segments · superscript = token start (s) · drift highlights match discrepancy classification
     </div>
+
+    </template>
   </section>
 </template>
+
+<style scoped>
+@keyframes stt-spin { to { transform: rotate(360deg); } }
+</style>

@@ -39,6 +39,7 @@ import { SOP_STAGES } from '@/fixtures/sop_stages';
 import { toast } from '@/composables/useToast';
 import { modal } from '@/composables/useModal';
 import FindReplaceModal from '@/components/overlays/FindReplaceModal.vue';
+import { useSyncController } from '@/composables/useSyncController';
 
 type TabId = 'ai' | 'stt' | 'disc' | 'audit';
 type RightTabId = 'admin' | 'chat' | 'polls';
@@ -114,7 +115,25 @@ async function load(): Promise<void> {
     loading.value = false;
   }
 }
-onMounted(load);
+// WS sync — listens for stt_ready / stt_failed / discrepancies_ready while
+// the editor is open. Mirrors MIC's pattern: AI MODE direct completes first
+// and transitions to ready; STT runs in the background. The STT Raw tab
+// shows "processing in background" until sttReady flips to true.
+const {
+  sttReady, sttFailed,
+  connect: wsConnect, disconnect: wsDisconnect,
+} = useSyncController(props.id);
+
+onMounted(() => { void load(); wsConnect(); });
+onUnmounted(() => { wsDisconnect(); });
+
+// If words already exist on first load (session has finished STT before user
+// reopens the editor), promote sttReady so we skip the background placeholder.
+watch(SEGMENTS, (segs) => {
+  if (sttReady.value) return;
+  const hasWords = segs.some((s: Segment & { words?: unknown[] }) => Array.isArray(s.words) && s.words.length > 0);
+  if (hasWords) sttReady.value = true;
+}, { immediate: true });
 
 // ── Derived maps + computeds ─────────────────────────────────────────
 const segmentsById = computed<Map<string, Segment>>(() => {
@@ -515,6 +534,8 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
         :active-word-idx="activeWordIdx"
         :focused-slide-id="focusedSlideId"
         :slide-rail-mode="slideRailMode"
+        :stt-ready="sttReady"
+        :stt-failed="sttFailed"
         @segment-click="onSegmentClick"
         @word-click="onWordClick"
         @clear-focus="focusedSlideId = null"
