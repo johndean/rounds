@@ -37,6 +37,7 @@ celery_app = Celery(
         "app.tasks.frame_task",
         "app.tasks.anchor_task",
         "app.tasks.normalize",
+        "app.tasks.fusion",
     ],
 )
 
