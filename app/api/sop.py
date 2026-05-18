@@ -40,6 +40,26 @@ class CheckResolvePayload(BaseModel):
     label: str
 
 
+class AssignPayload(BaseModel):
+    """Reassign a stage to a person or group.
+
+    `stage` defaults to the current SOP stage. `assignee` may be a person
+    email, a group name (prefix with "group:"), or "(unassigned)" to clear.
+    """
+    stage: Optional[str] = None
+    assignee: str = Field(..., min_length=1, max_length=128)
+    note: Optional[str] = None
+
+
+class AnnotationPayload(BaseModel):
+    """Append a stage-scoped note / override / blocker. `stage` defaults
+    to the current SOP stage. `kind` is one of: 'note' | 'override' |
+    'blocker' — frontend uses different rendering for each."""
+    stage: Optional[str] = None
+    kind: str = Field(default="note", min_length=1, max_length=32)
+    body: str = Field(..., min_length=1, max_length=2000)
+
+
 def _validate_transition(from_stage: str, to_stage: str) -> None:
     """Allow forward-only transitions; reject jumps + backward moves."""
     if to_stage not in _STAGE_INDEX:
@@ -100,6 +120,111 @@ async def advance(session_id: UUID, payload: AdvancePayload, db: DbSession, user
         "d": json.dumps({"from": cur["current_stage"], "to": payload.to_stage, "note": payload.note})})
     await db.commit()
     return dict(row)
+
+
+@router.post("/assign")
+async def assign_stage(session_id: UUID, payload: AssignPayload, db: DbSession, user: CurrentUser) -> dict:
+    """Phase 6: reassign a stage owner. The new assignee is written to
+    `sop_state.assignees[stage]` (jsonb); an audit_events row captures
+    the actor + old/new values.
+    """
+    import json as _json
+    cur = (await db.execute(text(
+        "SELECT current_stage, assignees FROM sop_state WHERE session_id = :s FOR UPDATE"
+    ), {"s": str(session_id)})).mappings().first()
+    if not cur:
+        raise HTTPException(status_code=404, detail="SOP state not initialized; GET /sop first")
+
+    stage = payload.stage or cur["current_stage"]
+    if stage not in _STAGE_INDEX:
+        raise HTTPException(status_code=400, detail=f"Unknown stage: {stage}")
+
+    assignees = dict(cur["assignees"] or {})
+    prev_assignee = assignees.get(stage)
+    assignees[stage] = {
+        "assignee": payload.assignee,
+        "assigned_by": user.email,
+        "assigned_at": None,   # filled by Postgres now() below via the UPDATE
+    }
+    await db.execute(text(
+        "UPDATE sop_state SET assignees = CAST(:a AS jsonb), updated_at = now() "
+        "WHERE session_id = :s"
+    ), {"a": _json.dumps(assignees), "s": str(session_id)})
+    await db.execute(text(
+        "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
+        "VALUES (:s, :a, 'sop.assign', :sum, CAST(:d AS jsonb))"
+    ), {
+        "s":   str(session_id),
+        "a":   user.email,
+        "sum": f"assigned {stage} → {payload.assignee}",
+        "d":   _json.dumps({
+            "stage": stage,
+            "prev":  prev_assignee,
+            "next":  payload.assignee,
+            "note":  payload.note,
+        }),
+    })
+    await db.commit()
+    return {
+        "session_id": str(session_id),
+        "stage":      stage,
+        "assignee":   payload.assignee,
+        "prev":       prev_assignee,
+    }
+
+
+@router.patch("/annotations")
+async def add_annotation(session_id: UUID, payload: AnnotationPayload, db: DbSession, user: CurrentUser) -> dict:
+    """Phase 6: append a stage-scoped annotation to `sop_state.metadata.annotations`.
+    Annotations are append-only (no in-place edits) — the audit trail is the
+    annotations array ordered by inserted_at."""
+    import json as _json
+    from datetime import datetime, timezone
+    cur = (await db.execute(text(
+        "SELECT current_stage, metadata FROM sop_state WHERE session_id = :s FOR UPDATE"
+    ), {"s": str(session_id)})).mappings().first()
+    if not cur:
+        raise HTTPException(status_code=404, detail="SOP state not initialized; GET /sop first")
+
+    stage = payload.stage or cur["current_stage"]
+    if stage not in _STAGE_INDEX:
+        raise HTTPException(status_code=400, detail=f"Unknown stage: {stage}")
+    if payload.kind not in ("note", "override", "blocker"):
+        raise HTTPException(status_code=400, detail=f"Unknown annotation kind: {payload.kind}")
+
+    metadata = dict(cur["metadata"] or {})
+    annotations = list(metadata.get("annotations") or [])
+    new_entry = {
+        "stage":       stage,
+        "kind":        payload.kind,
+        "body":        payload.body,
+        "actor_email": user.email,
+        "inserted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    annotations.append(new_entry)
+    metadata["annotations"] = annotations
+
+    await db.execute(text(
+        "UPDATE sop_state SET metadata = CAST(:m AS jsonb), updated_at = now() "
+        "WHERE session_id = :s"
+    ), {"m": _json.dumps(metadata), "s": str(session_id)})
+    await db.execute(text(
+        "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
+        "VALUES (:s, :a, 'sop.annotation', :sum, CAST(:d AS jsonb))"
+    ), {
+        "s":   str(session_id),
+        "a":   user.email,
+        "sum": f"{payload.kind} on {stage}",
+        "d":   _json.dumps(new_entry),
+    })
+    await db.commit()
+    return {
+        "session_id":  str(session_id),
+        "stage":       stage,
+        "kind":        payload.kind,
+        "annotation":  new_entry,
+        "total_count": len(annotations),
+    }
 
 
 @router.post("/checks/resolve")

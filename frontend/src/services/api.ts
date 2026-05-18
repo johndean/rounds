@@ -304,6 +304,21 @@ export const sop = {
     http(`/v1/sessions/${sessionId}/sop/advance`, { body: { to_stage: toStage, note }, method: 'POST' }),
   resolveCheck: (sessionId: string, checkId: string, label: string) =>
     http(`/v1/sessions/${sessionId}/sop/checks/resolve`, { body: { check_id: checkId, label }, method: 'POST' }),
+  // Phase 6 — stage owner reassignment + annotations (note / override / blocker)
+  assign: (sessionId: string, assignee: string, opts: { stage?: string; note?: string } = {}) =>
+    http<{ session_id: string; stage: string; assignee: string; prev: unknown }>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/sop/assign`,
+      { body: { assignee, stage: opts.stage, note: opts.note }, method: 'POST' },
+    ),
+  annotate: (sessionId: string, body: string, opts: { stage?: string; kind?: 'note' | 'override' | 'blocker' } = {}) =>
+    http<{
+      session_id: string; stage: string; kind: string;
+      annotation: { stage: string; kind: string; body: string; actor_email: string; inserted_at: string };
+      total_count: number;
+    }>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/sop/annotations`,
+      { body: { body, stage: opts.stage, kind: opts.kind || 'note' }, method: 'PATCH' },
+    ),
 };
 
 // ─── Improvements ────────────────────────────────────────────────────────

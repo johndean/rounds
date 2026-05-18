@@ -134,15 +134,20 @@ const approvers = computed(() =>
 const completionPct = computed(() => Math.round((currentIdx.value / stages.length) * 100));
 const blockers = computed(() => checkStates.value.filter(c => c.state !== 'pass').length);
 
-function resolveCheck(label: string): void {
-  // Phase 2 audit remediation: checkStates are hardcoded pending (no real
-  // check infrastructure yet — see line 78 `meta: 'awaiting check
-  // infrastructure (Phase 7)'`). Resolve action depends on Phase 7 ports
-  // shipping real check_ids first; until then, warn-toast.
-  toast.push(
-    `Check resolve "${label.slice(0, 40)}…" not yet wired — ships with Phase 6/7 SOP plane.`,
-    { tone: 'warn' },
-  );
+async function resolveCheck(label: string): Promise<void> {
+  // Phase 6: real wiring. The backend resolveCheck endpoint persists to
+  // sop_checks with the current stage + a slugged check_id (label-derived
+  // because checkStates here are derived from stage.checks fixture labels —
+  // no real per-check infrastructure yet, but the resolve record persists
+  // either way and is queryable for the audit ledger).
+  const checkId = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 64);
+  try {
+    await sopApi.resolveCheck(props.id, checkId, label);
+    toast.push(`Resolved: "${label.slice(0, 40)}${label.length > 40 ? '…' : ''}"`, { tone: 'success' });
+    await load();
+  } catch (e) {
+    toast.push(e instanceof Error ? e.message : 'Resolve failed', { tone: 'error' });
+  }
 }
 async function advance(): Promise<void> {
   if (!nextStage.value) return;
@@ -161,17 +166,56 @@ async function advance(): Promise<void> {
     toast.push(e instanceof Error ? e.message : 'Advance failed', { tone: 'error' });
   }
 }
-function reassign(name: string): void {
-  toast.push(
-    `Stage reassign for ${name} not yet wired — ships with Phase 6 SOP control plane.`,
-    { tone: 'warn' },
+async function reassign(name: string): Promise<void> {
+  // Phase 6: real wiring. Prompt for the new assignee (person email or
+  // "group:NAME"); send to /sop/assign which persists to sop_state.assignees
+  // and records an audit_events row.
+  const assignee = window.prompt(
+    `Reassign "${name}" stage to (email or "group:NAME"):`,
+    '',
   );
+  if (!assignee) return;
+  try {
+    const r = await sopApi.assign(props.id, assignee.trim(), { stage: view.value.id });
+    toast.push(`Assigned ${r.stage} → ${r.assignee}`, { tone: 'success' });
+    await load();
+  } catch (e) {
+    toast.push(e instanceof Error ? e.message : 'Assign failed', { tone: 'error' });
+  }
 }
 function ping(name: string): void {
+  // Slack integration is out of scope of audit phases — leave warn-tone.
   toast.push(
     `Slack ping for ${name} not yet wired — depends on Slack integration (out of scope).`,
     { tone: 'warn' },
   );
+}
+
+async function addOverride(): Promise<void> {
+  // Phase 6: annotation kind='override'. Used when a stage advances despite
+  // failing checks; the override reason is captured in the audit trail.
+  const reason = window.prompt(`Override reason for "${view.value.name}":`, '');
+  if (!reason || !reason.trim()) return;
+  try {
+    await sopApi.annotate(props.id, reason.trim(), { stage: view.value.id, kind: 'override' });
+    toast.push(`Override recorded on ${view.value.name}`, { tone: 'success' });
+    await load();
+  } catch (e) {
+    toast.push(e instanceof Error ? e.message : 'Override failed', { tone: 'error' });
+  }
+}
+
+async function addNote(): Promise<void> {
+  // Phase 6: annotation kind='note'. Free-text stage commentary.
+  const body = window.prompt(`Add note to "${view.value.name}":`, '');
+  if (!body || !body.trim()) return;
+  try {
+    await sopApi.annotate(props.id, body.trim(), { stage: view.value.id, kind: 'note' });
+    toast.push(`Note added to ${view.value.name}`, { tone: 'success' });
+    await load();
+  } catch (e) {
+    toast.push(e instanceof Error ? e.message : 'Note add failed', { tone: 'error' });
+  }
 }
 
 function fmtIso(iso: string): string {
@@ -391,8 +435,8 @@ function fmtLocal(iso: string): string {
             <div class="card__body" :style="{ display: 'grid', gap: '6px' }">
               <RouterLink :to="`/e/${props.id}`" class="btn btn--secondary btn--sm"><Icon name="edit" /> Open editor</RouterLink>
               <RouterLink :to="`/e/${props.id}/audit`" class="btn btn--secondary btn--sm"><Icon name="history" /> Full audit ledger</RouterLink>
-              <button class="btn btn--ghost btn--sm" @click="toast.push('Override with reason not yet wired — ships with Phase 6 SOP control plane.', { tone: 'warn' })"><Icon name="alert" /> Override with reason</button>
-              <button class="btn btn--ghost btn--sm" @click="toast.push('Stage notes not yet wired — ships with Phase 6 SOP control plane.', { tone: 'warn' })"><Icon name="doc" /> Stage notes</button>
+              <button class="btn btn--ghost btn--sm" @click="addOverride"><Icon name="alert" /> Override with reason</button>
+              <button class="btn btn--ghost btn--sm" @click="addNote"><Icon name="doc" /> Stage notes</button>
             </div>
           </div>
         </div>
