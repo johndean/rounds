@@ -69,11 +69,12 @@ def ai_process_task(self, session_id: str) -> dict:  # noqa: ARG001 — bind=Tru
         prompt_mode   = row[3]
         custom_prompt = row[4]
 
-        if ai_pipeline != "direct":
-            logger.info(f"ai_process: skip — pipeline={ai_pipeline} (enhanced lands in 6m)")
-            return {"skipped": True, "reason": f"pipeline={ai_pipeline}"}
-
-        return _process_direct(
+        if ai_pipeline == "direct":
+            return _process_direct(
+                self, engine, session_id, ai_mode, ai_model, prompt_mode, custom_prompt,
+            )
+        # Enhanced: assume transcribe + normalize have already run; refine via Gemini.
+        return _process_enhanced(
             self, engine, session_id, ai_mode, ai_model, prompt_mode, custom_prompt,
         )
 
@@ -340,6 +341,154 @@ def _process_direct(
         "speaker_count": len(speaker_id_by_name),
         "status":        "ready",
     }
+
+
+# ─── Enhanced path (Pipeline 2) ─────────────────────────────────────────
+
+
+def _process_enhanced(
+    self,  # noqa: ARG001
+    engine,
+    session_id: str,
+    ai_mode: str,
+    ai_model: str,
+    prompt_mode: str,
+    custom_prompt: Optional[str],
+) -> dict:
+    """
+    Enhanced pipeline: transcribe + normalize have produced segments + text.
+    AI MODE here refines each segment via Gemini (e.g. for non-transcript
+    modes — summary / key-moments / structured-notes), then writes the
+    refined text back. For ai_mode='transcript' this is a no-op since
+    normalize already cleaned the text.
+
+    Triggered by ingest_task when ai_pipeline=enhanced AND ai_mode != 'transcript'.
+    """
+    from sqlalchemy import text
+
+    from app.engines.llm_client import LLMError, call_gemini_text
+    from app.prompts import get_prompt_for_mode
+
+    if ai_mode == "transcript":
+        logger.info(f"ai_process[enhanced]: ai_mode=transcript — no refinement needed")
+        return {"session_id": session_id, "refined": 0, "ai_mode": ai_mode}
+
+    with engine.connect() as conn:
+        segs = conn.execute(
+            text(
+                """
+                SELECT id, seq, text FROM segments
+                 WHERE session_id = CAST(:sid AS uuid)
+                 ORDER BY seq ASC
+                """
+            ),
+            {"sid": session_id},
+        ).fetchall()
+
+    if not segs:
+        logger.info(f"ai_process[enhanced]: no segments for {session_id}")
+        return {"session_id": session_id, "refined": 0}
+
+    # Build the full transcript blob (for single-pass refinement) and call Gemini once.
+    full_text = "\n\n".join(s[2] or "" for s in segs)
+    system_prompt = get_prompt_for_mode(prompt_mode or ai_mode, custom_prompt)
+    user_prompt = "Refine the following transcript:\n\n" + full_text
+
+    try:
+        # Use the JSON-output text path; we'll ask for plain text in the prompt.
+        # Falling back to the raw response if JSON parse fails — non-fatal.
+        raw = call_gemini_text(system_prompt, user_prompt, model_id=ai_model)
+    except LLMError as e:
+        logger.warning(f"ai_process[enhanced]: Gemini call failed ({e.category}): {e}")
+        return {"session_id": session_id, "refined": 0, "error": e.category}
+
+    # Try parsing as JSON {refined: [..]} first; else split blocks back to segments.
+    refined_blocks: list[str] = []
+    try:
+        import json as _json
+        data = _json.loads(raw)
+        if isinstance(data, dict) and isinstance(data.get("refined"), list):
+            refined_blocks = [str(b) for b in data["refined"]]
+    except Exception:  # noqa: BLE001
+        refined_blocks = [b.strip() for b in raw.split("\n\n") if b.strip()]
+
+    if not refined_blocks:
+        logger.warning(f"ai_process[enhanced]: empty refinement output for {session_id}")
+        return {"session_id": session_id, "refined": 0}
+
+    # Match refined blocks to segments by index. Truncate or pad as needed.
+    n = min(len(segs), len(refined_blocks))
+    with engine.begin() as conn:
+        for i in range(n):
+            conn.execute(
+                text("UPDATE segments SET text = :t, updated_at = now() WHERE id = :sid"),
+                {"t": refined_blocks[i], "sid": segs[i][0]},
+            )
+    logger.info(f"ai_process[enhanced]: session={session_id} refined={n}/{len(segs)} ai_mode={ai_mode}")
+    return {"session_id": session_id, "refined": n, "ai_mode": ai_mode}
+
+
+# ─── Template autodetect ────────────────────────────────────────────────
+
+
+@celery_app.task(
+    bind=True,
+    base=RoundsTask,
+    name="rounds.tasks.template_autodetect",
+    max_retries=1,
+)
+def template_autodetect_task(self, session_id: str) -> dict:
+    """
+    Non-blocking, non-fatal classification of session content into a template.
+    Runs on first 60s of audio. Failure → lecture_v1 + confidence 0.0 (TIL Rule 7).
+
+    Updates session_templates.auto_detected_template_id + confidence. Never
+    auto-applies — surfaced as a suggestion in the UI.
+
+    Phase 6m / U128.
+    """
+    from sqlalchemy import create_engine, text
+
+    from app.config import settings
+
+    sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+    engine = create_engine(sync_url)
+    try:
+        # Phase 6m: confidence=0.0 fallback. Full classifier feature set is
+        # OQ-008 (audit reference). Lecture_v1 is the safest default.
+        detected_id = "lecture_v1"
+        detected_conf = 0.0
+
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE session_templates
+                       SET auto_detected_template_id = :tid,
+                           auto_detected_confidence  = :conf
+                     WHERE session_id = CAST(:sid AS uuid)
+                    """
+                ),
+                {"tid": detected_id, "conf": detected_conf, "sid": session_id},
+            )
+
+        # Emit WS event (no-op until 6n)
+        try:
+            from app.engines.ws_bridge import publish_ws_event_sync  # type: ignore
+
+            publish_ws_event_sync(
+                session_id,
+                {"type": "template_autodetect", "template_id": detected_id, "confidence": detected_conf},
+            )
+        except ImportError:
+            pass
+
+        return {"session_id": session_id, "template_id": detected_id, "confidence": detected_conf}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"template_autodetect: non-fatal failure — {exc}")
+        return {"session_id": session_id, "template_id": "lecture_v1", "confidence": 0.0}
+    finally:
+        engine.dispose()
 
 
 # ─── helpers ────────────────────────────────────────────────────────────

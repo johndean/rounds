@@ -243,7 +243,32 @@ def _normalize_text(text: str, tier1: bool, tier2: bool, tier3: bool, filler_wor
 
 
 def _next_or_stub(session_id: str) -> None:
-    """Trigger fusion_task (6h) + lcs_discrepancies_task (6l) in parallel."""
+    """
+    Trigger fusion_task (6h) + lcs_discrepancies_task (6l) in parallel.
+    Also fires enhanced AI MODE refinement (6m) when ai_mode != 'transcript'.
+    """
+    from sqlalchemy import create_engine, text
+
+    from app.config import settings
+
+    sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+    engine = create_engine(sync_url)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT ai_pipeline, ai_mode FROM session_templates WHERE session_id = CAST(:sid AS uuid)"),
+                {"sid": session_id},
+            ).fetchone()
+        if row and row[0] == "enhanced" and row[1] and row[1] != "transcript":
+            try:
+                from app.tasks.ai_process import ai_process_task  # type: ignore
+                ai_process_task.apply_async(args=[session_id], queue="celery")
+                logger.info(f"normalize: triggered ai_process_task[enhanced/{row[1]}] for {session_id}")
+            except ImportError:
+                pass
+    finally:
+        engine.dispose()
+
     try:
         from app.tasks.fusion import fusion_task  # type: ignore
 
@@ -251,7 +276,6 @@ def _next_or_stub(session_id: str) -> None:
         logger.info(f"normalize: triggered fusion_task for {session_id}")
     except ImportError:
         logger.info(f"normalize: fusion_task not ported yet (6h) — skipping trigger")
-    # LCS discrepancies — non-blocking, classifies via Gemini async.
     try:
         from app.tasks.lcs_discrepancies import lcs_discrepancies_task  # type: ignore
 

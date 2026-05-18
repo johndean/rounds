@@ -87,6 +87,14 @@ def ingest_task(self, session_id: str) -> dict:  # noqa: ARG001
 
         ai_pipeline = (cfg[0] if cfg else "enhanced") or "enhanced"
 
+        # template_autodetect runs in parallel for either pipeline.
+        try:
+            from app.tasks.ai_process import template_autodetect_task
+
+            template_autodetect_task.apply_async(args=[session_id], queue="celery")
+        except ImportError:
+            pass
+
         if ai_pipeline == "direct":
             # AI MODE direct — single task does everything, marks ready itself.
             # Run slide_extract in parallel for thumbnails + bullets.
