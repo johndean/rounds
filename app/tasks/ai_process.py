@@ -376,6 +376,12 @@ def _process_direct(
         kp_task.apply_async(args=[session_id], queue="celery")
     except Exception as e:  # noqa: BLE001
         logger.warning(f"ai_process: failed to trigger kp_task: {e}")
+    # Phase 7g — SOP auto-init at stage 'prep'.
+    try:
+        from app.tasks.sop_tasks import sop_auto_init_task
+        sop_auto_init_task.apply_async(args=[session_id], queue="celery")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"ai_process: failed to trigger sop_auto_init: {e}")
 
     logger.info(
         f"ai_process[direct]: session={session_id} segments={len(parsed)} "

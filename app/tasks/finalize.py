@@ -97,6 +97,15 @@ def finalize_task(self, prev_result=None, session_id=None) -> dict:  # noqa: ARG
         except Exception as e:  # noqa: BLE001
             logger.warning(f"finalize: failed to trigger kp_task: {e}")
 
+        # Phase 7g — initialize SOP at stage 'prep' so the editor right
+        # rail shows the active workflow stage immediately.
+        try:
+            from app.tasks.sop_tasks import sop_auto_init_task
+
+            sop_auto_init_task.apply_async(args=[session_id], queue="celery")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"finalize: failed to trigger sop_auto_init: {e}")
+
         logger.info(f"finalize: session {session_id} ready")
         return {"session_id": session_id, "status": "ready"}
     finally:

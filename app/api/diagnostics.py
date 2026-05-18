@@ -160,3 +160,21 @@ async def reingest(session_id: str, db: DbSession, _u: CurrentUser) -> ReingestR
         enqueued=enqueued,
         detail=detail,
     )
+
+
+@router.post("/sop-check")
+async def sop_deadline_check(_u: CurrentUser) -> dict:
+    """
+    Run sop_check_deadlines_task synchronously and return the result.
+    Useful for operator/admin to spot-check overdue stages without waiting
+    for the next Celery Beat tick.
+    """
+    try:
+        from app.tasks.sop_tasks import sop_check_deadlines_task
+
+        # .run() executes inline rather than enqueueing. RoundsTask base
+        # is fine — no self.request access on the inline call path.
+        result = sop_check_deadlines_task.apply().get(timeout=60)
+        return {"ok": True, **(result or {})}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
