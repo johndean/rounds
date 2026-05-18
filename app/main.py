@@ -6,10 +6,11 @@ Domain routers (auth, sessions, gcs_upload, segments, slides, discrepancies,
 sop, audit, improvements, settings, exports, diagnostics, ws) land in
 Phases 5-7 per docs/plans/2026-05-17-001-feat-rounds-bootstrap-plan.md.
 """
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,20 +31,37 @@ from app.config import settings
 _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 
+_ws_manager = None
+_ws_bridge_task = None
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    # Startup-time sanity checks (audit §10 finding #3 — fail fast on missing creds)
+    global _ws_manager, _ws_bridge_task
+
     if settings.GOOGLE_APPLICATION_CREDENTIALS:
         creds_path = Path(settings.GOOGLE_APPLICATION_CREDENTIALS)
         if not creds_path.exists():
-            # Warn loudly but don't crash on dev — production deploy will set GCP_KEY_B64
-            # which scripts/start.sh decodes before this lifespan runs.
             print(
                 f"[warn] GOOGLE_APPLICATION_CREDENTIALS={creds_path} does not exist. "
                 "GCS / STT / Vertex AI calls will fail at request time.",
                 flush=True,
             )
-    yield
+
+    # Start the WS bridge — subscribes to Redis pub/sub + fans out to clients.
+    from app.engines.ws_bridge import WSManager, start_ws_bridge
+
+    _ws_manager = WSManager()
+    _ws_bridge_task = asyncio.create_task(start_ws_bridge(_ws_manager))
+    try:
+        yield
+    finally:
+        if _ws_bridge_task and not _ws_bridge_task.done():
+            _ws_bridge_task.cancel()
+            try:
+                await _ws_bridge_task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(
@@ -68,6 +86,25 @@ app.add_middleware(
 @app.get("/v1/health")
 async def health() -> JSONResponse:
     return JSONResponse({"status": "ok", "version": app.version, "env": settings.ENVIRONMENT})
+
+
+@app.websocket("/v1/ws/sessions/{session_id}")
+async def session_ws(websocket: WebSocket, session_id: str):
+    """Live session updates: processing_update, metrics_update, session_failed, etc."""
+    if _ws_manager is None:
+        await websocket.close(code=1011)
+        return
+    await _ws_manager.connect(session_id, websocket)
+    try:
+        while True:
+            # Keep-alive — client may send pings; we ignore content.
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        await _ws_manager.disconnect(session_id, websocket)
 
 
 # ─── Sub-routers ────────────────────────────────────────────────────────

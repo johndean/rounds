@@ -35,11 +35,33 @@ async function load(): Promise<void> {
   finally { loading.value = false; }
 }
 
+let wsHandle: WebSocket | null = null;
+function startWebSocket(): void {
+  if (wsHandle) return;
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  const url = `${proto}://${window.location.host}/v1/ws/sessions/${encodeURIComponent(props.id)}`;
+  try {
+    wsHandle = new WebSocket(url);
+    wsHandle.onmessage = () => { void fetchOnce(); };
+    wsHandle.onclose = () => { wsHandle = null; };
+    wsHandle.onerror = () => {
+      try { wsHandle?.close(); } catch { /* ignore */ }
+      wsHandle = null;
+      startPolling();
+    };
+  } catch {
+    startPolling();
+  }
+}
+function stopWebSocket(): void {
+  try { wsHandle?.close(); } catch { /* ignore */ }
+  wsHandle = null;
+}
+
 function startPolling(): void {
   if (pollHandle) return;
   pollHandle = setInterval(() => {
     const s = session.value?.status;
-    // Stop polling once terminal — ready / complete / failed.
     if (s === 'ready' || s === 'complete' || s === 'failed') {
       stopPolling();
       return;
@@ -51,8 +73,11 @@ function stopPolling(): void {
   if (pollHandle) { clearInterval(pollHandle); pollHandle = null; }
 }
 
-onMounted(async () => { await load(); startPolling(); });
-onUnmounted(stopPolling);
+onMounted(async () => {
+  await load();
+  startWebSocket();   // WS preferred — falls back to polling on error
+});
+onUnmounted(() => { stopPolling(); stopWebSocket(); });
 
 // Auto-redirect to the editor when the session lands ready.
 watch(() => session.value?.status, (s, prev) => {
