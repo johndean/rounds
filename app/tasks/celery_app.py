@@ -36,6 +36,7 @@ celery_app = Celery(
         "app.tasks.ai_process",
         "app.tasks.frame_task",
         "app.tasks.anchor_task",
+        "app.tasks.normalize",
     ],
 )
 
