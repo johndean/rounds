@@ -67,6 +67,7 @@ class UploadCompleteRequest(BaseModel):
 class UploadCompleteResponse(BaseModel):
     session_id: str
     accepted:   list[str]
+    manifest:   Optional[dict] = None
 
 
 @router.post("/upload-complete", response_model=UploadCompleteResponse)
@@ -124,8 +125,11 @@ async def upload_complete(
         accepted.append(f.gcs_uri)
     await db.commit()
 
-    # Kick off the Celery ingest pipeline (transcribe + slide_extract → align → ready).
-    # Non-fatal on broker errors — the upload itself succeeded.
+    # Parse manifest + chat sources if present (Phase 6f). Non-fatal —
+    # ingest still runs even if parsing returns an empty result.
+    manifest_summary = await _parse_manifest_and_chat_sources(payload.session_id, payload.files, db)
+
+    # Kick off the Celery ingest pipeline.
     try:
         from app.tasks.ingest import enqueue_ingest
 
@@ -137,4 +141,149 @@ async def upload_complete(
             f"upload-complete: failed to enqueue ingest for {payload.session_id}: {exc}"
         )
 
-    return UploadCompleteResponse(session_id=payload.session_id, accepted=accepted)
+    return UploadCompleteResponse(
+        session_id=payload.session_id,
+        accepted=accepted,
+        manifest=manifest_summary,
+    )
+
+
+async def _parse_manifest_and_chat_sources(
+    session_id: str, files: list[UploadCompleteFile], db,
+) -> Optional[dict]:
+    """
+    Parse manifest (role='manifest') + chat (role='chat') sources.
+    Writes session_speakers / session_slide_resources / sessions metadata for
+    manifest, and chat_messages rows for chat. Returns a manifest summary dict.
+    """
+    import json
+    import logging
+
+    from app.engines.chat_parser import parse_chat_file
+    from app.services.extras2_parser import parse_extras2
+
+    logger = logging.getLogger(__name__)
+
+    summary: Optional[dict] = None
+
+    manifest_files = [f for f in files if f.role == "manifest"]
+    chat_files = [f for f in files if f.role == "chat"]
+
+    if manifest_files:
+        try:
+            raw = _read_gcs_text(manifest_files[0].gcs_uri)
+            parsed = parse_extras2(raw)
+
+            from sqlalchemy import text
+
+            # Update session metadata
+            updates = []
+            params: dict = {"sid": session_id}
+            if parsed.title_long:
+                updates.append("title_long = :tl"); params["tl"] = parsed.title_long
+            if parsed.title_short:
+                updates.append("title_short = :ts"); params["ts"] = parsed.title_short
+            if parsed.ce_broker_id:
+                updates.append("ce_broker_id = :ce"); params["ce"] = parsed.ce_broker_id
+            if parsed.class_id:
+                updates.append("class_id = :cl"); params["cl"] = parsed.class_id
+            if parsed.tags:
+                updates.append("tags = CAST(:tg AS jsonb)"); params["tg"] = json.dumps(parsed.tags)
+            if parsed.publishing_links:
+                updates.append("publishing_links = CAST(:pl AS jsonb)"); params["pl"] = json.dumps(parsed.publishing_links)
+            if parsed.polls:
+                updates.append("polls_raw = :pr"); params["pr"] = parsed.polls
+            if parsed.polls_parsed:
+                updates.append("polls_parsed = CAST(:pp AS jsonb)"); params["pp"] = json.dumps(parsed.polls_parsed)
+            if updates:
+                await db.execute(
+                    text(f"UPDATE sessions SET {', '.join(updates)}, updated_at = now() WHERE id = CAST(:sid AS uuid)"),
+                    params,
+                )
+
+            # Write session_speakers
+            for sp in parsed.speakers:
+                await db.execute(
+                    text(
+                        """
+                        INSERT INTO session_speakers (session_id, role, name, credentials, bio, sort_order)
+                        VALUES (CAST(:sid AS uuid), :r, :n, :c, :b, :so)
+                        """
+                    ),
+                    {"sid": session_id, "r": sp.role, "n": sp.name,
+                     "c": sp.credentials, "b": sp.bio, "so": sp.sort_order},
+                )
+
+            # Write session_slide_resources
+            for rs in parsed.slide_resources:
+                await db.execute(
+                    text(
+                        """
+                        INSERT INTO session_slide_resources (session_id, slide_number, label, url, sort_order)
+                        VALUES (CAST(:sid AS uuid), :n, :l, :u, :so)
+                        """
+                    ),
+                    {"sid": session_id, "n": rs.slide_number, "l": rs.label,
+                     "u": rs.url, "so": rs.sort_order},
+                )
+
+            await db.commit()
+
+            summary = {
+                "parsed":              True,
+                "code":                parsed.code,
+                "title_long":          parsed.title_long,
+                "title_short":         parsed.title_short,
+                "speakers":            [{"role": s.role, "name": s.name, "credentials": s.credentials}
+                                        for s in parsed.speakers],
+                "slide_resource_count": len(parsed.slide_resources),
+                "publishing_links":    list(parsed.publishing_links.keys()),
+                "polls_parsed_count":  len(parsed.polls_parsed),
+            }
+        except Exception:
+            logger.exception(f"manifest parse failed for session {session_id}")
+            summary = {"parsed": False}
+
+    if chat_files:
+        try:
+            raw = _read_gcs_text(chat_files[0].gcs_uri)
+            messages = parse_chat_file(raw)
+            from sqlalchemy import text
+            for msg in messages:
+                await db.execute(
+                    text(
+                        """
+                        INSERT INTO chat_messages
+                            (session_id, author, body, sent_at_ms, placed)
+                        VALUES
+                            (CAST(:sid AS uuid), :author, :body, :ts, FALSE)
+                        """
+                    ),
+                    {
+                        "sid":    session_id,
+                        "author": msg["speaker"],
+                        "body":   msg["message"],
+                        "ts":     int(round((msg["timestamp"] or 0) * 1000)),
+                    },
+                )
+            await db.commit()
+            if summary is None:
+                summary = {}
+            summary["chat_messages"] = len(messages)
+        except Exception:
+            logger.exception(f"chat parse failed for session {session_id}")
+
+    return summary
+
+
+def _read_gcs_text(gcs_uri: str) -> str:
+    """Download GCS object as utf-8 text."""
+    from google.cloud import storage as gcs_lib
+
+    from app.config import settings
+
+    assert gcs_uri.startswith("gs://"), gcs_uri
+    without = gcs_uri[5:]
+    bucket_name, _, blob_name = without.partition("/")
+    client = gcs_lib.Client(project=settings.GCP_PROJECT_ID)
+    return client.bucket(bucket_name).blob(blob_name).download_as_text(encoding="utf-8")
