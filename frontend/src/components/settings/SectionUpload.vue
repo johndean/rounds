@@ -11,7 +11,7 @@ import FormRow from './FormRow.vue';
 import { settingsApi } from '@/services/api';
 import { toast } from '@/composables/useToast';
 
-const method = ref<string>('railway');
+const method = ref<string>('gcs');
 const loading = ref(true);
 const saving = ref(false);
 
@@ -49,11 +49,11 @@ async function onChange(e: Event): Promise<void> {
   <div class="set-form">
     <FormRow
       label="Upload method"
-      sub="Railway routes file bytes through our server (current default). GCS sends bytes directly from your browser to cloud storage, bypassing the server — more reliable on slow connections and for large files."
+      sub="GCS (default) sends bytes directly from your browser to cloud storage, bypassing the server — faster and more reliable for the typical 200 MB+ CE session video. Railway routes bytes through our server; keep this only for environments where browser→GCS is blocked."
     >
       <select class="set-input" :value="method" :disabled="loading || saving" @change="onChange">
-        <option value="railway">Railway (default)</option>
-        <option value="gcs">GCS (direct upload)</option>
+        <option value="gcs">GCS (direct upload — default)</option>
+        <option value="railway">Railway (server-routed)</option>
       </select>
     </FormRow>
   </div>

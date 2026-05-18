@@ -12,8 +12,8 @@ INSERT INTO org_settings (key, value) VALUES
     ('org_name',          '"Vetstreet Internal Network"'::jsonb),
     ('default_locale',    '"en-US"'::jsonb),
     ('time_zone',         '"America/New_York"'::jsonb),
-    ('default_ai_model',  '"gemini-2.5-flash"'::jsonb),
-    ('upload_backend',    '"railway"'::jsonb),
+    ('default_ai_model',  '"gemini-2.5-pro"'::jsonb),
+    ('upload_backend',    '"gcs"'::jsonb),
     ('classify_backend',  '"gemini_dev"'::jsonb),
     ('classify_model',    '"gemini-2.5-flash-lite"'::jsonb),
     ('include_key_points','true'::jsonb)
