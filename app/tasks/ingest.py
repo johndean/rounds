@@ -61,12 +61,18 @@ def ingest_task(self, session_id: str) -> dict:  # noqa: ARG001
             logger.info(f"ingest: skip — session {session_id} status={row[0]}")
             return {"skipped": True, "reason": f"status={row[0]}"}
 
-        # uploading → transcribing happens here so the audit log records the
-        # entry into the pipeline. Failure to transition (e.g. terminal state)
-        # raises and aborts ingest.
-        transition_session_sync(session_id, "transcribing", actor="ingest_task")
-
+        # Read pipeline config — routes 'direct' to AI MODE multimodal,
+        # 'enhanced' to the STT-based standard chain.
         with engine.connect() as conn:
+            cfg = conn.execute(
+                text(
+                    """
+                    SELECT ai_pipeline FROM session_templates
+                     WHERE session_id = CAST(:sid AS uuid)
+                    """
+                ),
+                {"sid": session_id},
+            ).fetchone()
             slide_src_count = conn.execute(
                 text(
                     """
@@ -78,19 +84,45 @@ def ingest_task(self, session_id: str) -> dict:  # noqa: ARG001
                 {"sid": session_id},
             ).scalar() or 0
 
-        # Run transcribe + slide_extract in parallel, then finalize
-        # (align + mark ready). Celery `chord` would be ideal but adds a
-        # result backend requirement; a serial chain is reliable enough
-        # for v1 — transcribe takes the long path so we let it run first
-        # then slide_extract (fast) then finalize.
+        ai_pipeline = (cfg[0] if cfg else "enhanced") or "enhanced"
+
+        if ai_pipeline == "direct":
+            # AI MODE direct — single task does everything, marks ready itself.
+            # Run slide_extract in parallel for thumbnails + bullets.
+            from app.tasks.ai_process import ai_process_task
+
+            if slide_src_count > 0:
+                slide_extract_task.apply_async(args=[session_id], queue="celery")
+            ai_process_task.apply_async(args=[session_id], queue="celery")
+            logger.info(
+                f"ingest[direct]: enqueued ai_process_task for {session_id} "
+                f"(slides={slide_src_count})"
+            )
+            return {
+                "session_id":    session_id,
+                "enqueued":      True,
+                "ai_pipeline":   "direct",
+                "slide_sources": slide_src_count,
+            }
+
+        # Standard STT-enhanced chain.
+        # uploading → transcribing transition happens at the start of the chain.
+        transition_session_sync(session_id, "transcribing", actor="ingest_task")
         tasks = [transcribe_task.s(session_id)]
         if slide_src_count > 0:
             tasks.append(slide_extract_task.s(session_id))
         tasks.append(finalize_task.s(session_id))
         chain(*tasks).apply_async()
 
-        logger.info(f"ingest: enqueued pipeline for {session_id} (slides={slide_src_count})")
-        return {"session_id": session_id, "enqueued": True, "slide_sources": slide_src_count}
+        logger.info(
+            f"ingest[enhanced]: enqueued chain for {session_id} (slides={slide_src_count})"
+        )
+        return {
+            "session_id":    session_id,
+            "enqueued":      True,
+            "ai_pipeline":   "enhanced",
+            "slide_sources": slide_src_count,
+        }
 
     except Exception as exc:  # noqa: BLE001
         attempt = self.request.retries

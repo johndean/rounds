@@ -33,6 +33,7 @@ celery_app = Celery(
         "app.tasks.slide_extract",
         "app.tasks.align",
         "app.tasks.finalize",
+        "app.tasks.ai_process",
     ],
 )
 
