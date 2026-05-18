@@ -29,6 +29,8 @@ import { CHAT, POLLS } from '@/fixtures/chat_polls';
 import { DISCREPANCIES, CORRECTIONS } from '@/fixtures/audit';
 import { SOP_STAGES } from '@/fixtures/sop_stages';
 import { toast } from '@/composables/useToast';
+import { modal } from '@/composables/useModal';
+import FindReplaceModal from '@/components/overlays/FindReplaceModal.vue';
 
 type TabId = 'ai' | 'stt' | 'disc' | 'audit';
 type RightTabId = 'admin' | 'chat' | 'polls';
@@ -286,7 +288,7 @@ function onUndo(): void  { toast.push('Undone', { tone: 'info' }); }
 function onRedo(): void  { toast.push('Redone', { tone: 'info' }); }
 function onResult(): void { toast.push('Last AI result — opening side-by-side compare (mock)', { tone: 'info' }); }
 function onPreview(): void { router.push(`/v/${session.value.id}`); }
-function openFind(): void { toast.push('Find & Replace (mock)', { tone: 'info' }); }
+function openFind(): void { void modal.open(FindReplaceModal); }
 
 onMounted(() => { document.body.classList.add('has-editor'); });
 onUnmounted(() => { document.body.classList.remove('has-editor'); });

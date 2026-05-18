@@ -20,13 +20,18 @@ const query = ref('');
 const inputRef = ref<HTMLInputElement | null>(null);
 
 const COMMANDS: Command[] = [
-  { id: 'go-dashboard',    label: 'Go to Dashboard',         hint: '/dashboard',     to: '/dashboard' },
-  { id: 'go-sessions',     label: 'Go to Sessions',           hint: '/sessions',      to: '/sessions' },
-  { id: 'go-upload',       label: 'Upload a new session',     hint: '/upload',        to: '/upload' },
-  { id: 'go-improvements', label: 'Go to Improvements',       hint: '/improvements',  to: '/improvements' },
-  { id: 'go-settings',     label: 'Go to Settings',           hint: '/settings',      to: '/settings' },
-  { id: 'go-audit',        label: 'Go to Audit ledger',       hint: '/audit',         to: '/audit' },
-  { id: 'go-gcs',          label: 'Go to GCS QA',             hint: '/gcs',           to: '/gcs' },
+  { id: 'go-dashboard',      label: 'Dashboard',              hint: '/dashboard',     to: '/dashboard' },
+  { id: 'go-sessions',       label: 'Sessions',               hint: '/sessions',      to: '/sessions' },
+  { id: 'go-upload',         label: 'Upload new session',     hint: '/upload',        to: '/upload' },
+  { id: 'go-improvements',   label: 'Improvements',           hint: '/improvements',  to: '/improvements' },
+  { id: 'go-settings',       label: 'Settings',               hint: '/settings',      to: '/settings' },
+  { id: 'go-audit',          label: 'Audit ledger',           hint: '/audit',         to: '/audit' },
+  { id: 'go-gcs',            label: 'GCS QA',                 hint: '/gcs',           to: '/gcs' },
+  { id: 'go-editor',         label: 'Editor (demo)',          hint: '/e/se_001',      to: '/e/se_001' },
+  { id: 'go-sop',            label: 'SOP workflow',           hint: '/e/se_001/sop',  to: '/e/se_001/sop' },
+  { id: 'go-session-detail', label: 'Session detail (demo)',  hint: '/s/se_001',      to: '/s/se_001' },
+  { id: 'go-viewer',         label: 'Viewer (demo)',          hint: '/v/se_004',      to: '/v/se_004' },
+  { id: 'go-processing',     label: 'Processing (demo)',      hint: '/p/se_007',      to: '/p/se_007' },
 ];
 
 const filtered = computed<Command[]>(() => {

@@ -9,6 +9,8 @@ import ImprovDetail from '@/components/improvements/ImprovDetail.vue';
 import { IMPROVEMENTS, type ImprovementFixture } from '@/fixtures/improvements';
 import { toast } from '@/composables/useToast';
 import { confirm } from '@/composables/useConfirm';
+import { modal } from '@/composables/useModal';
+import SuggestImprovementModal from '@/components/overlays/SuggestImprovementModal.vue';
 
 const extraItems = ref<ImprovementFixture[]>([]);
 const items = computed<ImprovementFixture[]>(() => [...extraItems.value, ...IMPROVEMENTS]);
@@ -46,9 +48,28 @@ function fmtCreated(iso: string): string {
 }
 
 function suggest(): void {
-  toast.push('Suggest Improvement modal (mock)', { tone: 'info' });
-  // In the React app this opens wired.openSuggestImprovement modal.
-  // Inline-modal port lands when wiring.jsx → composables port is complete.
+  void modal.open(SuggestImprovementModal, {
+    onSubmit: (s: { id: string; title: string; surface: string; priority: string; description: string }) => {
+      const now = new Date().toISOString();
+      extraItems.value = [
+        {
+          id: s.id,
+          surface: s.surface,
+          title: s.title,
+          author: 'johndean@vin.com',
+          priority: s.priority as ImprovementFixture['priority'],
+          risk: 'low',
+          status: 'pending',
+          created: now,
+          url: '',
+          area: 'UX/UI',
+          description: s.description,
+        },
+        ...extraItems.value,
+      ];
+      selectedId.value = s.id;
+    },
+  });
 }
 
 async function delRow(it: ImprovementFixture, e: Event): Promise<void> {
