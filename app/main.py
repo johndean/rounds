@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api import add_to_session as add_to_session_router
 from app.api import audit as audit_router
 from app.api import auth as auth_router
+from app.api import corrections as corrections_router
 from app.api import diagnostics as diag_router
 from app.api import discrepancies as disc_router
 from app.api import exports as exports_router
