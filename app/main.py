@@ -89,6 +89,12 @@ from app.middleware.idempotency import IdempotencyMiddleware  # noqa: E402
 
 app.add_middleware(IdempotencyMiddleware)
 
+# Request-ID middleware — outermost so x-request-id appears on every response.
+# Phase 7h.
+from app.middleware.request_id import RequestIdMiddleware  # noqa: E402
+
+app.add_middleware(RequestIdMiddleware)
+
 
 @app.get("/v1/health")
 async def health() -> JSONResponse:

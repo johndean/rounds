@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import text
 
@@ -30,6 +30,29 @@ class SlideOut(BaseModel):
     image_uri: Optional[str]
     start_ms: Optional[int]
     end_ms: Optional[int]
+
+
+class ReExtractRequest(BaseModel):
+    page_indices: list[int]   # 1-based page numbers from the editor
+
+
+@router.post("/slides/re-extract")
+async def re_extract_slides(
+    session_id: UUID,
+    payload: ReExtractRequest = Body(...),
+    _user: CurrentUser = None,  # type: ignore[assignment]
+) -> dict:
+    """Phase 7h — re-extract specific PDF pages on operator request."""
+    try:
+        from app.tasks.slide_extract import slide_extract_selected_pages_task
+
+        slide_extract_selected_pages_task.apply_async(
+            args=[str(session_id), payload.page_indices],
+            queue="celery",
+        )
+        return {"enqueued": True, "page_indices": payload.page_indices}
+    except Exception as exc:  # noqa: BLE001
+        return {"enqueued": False, "error": f"{exc.__class__.__name__}: {exc}"}
 
 
 @router.get("/slides", response_model=list[SlideOut])

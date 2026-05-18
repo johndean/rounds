@@ -31,6 +31,116 @@ _PPTX_MIMES = {"application/vnd.openxmlformats-officedocument.presentationml.pre
 @celery_app.task(
     bind=True,
     base=RoundsTask,
+    name="rounds.tasks.slide_extract.selected_pages",
+    max_retries=2,
+)
+def slide_extract_selected_pages_task(self, session_id: str, page_indices: list[int]) -> dict:
+    """
+    Phase 7h — re-extract specific PDF pages (1-based indices via UI).
+    Used by the editor to refresh a single slide's thumbnail/text after
+    the operator uploads a corrected PDF or fixes alignment.
+
+    Idempotent: ON CONFLICT (session_id, slide_index) DO UPDATE on slides + bullets.
+    """
+    import fitz
+    import os
+    import tempfile
+
+    from google.cloud import storage as gcs_lib
+    from sqlalchemy import create_engine, text
+
+    from app.config import settings
+    from app.tasks.transcribe import _download_from_gcs
+
+    sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+    engine = create_engine(sync_url)
+    try:
+        with engine.connect() as conn:
+            src = conn.execute(
+                text(
+                    """
+                    SELECT gcs_uri, filename, content_type FROM sources
+                     WHERE session_id = CAST(:sid AS uuid) AND role = 'slide'
+                     ORDER BY created_at ASC LIMIT 1
+                    """
+                ),
+                {"sid": session_id},
+            ).fetchone()
+        if not src:
+            return {"session_id": session_id, "re_extracted": 0, "reason": "no_slide_source"}
+
+        gcs_client = gcs_lib.Client(project=settings.GCP_PROJECT_ID)
+        bucket = gcs_client.bucket(settings.GCS_BUCKET)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_pdf = os.path.join(tmpdir, "deck.pdf")
+            _download_from_gcs(src[0], local_pdf)
+            doc = fitz.open(local_pdf)
+
+            re_extracted = 0
+            for one_based in page_indices:
+                idx = one_based - 1
+                if idx < 0 or idx >= doc.page_count:
+                    continue
+                page = doc.load_page(idx)
+                full_text = page.get_text("text") or ""
+                title = _derive_slide_title(full_text, one_based)
+                pix = page.get_pixmap(dpi=120)
+                png_bytes = pix.tobytes("png")
+                blob_name = f"sessions/{session_id}/slides/thumb_{idx:03d}.png"
+                bucket.blob(blob_name).upload_from_string(png_bytes, content_type="image/png")
+                image_uri = f"gs://{settings.GCS_BUCKET}/{blob_name}"
+
+                with engine.begin() as conn:
+                    row = conn.execute(
+                        text(
+                            """
+                            INSERT INTO slides
+                                (session_id, slide_index, title, image_uri, thumbnail_uri, full_text)
+                            VALUES
+                                (CAST(:sid AS uuid), :idx, :title, :uri, :uri, :ft)
+                            ON CONFLICT (session_id, slide_index) DO UPDATE
+                              SET title         = COALESCE(slides.title, EXCLUDED.title),
+                                  image_uri     = EXCLUDED.image_uri,
+                                  thumbnail_uri = EXCLUDED.thumbnail_uri,
+                                  full_text     = EXCLUDED.full_text
+                            RETURNING id
+                            """
+                        ),
+                        {"sid": session_id, "idx": idx, "title": title, "uri": image_uri, "ft": full_text},
+                    ).fetchone()
+                    slide_id = str(row[0]) if row else None
+                    # Wipe + rewrite bullets for this slide
+                    conn.execute(
+                        text("DELETE FROM bullets WHERE slide_id = CAST(:sid AS uuid)"),
+                        {"sid": slide_id},
+                    )
+                    for pos, b in enumerate(_extract_bullets(page)):
+                        conn.execute(
+                            text(
+                                """
+                                INSERT INTO bullets (slide_id, text, position)
+                                VALUES (CAST(:sid AS uuid), :tx, :pos)
+                                """
+                            ),
+                            {"sid": slide_id, "tx": b, "pos": pos},
+                        )
+                re_extracted += 1
+            doc.close()
+        return {"session_id": session_id, "re_extracted": re_extracted}
+    except Exception as exc:  # noqa: BLE001
+        attempt = self.request.retries
+        if attempt < self.max_retries:
+            self.retry_with_backoff(exc, attempt)
+        logger.exception(f"selected_pages re-extract failed for {session_id}")
+        return {"session_id": session_id, "re_extracted": 0, "error": str(exc)}
+    finally:
+        engine.dispose()
+
+
+@celery_app.task(
+    bind=True,
+    base=RoundsTask,
     name="rounds.tasks.slide_extract",
     max_retries=2,
 )
