@@ -205,6 +205,10 @@ class SpeakerReassignRequest(BaseModel):
 
 @router.get("/speakers", response_model=list[SpeakerOut])
 async def list_speakers(session_id: UUID, db: DbSession, _user: CurrentUser) -> list[dict]:
+    # ORDER BY name (not created_at — the speakers table has no created_at
+    # column, see migrations/001_init.sql:69-76). Earlier code referenced
+    # created_at and 500'd on every call; the fixture-fallback in the editor
+    # silently masked it by showing demo speakers.
     rows = (
         await db.execute(
             text(
@@ -212,7 +216,7 @@ async def list_speakers(session_id: UUID, db: DbSession, _user: CurrentUser) -> 
                 SELECT id, name AS short, name, role, avatar_color
                 FROM speakers
                 WHERE session_id = :sid
-                ORDER BY created_at ASC
+                ORDER BY name ASC
                 """
             ),
             {"sid": str(session_id)},
