@@ -55,12 +55,52 @@ def _audit_event(db, session_id: str, actor: str, kind: str, summary: str, detai
 
 @router.get("", response_model=list[SegmentOut])
 async def list_segments(session_id: UUID, db: DbSession, _u: CurrentUser) -> list[dict]:
+    sid = str(session_id)
+
+    # Effective text per segment follows the 3-layer precedence documented in
+    # corrections.find_replace: user-edit (correction_ledger ≤ pointer) →
+    # normalized (migration 012, optional) → raw segments.text.
+    ptr_row = (await db.execute(
+        text("SELECT current_pointer FROM ledger_pointers WHERE session_id = CAST(:s AS uuid)"),
+        {"s": sid},
+    )).mappings().first()
+    current_ptr = int(ptr_row["current_pointer"]) if ptr_row else -1
+
+    edit_rows = (await db.execute(text(
+        """
+        SELECT DISTINCT ON (segment_id) segment_id, new_text
+          FROM correction_ledger
+         WHERE session_id = CAST(:s AS uuid)
+           AND correction_type = 'text_edit'
+           AND sequence_number <= :ptr
+         ORDER BY segment_id, sequence_number DESC
+        """
+    ), {"s": sid, "ptr": current_ptr})).mappings().all()
+    edits: dict[str, str] = {str(r["segment_id"]): r["new_text"] or "" for r in edit_rows}
+
+    norm_map: dict[str, str] = {}
+    try:
+        norm_rows = (await db.execute(text(
+            "SELECT segment_id, normalized_text FROM normalization_results "
+            "WHERE session_id = CAST(:s AS uuid)"
+        ), {"s": sid})).mappings().all()
+        norm_map = {str(r["segment_id"]): r["normalized_text"] or "" for r in norm_rows}
+    except Exception:  # noqa: BLE001
+        norm_map = {}
+
     rows = (await db.execute(text(
         "SELECT id, seq, start_ms, end_ms, text, confidence, flags, is_anchor, anchor_kind, "
         "       slide_id, speaker_id "
         "FROM segments WHERE session_id = :s ORDER BY seq"
-    ), {"s": str(session_id)})).mappings().all()
-    return [dict(r) for r in rows]
+    ), {"s": sid})).mappings().all()
+
+    out: list[dict] = []
+    for r in rows:
+        seg_id = str(r["id"])
+        d = dict(r)
+        d["text"] = edits.get(seg_id) or norm_map.get(seg_id) or r["text"] or ""
+        out.append(d)
+    return out
 
 
 @router.patch("/{segment_id}", response_model=SegmentOut)
