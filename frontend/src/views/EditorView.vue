@@ -309,26 +309,10 @@ watch(slideRailMode, (m) => localStorage.setItem('mic_slide_click_mode', m));
 const focusedSlideId = ref<string | null>(null);
 const activeSlideCollapsed = ref(false);
 
-// Real instructor card — prefer a moderator if one exists, else the first
-// speaker. Returns null when no speakers, so AdminTab hides the section
-// instead of showing a fixture.
-const primaryInstructor = computed(() => {
-  const all = SPEAKERS_API.value;
-  if (!all.length) return null;
-  const mod = all.find((s) => (s.role || '').toLowerCase() === 'moderator');
-  const chosen = mod ?? all[0]!;
-  return {
-    name:         chosen.name ?? '(unnamed speaker)',
-    credentials:  null,
-    role:         chosen.role ?? null,
-    short:        chosen.short ?? null,
-    avatar_color: chosen.avatar_color ?? null,
-  };
-});
-
 // IIL signals — compute from real session_speakers metadata if available;
 // otherwise return null so AdminTab hides the section. Hardcoded fixtures
-// (148 wpm / 2.1%) are gone.
+// (148 wpm / 2.1%) are gone. The Instructor card was removed entirely —
+// SpeakerEditPanel (mounted below AdminTab) is the single source of truth.
 const iilSignals = computed(() => null as { cadence_wpm?: number | null; filler_ratio?: number | null } | null);
 // F2 closure — switching tabs clears the slide focus (matches React behavior)
 watch(tab, () => { focusedSlideId.value = null; });
@@ -845,7 +829,6 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
               :time="time"
               :total-duration="TOTAL_DURATION"
               :slides="SLIDES"
-              :instructor="primaryInstructor"
               :iil="iilSignals"
             />
             <SpeakerEditPanel

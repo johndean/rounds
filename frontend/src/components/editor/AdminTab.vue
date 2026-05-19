@@ -11,14 +11,6 @@ import { computed } from 'vue';
 import { slideAccent, type Slide, type Segment } from '@/fixtures/transcript';
 import { withAlpha, fmtTime } from '@/utils/editorHelpers';
 
-interface InstructorLike {
-  name: string;
-  credentials?: string | null;
-  role?: string | null;
-  short?: string | null;
-  avatar_color?: string | null;
-}
-
 interface IilSignals {
   cadence_wpm?: number | null;
   filler_ratio?: number | null;
@@ -30,7 +22,6 @@ const props = defineProps<{
   time: number;
   totalDuration: number;
   slides: readonly Slide[];
-  instructor?: InstructorLike | null;
   iil?: IilSignals | null;
 }>();
 
@@ -112,22 +103,6 @@ function segStyle(s: Segment): Record<string, string | number> {
         <span :style="{ display: '-webkit-box', '-webkit-line-clamp': 1, '-webkit-box-orient': 'vertical', overflow: 'hidden' }">{{ s.text }}</span>
       </li>
     </ul>
-
-    <template v-if="instructor">
-      <div class="rightrail__sectionhead">Instructor</div>
-      <div class="instructor-card">
-        <div
-          class="instructor-card__av"
-          :style="instructor.avatar_color ? { background: instructor.avatar_color } : {}"
-        >{{ instructor.short || instructor.name.split(/\s+/).map(p => p[0]).join('').slice(0,2).toUpperCase() }}</div>
-        <div>
-          <div class="instructor-card__name">
-            {{ instructor.name }}<span v-if="instructor.credentials">, {{ instructor.credentials }}</span>
-          </div>
-          <div v-if="instructor.role" class="instructor-card__role">{{ instructor.role }}</div>
-        </div>
-      </div>
-    </template>
 
     <template v-if="iil && (iil.cadence_wpm != null || iil.filler_ratio != null)">
       <div class="rightrail__sectionhead">IIL signals</div>

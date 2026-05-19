@@ -1,19 +1,16 @@
 <script setup lang="ts">
 /**
- * SpeakerEditPanel — right-rail editable speaker roster. CRUD on
- * session_speakers via the existing /v1/sessions/{id}/speakers endpoints.
+ * SpeakerEditPanel — right-rail editable speaker roster.
  *
- * Renders an Add Speaker affordance plus one editable row per existing
- * speaker (name + role). Saves are debounced; a stale-write check is not
- * implemented because the endpoint is last-writer-wins by design.
+ * Each speaker renders as a card (avatar circle + name + role pill).
+ * Tap the name to rename inline; tap the role pill to toggle
+ * Moderator ↔ Speaker. Tap × to remove. One Add Speaker button at
+ * the bottom expands to a single-line entry, defaulting role to
+ * "speaker" — change the role on the resulting card.
  *
- * Risk-bounded surface:
- * - Edits are session-scoped (don't mutate the global speakers table).
- * - Soft semantics: delete sends DELETE which the backend handles; we do
- *   NOT cascade-clear segment.speaker_id from the frontend. If the backend
- *   returns 409 (segments still reference the speaker), we surface a toast.
+ * Backed by /v1/sessions/{id}/speakers CRUD endpoints.
  */
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
 import { speakers as speakersApi, type SessionSpeaker } from '@/services/api';
 import { toast } from '@/composables/useToast';
@@ -27,51 +24,84 @@ const props = defineProps<{
 const emit = defineEmits<{ (e: 'changed'): void }>();
 
 const collapsed = ref(false);
-const saving = ref<Record<string, boolean>>({});
+const adding = ref(false);
 const newName = ref('');
-const newRole = ref<'moderator' | 'speaker'>('speaker');
+const savingId = ref<string | null>(null);
 
-async function patchSpeaker(id: string, patch: { name?: string; role?: string }): Promise<void> {
-  saving.value = { ...saving.value, [id]: true };
+function initials(name: string | null | undefined): string {
+  const n = (name || '').trim();
+  if (!n) return '?';
+  const parts = n.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
+  return (parts[0]!.charAt(0) + parts[parts.length - 1]!.charAt(0)).toUpperCase();
+}
+
+function roleLabel(r: string | null | undefined): 'MODERATOR' | 'SPEAKER' {
+  return (r || '').toLowerCase() === 'moderator' ? 'MODERATOR' : 'SPEAKER';
+}
+
+const cards = computed(() => props.liveSpeakers.map((s) => ({
+  id: s.id,
+  name: (s.name || '').trim() || '(unnamed)',
+  role: roleLabel(s.role),
+  avatar_color: s.avatar_color ?? null,
+  initials: initials(s.name),
+})));
+
+async function renameSpeaker(id: string, name: string): Promise<void> {
+  const trimmed = name.trim();
+  if (!trimmed) { toast.push('Name cannot be empty', { tone: 'warn' }); emit('changed'); return; }
+  savingId.value = id;
   try {
-    await speakersApi.edit(props.sessionId, id, patch);
+    await speakersApi.edit(props.sessionId, id, { name: trimmed });
     emit('changed');
   } catch (e) {
-    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Save failed';
-    toast.push(msg, { tone: 'error' });
+    toast.push(e instanceof ApiError ? `${e.status} — ${e.message}` : 'Save failed', { tone: 'error' });
   } finally {
-    saving.value = { ...saving.value, [id]: false };
+    savingId.value = null;
+  }
+}
+
+async function toggleRole(id: string, current: 'MODERATOR' | 'SPEAKER'): Promise<void> {
+  const next = current === 'MODERATOR' ? 'speaker' : 'moderator';
+  savingId.value = id;
+  try {
+    await speakersApi.edit(props.sessionId, id, { role: next });
+    emit('changed');
+  } catch (e) {
+    toast.push(e instanceof ApiError ? `${e.status} — ${e.message}` : 'Save failed', { tone: 'error' });
+  } finally {
+    savingId.value = null;
   }
 }
 
 async function addSpeaker(): Promise<void> {
   const n = newName.value.trim();
-  if (!n) { toast.push('Speaker name required', { tone: 'warn' }); return; }
+  if (!n) { toast.push('Enter a speaker name', { tone: 'warn' }); return; }
   try {
-    await speakersApi.add(props.sessionId, { name: n, role: newRole.value });
+    await speakersApi.add(props.sessionId, { name: n, role: 'speaker' });
     newName.value = '';
-    newRole.value = 'speaker';
+    adding.value = false;
     emit('changed');
   } catch (e) {
-    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Add failed';
-    toast.push(msg, { tone: 'error' });
+    toast.push(e instanceof ApiError ? `${e.status} — ${e.message}` : 'Add failed', { tone: 'error' });
   }
 }
 
-async function removeSpeaker(id: string, name: string | null): Promise<void> {
-  if (!confirm(`Remove speaker "${name || id}"?`)) return;
+async function removeSpeaker(id: string, name: string): Promise<void> {
+  if (!confirm(`Remove "${name}"?`)) return;
   try {
     await speakersApi.remove(props.sessionId, id);
     emit('changed');
   } catch (e) {
-    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Remove failed';
-    toast.push(msg, { tone: 'error' });
+    toast.push(e instanceof ApiError ? `${e.status} — ${e.message}` : 'Remove failed', { tone: 'error' });
   }
 }
 
-function roleLabel(r: string | null): string {
-  if (!r) return 'SPEAKER';
-  return r.toUpperCase();
+function onNameBlur(card: { id: string; name: string }, ev: FocusEvent): void {
+  const el = ev.target as HTMLInputElement;
+  if (el.value.trim() === card.name) return;
+  void renameSpeaker(card.id, el.value);
 }
 </script>
 
@@ -83,54 +113,73 @@ function roleLabel(r: string | null): string {
       :aria-expanded="!collapsed"
       @click="collapsed = !collapsed"
     >
-      <h4>Speakers · {{ liveSpeakers.length }}</h4>
+      <h4>Speakers · {{ cards.length }}</h4>
       <Icon name="chevron-down" :size="14" :style="{ transform: collapsed ? 'rotate(-90deg)' : 'none', transition: 'transform 120ms' }" />
     </div>
 
     <div v-if="!collapsed" class="speaker-panel__body">
-      <div v-for="sp in liveSpeakers" :key="sp.id" class="speaker-row">
-        <div class="speaker-row__role">{{ roleLabel(sp.role) }}</div>
-        <input
-          class="speaker-row__name"
-          :value="sp.name ?? ''"
-          placeholder="Name"
-          :disabled="saving[sp.id] === true"
-          @change="(e) => patchSpeaker(sp.id, { name: (e.target as HTMLInputElement).value })"
-        />
-        <select
-          class="speaker-row__role-select"
-          :value="(sp.role || 'speaker').toLowerCase()"
-          :disabled="saving[sp.id] === true"
-          @change="(e) => patchSpeaker(sp.id, { role: (e.target as HTMLSelectElement).value })"
-        >
-          <option value="speaker">Speaker</option>
-          <option value="moderator">Moderator</option>
-        </select>
+      <article
+        v-for="c in cards"
+        :key="c.id"
+        class="speaker-card"
+        :class="{ 'speaker-card--moderator': c.role === 'MODERATOR' }"
+      >
+        <div
+          class="speaker-card__av"
+          :style="c.avatar_color ? { background: c.avatar_color } : {}"
+        >{{ c.initials }}</div>
+        <div class="speaker-card__body">
+          <input
+            class="speaker-card__name"
+            :value="c.name"
+            :disabled="savingId === c.id"
+            @blur="(e) => onNameBlur(c, e)"
+            @keydown.enter="(e) => (e.target as HTMLInputElement).blur()"
+          />
+          <button
+            class="speaker-card__role"
+            :class="`speaker-card__role--${c.role.toLowerCase()}`"
+            :title="`Toggle to ${c.role === 'MODERATOR' ? 'Speaker' : 'Moderator'}`"
+            @click="toggleRole(c.id, c.role)"
+          >{{ c.role }}</button>
+        </div>
         <button
-          class="speaker-row__remove"
-          :data-test-id="`speaker-remove-${sp.id}`"
+          class="speaker-card__remove"
+          :data-test-id="`speaker-remove-${c.id}`"
           title="Remove"
-          @click="removeSpeaker(sp.id, sp.name)"
+          @click="removeSpeaker(c.id, c.name)"
         ><Icon name="x" :size="11" /></button>
-      </div>
+      </article>
 
-      <div class="speaker-row speaker-row--new">
-        <select v-model="newRole" class="speaker-row__role-select">
-          <option value="speaker">Speaker</option>
-          <option value="moderator">Moderator</option>
-        </select>
-        <input
-          v-model="newName"
-          class="speaker-row__name"
-          placeholder="Add speaker name…"
-          @keyup.enter="addSpeaker"
-        />
+      <div v-if="!adding" class="speaker-panel__add-cta">
+        <button class="btn btn--secondary btn--sm" data-test-id="speaker-add-open" @click="adding = true">
+          <Icon name="plus" :size="12" /> Add speaker
+        </button>
+      </div>
+      <div v-else class="speaker-card speaker-card--new">
+        <div class="speaker-card__av speaker-card__av--ghost">+</div>
+        <div class="speaker-card__body">
+          <input
+            v-model="newName"
+            autofocus
+            class="speaker-card__name"
+            placeholder="Speaker name…"
+            @keyup.enter="addSpeaker"
+            @keyup.escape="() => { adding = false; newName = ''; }"
+          />
+          <button class="speaker-card__role speaker-card__role--speaker">SPEAKER (change after Add)</button>
+        </div>
         <button
-          class="btn btn--secondary btn--sm"
-          data-test-id="speaker-add"
+          class="speaker-card__remove"
+          title="Cancel"
+          @click="() => { adding = false; newName = ''; }"
+        ><Icon name="x" :size="11" /></button>
+        <button
+          class="btn btn--primary btn--sm speaker-card__save"
+          data-test-id="speaker-add-confirm"
           :disabled="!newName.trim()"
           @click="addSpeaker"
-        ><Icon name="plus" :size="11" /> Add</button>
+        >Add</button>
       </div>
     </div>
   </div>
@@ -166,39 +215,97 @@ function roleLabel(r: string | null): string {
   flex-direction: column;
   gap: 6px;
 }
-.speaker-row {
+.speaker-card {
   display: grid;
-  grid-template-columns: 76px 1fr 92px 22px;
-  gap: 6px;
+  grid-template-columns: 32px 1fr auto;
   align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--surface-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  transition: border-color 120ms;
 }
-.speaker-row--new {
-  grid-template-columns: 92px 1fr 70px;
-  margin-top: 4px;
-  padding-top: 8px;
-  border-top: 1px dashed var(--border-subtle);
+.speaker-card--moderator {
+  border-left: 3px solid var(--color-amber);
+  padding-left: 8px;
 }
-.speaker-row__role {
+.speaker-card--new {
+  grid-template-columns: 32px 1fr auto auto;
+  border-style: dashed;
+}
+.speaker-card__av {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--color-steel);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.speaker-card__av--ghost {
+  background: transparent;
+  color: var(--fg2);
+  border: 1px dashed var(--border-subtle);
+}
+.speaker-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.speaker-card__name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg1);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  width: 100%;
+}
+.speaker-card__name:hover:not(:disabled),
+.speaker-card__name:focus {
+  background: var(--surface-bg);
+  border-color: var(--border-subtle);
+  outline: none;
+}
+.speaker-card__role {
+  align-self: flex-start;
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.06em;
-  color: var(--fg2);
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: transparent;
+  cursor: pointer;
 }
-.speaker-row__name,
-.speaker-row__role-select {
-  font-size: 12px;
-  padding: 4px 6px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 4px;
-  background: var(--surface-card);
-}
-.speaker-row__remove {
+.speaker-card__role--moderator { color: var(--color-amber); }
+.speaker-card__role--speaker   { color: var(--color-steel); }
+.speaker-card__role:hover { background: rgba(0, 0, 0, 0.04); }
+.speaker-card__remove {
   background: transparent;
   border: none;
   color: var(--fg2);
   cursor: pointer;
-  padding: 2px;
-  border-radius: 3px;
+  padding: 4px;
+  border-radius: 4px;
+  align-self: start;
 }
-.speaker-row__remove:hover { color: var(--color-red); background: rgba(217, 75, 75, 0.08); }
+.speaker-card__remove:hover { color: var(--color-red); background: rgba(217, 75, 75, 0.08); }
+.speaker-card__save {
+  align-self: stretch;
+}
+.speaker-panel__add-cta {
+  display: flex;
+  justify-content: center;
+  margin-top: 2px;
+}
 </style>
