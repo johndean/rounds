@@ -647,10 +647,12 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
         <Icon name="speaker" /> STT Reference <span class="count">{{ counts.stt }}</span>
       </button>
       <button :class="['editor__tab', tab === 'disc' ? 'is-active' : '']" role="tab" @click="tab = 'disc'">
-        <Icon name="git" /> Discrepancies <span class="count">{{ counts.disc }}</span>
+        <Icon name="git" /> Discrepancies
+        <span v-if="counts.disc > 0" class="tab-indicator" aria-label="Has meaningful diffs"></span>
       </button>
       <button :class="['editor__tab', tab === 'audit' ? 'is-active' : '']" role="tab" @click="tab = 'audit'">
-        <Icon name="history" /> Audit <span class="count">{{ counts.audit }}</span>
+        <Icon name="history" /> Audit
+        <span v-if="counts.audit > 0" class="tab-indicator" aria-label="Has audit entries"></span>
       </button>
       <div class="editor__tab-spacer" />
       <div class="editor__tab-meta"><FlagLegend /></div>

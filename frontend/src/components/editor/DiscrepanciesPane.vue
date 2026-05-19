@@ -111,28 +111,42 @@ const visibleSegments = computed<Segment[]>(() => {
 });
 
 // ─── STT text per segment ───────────────────────────────────────────────
-// LIVE: join real STT words for the segment (real text + spaces).
-// FIXTURE: lowercase AI text and string-replace fixture drift fragments.
-function _escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
+// Join real STT words for the segment, then highlight diffed fragments.
+// Single-pass render: collect (start, end) ranges on the PLAINTEXT, merge
+// overlaps, then walk the text once building HTML-escaped output with
+// <mark> wrappers around each merged range. This guarantees no fragment
+// regex ever matches inside an already-injected <mark> tag.
 function renderSTT(seg: Segment): string {
-  // Real STT text only. Joined from live words; no fixture path, no
-  // AI-text substitution. If no words exist for the segment yet, return
-  // empty string so the column is honestly blank rather than echoing AI.
   const ws = props.liveWords?.get(seg.id) ?? [];
   if (ws.length === 0) return '';
-  let html = ws.map((w) => w.word.toLowerCase()).join(' ');
-  const diffs = flagsBySeg.value.get(seg.id) ?? [];
-  diffs.forEach((d) => {
-    if (!d.sttText) return;
-    const frag = _escapeRegex(d.sttText.toLowerCase());
-    try {
-      html = html.replace(new RegExp(`(${frag})`, 'i'), '<mark class="compare-diff">$1</mark>');
-    } catch (_) { /* noop */ }
-  });
-  return html;
+  const plain = ws.map((w) => w.word.toLowerCase()).join(' ');
+
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (const d of flagsBySeg.value.get(seg.id) ?? []) {
+    if (!d.sttText) continue;
+    const idx = plain.indexOf(d.sttText.toLowerCase());
+    if (idx >= 0) ranges.push({ start: idx, end: idx + d.sttText.length });
+  }
+
+  ranges.sort((a, b) => a.start - b.start);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const r of ranges) {
+    const prev = merged[merged.length - 1];
+    if (prev && r.start <= prev.end) prev.end = Math.max(prev.end, r.end);
+    else merged.push({ ...r });
+  }
+
+  const esc = (s: string) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  let out = '';
+  let cursor = 0;
+  for (const r of merged) {
+    out += esc(plain.slice(cursor, r.start));
+    out += `<mark class="compare-diff">${esc(plain.slice(r.start, r.end))}</mark>`;
+    cursor = r.end;
+  }
+  out += esc(plain.slice(cursor));
+  return out;
 }
 
 // ─── Row classes ────────────────────────────────────────────────────────

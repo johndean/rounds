@@ -806,6 +806,14 @@ body.is-col-resizing .editor__resizer::before {
   font-weight: var(--weight-bold);
 }
 .editor__tab.is-active .count { background: var(--color-navy); color: #fff; }
+.editor__tab .tab-indicator {
+  display: inline-block;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--color-amber);
+  margin-left: 6px;
+  vertical-align: middle;
+}
 .editor__tab-spacer { flex: 1; }
 .editor__tab-meta {
   font-size: 11px; color: var(--fg2);
