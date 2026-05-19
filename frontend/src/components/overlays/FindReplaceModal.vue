@@ -9,7 +9,7 @@
  *
  * Modal closes after a successful Replace All and the parent reloads.
  */
-import { ref } from 'vue';
+import { ref, watch, computed } from 'vue';
 import { modal } from '@/composables/useModal';
 import { corrections as correctionsApi, type FindReplaceResult } from '@/services/api';
 import { ApiError } from '@/services/http';
@@ -25,9 +25,10 @@ const replace = ref('');
 const caseSensitive = ref(false);
 const preview = ref<FindReplaceResult | null>(null);
 const running = ref(false);
+let dryRunTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function doDryRun(): Promise<void> {
-  if (!find.value) return;
+  if (!find.value) { preview.value = null; return; }
   running.value = true;
   try {
     preview.value = await correctionsApi.findReplace(props.sessionId, {
@@ -40,6 +41,60 @@ async function doDryRun(): Promise<void> {
     running.value = false;
   }
 }
+
+// Debounced live preview. Re-runs the dry-run any time find/replace/case changes.
+watch([find, replace, caseSensitive], () => {
+  if (dryRunTimer) clearTimeout(dryRunTimer);
+  if (!find.value) { preview.value = null; return; }
+  dryRunTimer = setTimeout(() => { void doDryRun(); }, 280);
+});
+
+function htmlEscape(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+interface PreviewLine {
+  segmentId: string;
+  countLabel: string;
+  snippetHtml: string;
+}
+
+// Per-match contextual snippet: ±40 chars around each occurrence of `find`,
+// rendering "before <s>old</s> → <mark>new</mark> after". One line per
+// occurrence so the user sees exactly what changes.
+const previewLines = computed<PreviewLine[]>(() => {
+  const p = preview.value;
+  if (!p || !find.value) return [];
+  const out: PreviewLine[] = [];
+  const needle = find.value;
+  const flags = caseSensitive.value ? 'g' : 'gi';
+  const escRe = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const m of p.matches) {
+    const text = m.old_text || '';
+    const re = new RegExp(escRe, flags);
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(text)) !== null) {
+      const start = Math.max(0, match.index - 40);
+      const end = Math.min(text.length, match.index + needle.length + 40);
+      const beforeFrag = (start > 0 ? '…' : '') + text.slice(start, match.index);
+      const hit = match[0]!;
+      const afterFrag = text.slice(match.index + needle.length, end) + (end < text.length ? '…' : '');
+      out.push({
+        segmentId: m.segment_id,
+        countLabel: '',
+        snippetHtml:
+          htmlEscape(beforeFrag) +
+          `<s class="dc-was-strike">${htmlEscape(hit)}</s>` +
+          ' → ' +
+          `<mark class="dc-now-mark">${htmlEscape(replace.value)}</mark>` +
+          htmlEscape(afterFrag),
+      });
+      if (re.lastIndex === match.index) re.lastIndex++;
+    }
+    if (out.length >= 50) break;
+  }
+  return out;
+});
 
 async function doApply(): Promise<void> {
   if (!find.value) return;
@@ -88,28 +143,29 @@ async function doApply(): Promise<void> {
     </div>
 
     <div
-      v-if="preview"
+      v-if="preview && find"
       :style="{
         marginTop: '14px', padding: '10px 12px',
-        background: 'rgba(8,97,206,0.06)', border: '1px solid rgba(8,97,206,0.25)',
-        borderRadius: 'var(--radius-sm)', color: 'var(--color-blue)',
-        fontSize: '12px', lineHeight: 1.55, maxHeight: '180px', overflowY: 'auto',
+        background: 'var(--surface-bg)', border: '1px solid var(--border-subtle)',
+        borderRadius: 'var(--radius-sm)',
+        fontSize: '12px', lineHeight: 1.55, maxHeight: '220px', overflowY: 'auto',
       }"
     >
-      <strong>Preview:</strong> {{ preview.total_matches }} match{{ preview.total_matches === 1 ? '' : 'es' }} across {{ preview.segment_count }} segment{{ preview.segment_count === 1 ? '' : 's' }}.
-      <ul v-if="preview.matches.length" :style="{ margin: '8px 0 0', paddingLeft: '18px' }">
-        <li v-for="m in preview.matches.slice(0, 8)" :key="m.segment_id" :style="{ fontFamily: 'var(--font-mono)', fontSize: '11.5px', marginTop: '4px' }">
-          {{ m.match_count }}× — {{ m.old_text.slice(0, 60) }}…
-        </li>
-      </ul>
+      <div :style="{ marginBottom: '6px', fontSize: '11px', color: 'var(--fg2)', fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase' }">
+        {{ preview.total_matches }} match{{ preview.total_matches === 1 ? '' : 'es' }} across {{ preview.segment_count }} segment{{ preview.segment_count === 1 ? '' : 's' }}
+      </div>
+      <div
+        v-for="(line, i) in previewLines"
+        :key="i"
+        :style="{ fontSize: '12px', padding: '4px 0', borderTop: i > 0 ? '1px dashed var(--border-subtle)' : 'none' }"
+        v-html="line.snippetHtml"
+      />
+      <div v-if="preview.total_matches === 0" :style="{ color: 'var(--fg2)', fontStyle: 'italic' }">No matches.</div>
     </div>
 
     <div class="modal__actions">
       <button class="btn btn--ghost" @click="modal.close()">Close</button>
-      <button class="btn btn--secondary" :disabled="!find || running" @click="doDryRun">
-        {{ running ? 'Working…' : 'Preview' }}
-      </button>
-      <button class="btn btn--primary" :disabled="!find || running" @click="doApply">
+      <button class="btn btn--primary" :disabled="!find || running || preview?.total_matches === 0" @click="doApply">
         {{ running ? 'Working…' : 'Replace all' }}
       </button>
     </div>

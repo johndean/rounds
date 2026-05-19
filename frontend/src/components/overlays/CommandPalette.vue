@@ -102,7 +102,7 @@ defineExpose({ toggle, close });
 
 <template>
   <Teleport to="body">
-    <div v-if="open" class="scrim" data-test-id="command-palette" @click.self="close">
+    <div v-if="open" class="modal-backdrop" data-test-id="command-palette" @click.self="close">
       <div class="command-palette" @click.stop>
         <input
           ref="inputRef"

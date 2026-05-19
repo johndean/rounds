@@ -16,7 +16,7 @@ if (typeof window !== 'undefined') {
 
 <template>
   <Teleport to="body">
-    <div v-if="state.open" class="scrim" data-test-id="confirm-host" @click.self="answer(false)">
+    <div v-if="state.open" class="modal-backdrop" data-test-id="confirm-host" @click.self="answer(false)">
       <div class="confirm">
         <h2 class="confirm__title">{{ state.options?.title }}</h2>
         <p v-if="state.options?.body" class="confirm__body">{{ state.options.body }}</p>

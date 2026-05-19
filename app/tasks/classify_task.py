@@ -124,6 +124,25 @@ def classify_discrepancies_task(self, session_id: str) -> dict:
             f"already_done={len(already_classified_ids)} backend={backend} model={model}"
         )
 
+        # Pre-flight probe: try a SINGLE small classify call. If the model is
+        # retired (or any TERMINAL_LLM_CATEGORIES fault), abort the whole task
+        # instead of looping through thousands of batches that will all fail
+        # the same way. Prevents worker-starvation seen with gemini-2.0-flash.
+        pending_items_for_probe = [it for it in items if it["id"] not in already_classified_ids]
+        if pending_items_for_probe:
+            from app.engines.llm_client import _classify_batch_once, LLMError, TERMINAL_LLM_CATEGORIES
+            from app.prompts import DISCREPANCY_FILTER_PROMPT
+            probe_batch = pending_items_for_probe[:3]
+            try:
+                _classify_batch_once(probe_batch, DISCREPANCY_FILTER_PROMPT, model, use_vertex)
+            except LLMError as e:
+                if e.category in TERMINAL_LLM_CATEGORIES:
+                    logger.error(
+                        f"classify: ABORTING session={session_id} — model={model} "
+                        f"is in terminal state ({e.category}). Update org_settings.classify_model."
+                    )
+                    return {"classified": 0, "meaningful": 0, "noise": 0, "aborted": True, "reason": e.category}
+
         verdicts = classify_discrepancies(
             items,
             model_id=model,

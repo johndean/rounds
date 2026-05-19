@@ -512,6 +512,42 @@ async def list_chat(session_id: UUID, db: DbSession, _user: CurrentUser) -> list
     return [dict(r) for r in rows]
 
 
+class AnchorPatch(BaseModel):
+    anchor_segment: Optional[UUID] = None  # null clears placement
+
+
+@router.patch("/chat/{message_id}", response_model=ChatMessageOut)
+async def patch_chat_anchor(
+    session_id: UUID, message_id: UUID, body: AnchorPatch,
+    db: DbSession, _user: CurrentUser,
+) -> dict:
+    """Persist drag-to-place: set or clear anchor_segment + placed flag.
+    Idempotent. 404 if the message doesn't belong to the session."""
+    row = (
+        await db.execute(
+            text(
+                """
+                UPDATE chat_messages
+                   SET anchor_segment = CAST(:anc AS uuid),
+                       placed         = (:anc IS NOT NULL)
+                 WHERE id = :mid AND session_id = :sid
+             RETURNING id, author, body, sent_at_ms, anchor_segment, placed
+                """
+            ),
+            {
+                "mid": str(message_id),
+                "sid": str(session_id),
+                "anc": str(body.anchor_segment) if body.anchor_segment else None,
+            },
+        )
+    ).mappings().first()
+    if not row:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Chat message not found in this session.")
+    await db.commit()
+    return dict(row)
+
+
 # ─── polls ─────────────────────────────────────────────────────────────
 class PollOptionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -563,3 +599,36 @@ async def list_polls(session_id: UUID, db: DbSession, _user: CurrentUser) -> lis
         ).mappings().all()
         out.append({**dict(p), "options": [dict(o) for o in opts]})
     return out
+
+
+@router.patch("/polls/{poll_id}/anchor")
+async def patch_poll_anchor(
+    session_id: UUID, poll_id: UUID, body: AnchorPatch,
+    db: DbSession, _user: CurrentUser,
+) -> dict:
+    """Persist drag-to-place for polls: set or clear anchor_segment + placed.
+    Idempotent. 404 if the poll doesn't belong to the session."""
+    row = (
+        await db.execute(
+            text(
+                """
+                UPDATE polls
+                   SET anchor_segment = CAST(:anc AS uuid),
+                       placed         = (:anc IS NOT NULL)
+                 WHERE id = :pid AND session_id = :sid
+             RETURNING id, question, status, opened_at_ms, closed_at_ms,
+                       total_votes, anchor_segment, placed
+                """
+            ),
+            {
+                "pid": str(poll_id),
+                "sid": str(session_id),
+                "anc": str(body.anchor_segment) if body.anchor_segment else None,
+            },
+        )
+    ).mappings().first()
+    if not row:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Poll not found in this session.")
+    await db.commit()
+    return dict(row)

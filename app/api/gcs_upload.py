@@ -15,6 +15,7 @@ Phase 7i: closes residual gaps from re-audit
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import Optional
@@ -162,6 +163,27 @@ async def upload_complete(
         )
         accepted.append(f.gcs_uri)
     await db.commit()
+
+    # Durable evidence of what landed at upload time (survives log rotation).
+    try:
+        await db.execute(text(
+            "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
+            "VALUES (CAST(:sid AS uuid), :ae, 'upload.complete.sources', :sum, CAST(:det AS jsonb))"
+        ), {
+            "sid": payload.session_id,
+            "ae":  getattr(_user, "email", None) or "(unknown)",
+            "sum": f"{len(accepted)} files: " + ",".join(f.role or 'other' for f in payload.files),
+            "det": json.dumps({
+                "files": [
+                    {"role": f.role, "filename": f.filename, "size_bytes": f.size_bytes, "gcs_uri": f.gcs_uri}
+                    for f in payload.files
+                ],
+                "accepted_count": len(accepted),
+            }),
+        })
+        await db.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"audit log failed (sources): {e}")
 
     # Parse manifest + chat sources if present. Non-fatal — ingest still
     # runs even if parsing returns an empty result.
@@ -352,9 +374,46 @@ async def _parse_manifest_and_chat_sources(
                 "publishing_links":           list(parsed.publishing_links.keys()),
                 "polls_parsed_count":         len(parsed.polls_parsed),
             }
-        except Exception:
+            try:
+                await db.execute(text(
+                    "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
+                    "VALUES (CAST(:sid AS uuid), NULL, 'upload.complete.manifest', :sum, CAST(:det AS jsonb))"
+                ), {
+                    "sid": session_id,
+                    "sum": f"OK | code={parsed.code} | speakers={len(parsed.speakers)} | polls={len(parsed.polls_parsed)} | slide_resources={len(parsed.slide_resources)}",
+                    "det": json.dumps({
+                        "parsed": True,
+                        "code": parsed.code,
+                        "title_long": parsed.title_long,
+                        "speakers_count": len(parsed.speakers),
+                        "polls_count": len(parsed.polls_parsed),
+                        "slide_resources_count": len(parsed.slide_resources),
+                        "manifest_gcs_uri": manifest_files[0].gcs_uri if manifest_files else None,
+                    }),
+                })
+                await db.commit()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"audit log failed (manifest OK): {e}")
+        except Exception as exc:
             logger.exception(f"manifest parse failed for session {session_id}")
             summary = {"parsed": False}
+            try:
+                await db.execute(text(
+                    "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
+                    "VALUES (CAST(:sid AS uuid), NULL, 'upload.complete.manifest', :sum, CAST(:det AS jsonb))"
+                ), {
+                    "sid": session_id,
+                    "sum": f"FAILED | {type(exc).__name__}: {str(exc)[:200]}",
+                    "det": json.dumps({
+                        "parsed": False,
+                        "error_class": type(exc).__name__,
+                        "error_message": str(exc)[:500],
+                        "manifest_gcs_uri": manifest_files[0].gcs_uri if manifest_files else None,
+                    }),
+                })
+                await db.commit()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"audit log failed (manifest FAILED): {e}")
 
     if chat_files:
         try:
@@ -381,8 +440,45 @@ async def _parse_manifest_and_chat_sources(
             if summary is None:
                 summary = {}
             summary["chat_messages"] = len(messages)
-        except Exception:
+            try:
+                chat_first_line = (raw.split("\n", 1)[0] if raw else "")[:120]
+                kind_label = "OK" if messages else "UNRECOGNIZED_FORMAT"
+                await db.execute(text(
+                    "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
+                    "VALUES (CAST(:sid AS uuid), NULL, 'upload.complete.chat', :sum, CAST(:det AS jsonb))"
+                ), {
+                    "sid": session_id,
+                    "sum": f"{kind_label} | messages={len(messages)}",
+                    "det": json.dumps({
+                        "parsed": True,
+                        "message_count": len(messages),
+                        "first_line_sample": chat_first_line,
+                        "chat_gcs_uri": chat_files[0].gcs_uri,
+                        "unrecognized_format": not messages,
+                    }),
+                })
+                await db.commit()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"audit log failed (chat OK): {e}")
+        except Exception as exc:
             logger.exception(f"chat parse failed for session {session_id}")
+            try:
+                await db.execute(text(
+                    "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
+                    "VALUES (CAST(:sid AS uuid), NULL, 'upload.complete.chat', :sum, CAST(:det AS jsonb))"
+                ), {
+                    "sid": session_id,
+                    "sum": f"FAILED | {type(exc).__name__}: {str(exc)[:200]}",
+                    "det": json.dumps({
+                        "parsed": False,
+                        "error_class": type(exc).__name__,
+                        "error_message": str(exc)[:500],
+                        "chat_gcs_uri": chat_files[0].gcs_uri if chat_files else None,
+                    }),
+                })
+                await db.commit()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"audit log failed (chat FAILED): {e}")
 
     return summary
 

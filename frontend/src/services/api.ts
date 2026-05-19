@@ -242,6 +242,19 @@ export const media = {
     ),
 };
 
+export const placements = {
+  chatAnchor: (sessionId: string, chatId: string, anchorSegment: string | null) =>
+    http<unknown>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/chat/${encodeURIComponent(chatId)}`,
+      { body: { anchor_segment: anchorSegment }, method: 'PATCH' },
+    ),
+  pollAnchor: (sessionId: string, pollId: string, anchorSegment: string | null) =>
+    http<unknown>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/polls/${encodeURIComponent(pollId)}/anchor`,
+      { body: { anchor_segment: anchorSegment }, method: 'PATCH' },
+    ),
+};
+
 
 // ─── Corrections (Phase 4 — append-only ledger with undo/redo pointer) ──
 export interface CorrectionRow {

@@ -28,10 +28,11 @@ import DiscrepanciesPane from '@/components/editor/DiscrepanciesPane.vue';
 import AuditTabInline from '@/components/editor/AuditTabInline.vue';
 import ActiveSlideCard from '@/components/editor/ActiveSlideCard.vue';
 import AdminTab from '@/components/editor/AdminTab.vue';
+import SpeakerEditPanel from '@/components/editor/SpeakerEditPanel.vue';
 import ChatTab from '@/components/editor/ChatTab.vue';
 import PollsTab from '@/components/editor/PollsTab.vue';
 import DownloadMenu from '@/components/editor/DownloadMenu.vue';
-import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, words as wordsApi, discrepancies as discrepanciesApi, media as mediaApi, type SessionSummary, type WordRow, type DiscrepancyRow } from '@/services/api';
+import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, words as wordsApi, discrepancies as discrepanciesApi, media as mediaApi, placements as placementsApi, type SessionSummary, type WordRow, type DiscrepancyRow } from '@/services/api';
 import { toast } from '@/composables/useToast';
 import { ApiError } from '@/services/http';
 import { http } from '@/services/http';
@@ -261,6 +262,19 @@ function onMediaDurationLoaded(t: number): void {
   if (TOTAL_DURATION.value <= 0 && Number.isFinite(t) && t > 0) TOTAL_DURATION.value = t;
 }
 
+async function reloadSpeakers(): Promise<void> {
+  try {
+    const rows = await speakersApi.list(props.id);
+    SPEAKERS_API.value = rows.map((r) => ({
+      id: r.id,
+      short: r.short ?? null,
+      name: r.name ?? null,
+      role: r.role ?? null,
+      avatar_color: r.avatar_color ?? null,
+    }));
+  } catch (_) { /* non-fatal */ }
+}
+
 const activeSegment = computed<Segment | undefined>(() => {
   // Active = latest segment whose start ≤ time. Boundary-preferring rule so
   // clicking slide N (which sets time to slide N's first-segment.start) does
@@ -379,9 +393,32 @@ const anchorsBySegment = computed<Map<string, AnchorEntry[]>>(() => {
 
 function handleRemoveAnchor(itemId: string): void {
   placements.value = { ...placements.value, [itemId]: null };
+  const isChat = CHAT.value.some((c) => c.id === itemId);
+  const isPoll = POLLS.value.some((p) => p.id === itemId);
+  if (isChat) {
+    void placementsApi.chatAnchor(props.id, itemId, null).catch(() => {
+      toast.push('Could not save chat removal', { tone: 'error' });
+    });
+  } else if (isPoll) {
+    void placementsApi.pollAnchor(props.id, itemId, null).catch(() => {
+      toast.push('Could not save poll removal', { tone: 'error' });
+    });
+  }
 }
 function handleDropOnSegment(itemId: string, segId: string): void {
   placements.value = { ...placements.value, [itemId]: segId };
+  // Persist to backend. Chat vs poll inferred from which collection owns the id.
+  const isChat = CHAT.value.some((c) => c.id === itemId);
+  const isPoll = POLLS.value.some((p) => p.id === itemId);
+  if (isChat) {
+    void placementsApi.chatAnchor(props.id, itemId, segId).catch(() => {
+      toast.push('Could not save chat placement', { tone: 'error' });
+    });
+  } else if (isPoll) {
+    void placementsApi.pollAnchor(props.id, itemId, segId).catch(() => {
+      toast.push('Could not save poll placement', { tone: 'error' });
+    });
+  }
 }
 function handlePlaceAtActive(itemId: string): void {
   if (activeSegment.value) handleDropOnSegment(itemId, activeSegment.value.id);
@@ -801,16 +838,22 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
           </button>
         </div>
         <div class="rightrail__panel">
-          <AdminTab
-            v-if="rightTab === 'admin'"
-            :slide="activeSlide"
-            :segments="SEGMENTS"
-            :time="time"
-            :total-duration="TOTAL_DURATION"
-            :slides="SLIDES"
-            :instructor="primaryInstructor"
-            :iil="iilSignals"
-          />
+          <template v-if="rightTab === 'admin'">
+            <AdminTab
+              :slide="activeSlide"
+              :segments="SEGMENTS"
+              :time="time"
+              :total-duration="TOTAL_DURATION"
+              :slides="SLIDES"
+              :instructor="primaryInstructor"
+              :iil="iilSignals"
+            />
+            <SpeakerEditPanel
+              :session-id="props.id"
+              :live-speakers="SPEAKERS_API"
+              @changed="reloadSpeakers"
+            />
+          </template>
           <ChatTab
             v-else-if="rightTab === 'chat'"
             :chat="CHAT"
