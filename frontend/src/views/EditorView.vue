@@ -271,9 +271,12 @@ watch(playing, (p) => {
 onUnmounted(() => { cancelAnimationFrame(rafId); });
 
 const activeSegment = computed<Segment | undefined>(() => {
+  // Active = latest segment whose start ≤ time. Boundary-preferring rule so
+  // clicking slide N (which sets time to slide N's first-segment.start) does
+  // NOT match slide N-1's last segment (whose end equals slide N's start).
   const segs = SEGMENTS.value;
   for (let i = 0; i < segs.length; i++) {
-    if (time.value >= segs[i]!.start && time.value < segs[i]!.end + 0.25) return segs[i];
+    if (time.value >= segs[i]!.start && (i === segs.length - 1 || time.value < segs[i + 1]!.start)) return segs[i];
   }
   return segs[segs.length - 1];
 });
