@@ -467,7 +467,13 @@ const flaggedSecondary = computed(() => ([
 // a data-integrity lie. Phase 4 (corrections API) re-introduces them with
 // real undo-stack persistence + AI-result history.
 function onPreview(): void { router.push(`/v/${props.id}`); }
-function openFind(): void { void modal.open(FindReplaceModal, { sessionId: props.id, onApplied: () => { void load(); } }); }
+function openFind(): void {
+  void modal.open(
+    FindReplaceModal,
+    { sessionId: props.id, onApplied: () => { void load(); } },
+    { mode: 'ribbon' },
+  );
+}
 
 // ── Inline-save handlers (Phase C.3) ─────────────────────────────────
 async function onEditSegment(segId: string, before: string, after: string): Promise<void> {
