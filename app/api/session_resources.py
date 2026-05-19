@@ -390,6 +390,45 @@ async def list_sources(session_id: UUID, db: DbSession, _user: CurrentUser) -> l
     return [dict(r) for r in rows]
 
 
+# ─── words (real STT data from `words` table) ──────────────────────────
+class WordOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    segment_id: UUID
+    seq: int
+    word: str
+    start_ms: int
+    end_ms: int
+    confidence: float
+
+
+@router.get("/words", response_model=list[WordOut])
+async def list_words(session_id: UUID, db: DbSession, _user: CurrentUser) -> list[dict[str, Any]]:
+    """
+    Return real per-word Google STT tokens for this session, ordered along
+    the timeline. Populated by `stt_background_task` after AI mode direct
+    upload (or in-line by `transcribe_task` for enhanced pipeline). Returns
+    [] if STT hasn't run yet — frontend STT pane should fall back to its
+    placeholder UI in that case.
+    """
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT w.id, w.segment_id, w.seq, w.word,
+                       w.start_ms, w.end_ms, w.confidence
+                  FROM words w
+                  JOIN segments s ON s.id = w.segment_id
+                 WHERE s.session_id = CAST(:sid AS uuid)
+                 ORDER BY s.start_ms ASC, w.seq ASC
+                """
+            ),
+            {"sid": str(session_id)},
+        )
+    ).mappings().all()
+    return [dict(r) for r in rows]
+
+
 # ─── chat ──────────────────────────────────────────────────────────────
 class ChatMessageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)

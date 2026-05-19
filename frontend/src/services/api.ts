@@ -156,6 +156,23 @@ export interface SessionSpeaker {
   avatar_color?: string | null;
 }
 
+// ─── Words (real Google STT per-token data from `words` table) ───────────
+export interface WordRow {
+  id:          string;
+  segment_id:  string;
+  seq:         number;
+  word:        string;
+  start_ms:    number;
+  end_ms:      number;
+  confidence:  number;
+}
+
+export const words = {
+  listBySession: (sessionId: string) =>
+    http<WordRow[]>(`/v1/sessions/${encodeURIComponent(sessionId)}/words`),
+};
+
+
 export const speakers = {
   list: (sessionId: string) =>
     http<SessionSpeaker[]>(`/v1/sessions/${encodeURIComponent(sessionId)}/speakers`),

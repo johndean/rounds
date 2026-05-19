@@ -31,7 +31,7 @@ import AdminTab from '@/components/editor/AdminTab.vue';
 import ChatTab from '@/components/editor/ChatTab.vue';
 import PollsTab from '@/components/editor/PollsTab.vue';
 import DownloadMenu from '@/components/editor/DownloadMenu.vue';
-import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, type SessionSummary } from '@/services/api';
+import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, words as wordsApi, type SessionSummary, type WordRow } from '@/services/api';
 import { toast } from '@/composables/useToast';
 import { ApiError } from '@/services/http';
 import { http } from '@/services/http';
@@ -58,6 +58,10 @@ const CHAT = ref<ChatMessage[]>([]);
 const POLLS = ref<Poll[]>([]);
 const DISCREPANCIES = ref<Array<{ kind: string; meaningful: boolean; status: string }>>([]);
 const CORRECTIONS = ref<Array<{ id: string; t: string; type: string; actor: string; seg: string; prior?: string | null; next?: string | null; note?: string | null }>>([]);
+// Real Google STT per-word data grouped by segment_id. Populated by
+// stt_background_task after AI MODE direct. Empty until the worker writes
+// the words rows + emits stt_ready over WS.
+const WORDS_BY_SEGMENT = ref<Map<string, WordRow[]>>(new Map());
 const loading = ref(true);
 
 const TOTAL_DURATION = computed(() => session.value?.duration_sec ?? 0);
@@ -67,7 +71,7 @@ const sessionStage = computed(() => 'prep'); // until /sop wiring lands per-edit
 async function load(): Promise<void> {
   loading.value = true;
   try {
-    const [s, sg, sl, sp, ch, po, di, co] = await Promise.all([
+    const [s, sg, sl, sp, ch, po, di, co, wd] = await Promise.all([
       sessionsApi.get(props.id).catch(() => null),
       segmentsApi.list(props.id).catch(() => []),
       http<Slide[]>(`/v1/sessions/${encodeURIComponent(props.id)}/slides`).catch(() => []),
@@ -76,6 +80,7 @@ async function load(): Promise<void> {
       http<Poll[]>(`/v1/sessions/${encodeURIComponent(props.id)}/polls`).catch(() => []),
       http<Array<{ kind: string; meaningful: boolean; status: string }>>(`/v1/sessions/${encodeURIComponent(props.id)}/discrepancies`).catch(() => []),
       auditApi.corrections(props.id).catch(() => []),
+      wordsApi.listBySession(props.id).catch(() => [] as WordRow[]),
     ]);
     session.value = s;
     SPEAKERS_API.value = sp as ApiSpeaker[];
@@ -180,6 +185,17 @@ async function load(): Promise<void> {
 
     DISCREPANCIES.value = di as Array<{ kind: string; meaningful: boolean; status: string }>;
     CORRECTIONS.value = co as Array<{ id: string; t: string; type: string; actor: string; seg: string; prior?: string | null; next?: string | null; note?: string | null }>;
+
+    // Group real Google STT words by segment_id so STTPane can render real
+    // per-word tokens with real timestamps + confidences. Empty Map when
+    // stt_background hasn't completed yet — STTPane shows its placeholder.
+    const wordsMap = new Map<string, WordRow[]>();
+    (wd as WordRow[]).forEach((w) => {
+      const arr = wordsMap.get(w.segment_id);
+      if (arr) arr.push(w);
+      else wordsMap.set(w.segment_id, [w]);
+    });
+    WORDS_BY_SEGMENT.value = wordsMap;
   } finally {
     loading.value = false;
   }
@@ -696,6 +712,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
         :slide-rail-mode="slideRailMode"
         :stt-ready="sttReady"
         :stt-failed="sttFailed"
+        :live-words="WORDS_BY_SEGMENT"
         @segment-click="onSegmentClick"
         @word-click="onWordClick"
         @clear-focus="focusedSlideId = null"
