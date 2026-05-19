@@ -1,9 +1,16 @@
 <script setup lang="ts">
 /**
- * VideoStrip — verbatim port of editor.jsx::VideoStrip (72-132).
- * Faux 16:9 video frame + compact audio transport (play / rate / CC / scrubber).
+ * VideoStrip — visual chrome (16:9 frame, scrubber, slide-chapter marks) plus
+ * a real hidden <audio> element so the editor can actually play the lecture.
+ *
+ * Source of truth for playback is the <audio> element. `time` / `playing` /
+ * `rate` props are mirrored both ways via update:* emits. Parent (EditorView)
+ * binds with v-model-style update events; no requestAnimationFrame simulation.
+ *
+ * If `mediaUrl` is null (still loading / no source), the audio element is
+ * skipped and the user sees the static poster — no broken state.
  */
-import { computed } from 'vue';
+import { computed, ref, watch, onUnmounted } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
 import type { Slide, Segment } from '@/fixtures/transcript';
 import { fmtTime } from '@/utils/editorHelpers';
@@ -20,14 +27,21 @@ const props = defineProps<{
   rate: number;
   cc: boolean;
   segmentsBySlide: Map<string, Segment[]>;
+  mediaUrl?: string | null;
 }>();
 
 const emit = defineEmits<{
   (e: 'togglePlay'): void;
   (e: 'update:rate', r: number): void;
   (e: 'update:cc', v: boolean): void;
+  (e: 'update:time', t: number): void;
+  (e: 'update:playing', v: boolean): void;
+  (e: 'update:total', t: number): void;
   (e: 'scrubClick', ev: MouseEvent): void;
 }>();
+
+const audioEl = ref<HTMLAudioElement | null>(null);
+const seeking = ref(false);
 
 const todayIso = new Date().toISOString().slice(0, 10);
 
@@ -39,14 +53,17 @@ const timeReadout = computed(() => {
   return t;
 });
 
-const trackWidth = computed(() => `${(props.time / props.total) * 100}%`);
+const trackWidth = computed(() => {
+  const pct = props.total > 0 ? (props.time / props.total) * 100 : 0;
+  return `${Math.min(100, Math.max(0, pct))}%`;
+});
 
 interface ChapterMark { id: string; n: number; left: string }
 const chapterMarks = computed<ChapterMark[]>(() =>
   props.slides
     .map((sl) => {
       const segs = props.segmentsBySlide.get(sl.id);
-      if (!segs || !segs.length) return null;
+      if (!segs || !segs.length || props.total <= 0) return null;
       return { id: sl.id, n: sl.n, left: `${(segs[0]!.start / props.total) * 100}%` };
     })
     .filter((x): x is ChapterMark => x != null)
@@ -55,10 +72,72 @@ const chapterMarks = computed<ChapterMark[]>(() =>
 function shortPresenter(p?: string): string {
   return (p || '').replace(/^Dr\. /, 'Dr. ');
 }
+
+// ─── media ↔ props sync ──────────────────────────────────────────────────
+function onTimeUpdate(): void {
+  const el = audioEl.value;
+  if (!el || seeking.value) return;
+  emit('update:time', el.currentTime);
+}
+
+function onLoadedMetadata(): void {
+  const el = audioEl.value;
+  if (!el) return;
+  if (!Number.isFinite(el.duration) || el.duration <= 0) return;
+  // Only override total if the parent's session.duration_sec was missing.
+  if (props.total <= 0) emit('update:total', el.duration);
+}
+
+function onPlay(): void { emit('update:playing', true); }
+function onPause(): void { emit('update:playing', false); }
+function onEnded(): void { emit('update:playing', false); }
+
+// Parent → media element pushes. Guard against feedback loops by checking
+// whether the desired state already matches.
+watch(() => props.time, (t) => {
+  const el = audioEl.value;
+  if (!el) return;
+  if (Math.abs(el.currentTime - t) > 0.4) {
+    seeking.value = true;
+    el.currentTime = t;
+    // Release the seeking flag after the browser fires the seeked event.
+    const release = () => { seeking.value = false; el.removeEventListener('seeked', release); };
+    el.addEventListener('seeked', release);
+  }
+});
+
+watch(() => props.playing, (p) => {
+  const el = audioEl.value;
+  if (!el) return;
+  if (p && el.paused) void el.play().catch(() => emit('update:playing', false));
+  else if (!p && !el.paused) el.pause();
+});
+
+watch(() => props.rate, (r) => {
+  const el = audioEl.value;
+  if (el && Math.abs(el.playbackRate - r) > 0.001) el.playbackRate = r;
+});
+
+onUnmounted(() => {
+  const el = audioEl.value;
+  if (el && !el.paused) el.pause();
+});
 </script>
 
 <template>
   <div class="vstrip" data-screen-label="Video Player">
+    <audio
+      v-if="mediaUrl"
+      ref="audioEl"
+      :src="mediaUrl"
+      preload="metadata"
+      :style="{ display: 'none' }"
+      @timeupdate="onTimeUpdate"
+      @loadedmetadata="onLoadedMetadata"
+      @play="onPlay"
+      @pause="onPause"
+      @ended="onEnded"
+    />
     <div
       class="vstrip__frame"
       role="button"

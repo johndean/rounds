@@ -31,7 +31,7 @@ import AdminTab from '@/components/editor/AdminTab.vue';
 import ChatTab from '@/components/editor/ChatTab.vue';
 import PollsTab from '@/components/editor/PollsTab.vue';
 import DownloadMenu from '@/components/editor/DownloadMenu.vue';
-import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, words as wordsApi, discrepancies as discrepanciesApi, type SessionSummary, type WordRow, type DiscrepancyRow } from '@/services/api';
+import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, words as wordsApi, discrepancies as discrepanciesApi, media as mediaApi, type SessionSummary, type WordRow, type DiscrepancyRow } from '@/services/api';
 import { toast } from '@/composables/useToast';
 import { ApiError } from '@/services/http';
 import { http } from '@/services/http';
@@ -64,7 +64,8 @@ const CORRECTIONS = ref<Array<{ id: string; t: string; type: string; actor: stri
 const WORDS_BY_SEGMENT = ref<Map<string, WordRow[]>>(new Map());
 const loading = ref(true);
 
-const TOTAL_DURATION = computed(() => session.value?.duration_sec ?? 0);
+const TOTAL_DURATION = ref<number>(0);
+const mediaUrl = ref<string | null>(null);
 const sessionCode = computed(() => session.value?.code || props.id);
 const sessionStage = computed(() => 'prep'); // until /sop wiring lands per-editor
 
@@ -83,6 +84,11 @@ async function load(): Promise<void> {
       wordsApi.listBySession(props.id).catch(() => [] as WordRow[]),
     ]);
     session.value = s;
+    if (s?.duration_sec) TOTAL_DURATION.value = s.duration_sec;
+    // Fetch playback URL in parallel; failure is non-fatal (poster + scrubber stay static).
+    void mediaApi.url(props.id, 'audio')
+      .then((m) => { mediaUrl.value = m.url; if (m.duration_sec && TOTAL_DURATION.value <= 0) TOTAL_DURATION.value = m.duration_sec; })
+      .catch(() => { mediaUrl.value = null; });
     SPEAKERS_API.value = sp as ApiSpeaker[];
     const speakersById = new Map<string, ApiSpeaker>();
     SPEAKERS_API.value.forEach((row) => speakersById.set(row.id, row));
@@ -247,28 +253,13 @@ const playing = ref(false);
 const rate = ref(1);
 const cc = ref(true);
 
-let rafId = 0;
-let lastTick = 0;
-
+// Playback is driven by the <audio> element inside VideoStrip via update:time /
+// update:playing emits. Time still persists across reloads via localStorage.
 watch(time, (t) => { localStorage.setItem(`mic_playback_${props.id}`, String(t)); });
 
-watch(playing, (p) => {
-  cancelAnimationFrame(rafId);
-  lastTick = 0;
-  if (!p) return;
-  const step = (now: number) => {
-    if (!lastTick) lastTick = now;
-    const dt = (now - lastTick) / 1000;
-    lastTick = now;
-    const next = time.value + dt * rate.value;
-    if (next >= TOTAL_DURATION.value) { time.value = TOTAL_DURATION.value; playing.value = false; return; }
-    time.value = next;
-    rafId = requestAnimationFrame(step);
-  };
-  rafId = requestAnimationFrame(step);
-});
-
-onUnmounted(() => { cancelAnimationFrame(rafId); });
+function onMediaDurationLoaded(t: number): void {
+  if (TOTAL_DURATION.value <= 0 && Number.isFinite(t) && t > 0) TOTAL_DURATION.value = t;
+}
 
 const activeSegment = computed<Segment | undefined>(() => {
   // Active = latest segment whose start ≤ time. Boundary-preferring rule so
@@ -303,6 +294,28 @@ watch(slideRailMode, (m) => localStorage.setItem('mic_slide_click_mode', m));
 
 const focusedSlideId = ref<string | null>(null);
 const activeSlideCollapsed = ref(false);
+
+// Real instructor card — prefer a moderator if one exists, else the first
+// speaker. Returns null when no speakers, so AdminTab hides the section
+// instead of showing a fixture.
+const primaryInstructor = computed(() => {
+  const all = SPEAKERS_API.value;
+  if (!all.length) return null;
+  const mod = all.find((s) => (s.role || '').toLowerCase() === 'moderator');
+  const chosen = mod ?? all[0]!;
+  return {
+    name:         chosen.name ?? '(unnamed speaker)',
+    credentials:  null,
+    role:         chosen.role ?? null,
+    short:        chosen.short ?? null,
+    avatar_color: chosen.avatar_color ?? null,
+  };
+});
+
+// IIL signals — compute from real session_speakers metadata if available;
+// otherwise return null so AdminTab hides the section. Hardcoded fixtures
+// (148 wpm / 2.1%) are gone.
+const iilSignals = computed(() => null as { cadence_wpm?: number | null; filler_ratio?: number | null } | null);
 // F2 closure — switching tabs clears the slide focus (matches React behavior)
 watch(tab, () => { focusedSlideId.value = null; });
 
@@ -679,9 +692,13 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
           :rate="rate"
           :cc="cc"
           :segments-by-slide="segmentsBySlide"
+          :media-url="mediaUrl"
           @toggle-play="playing = !playing"
           @update:rate="(r) => (rate = r)"
           @update:cc="(v) => (cc = v)"
+          @update:time="(t) => (time = t)"
+          @update:playing="(v) => (playing = v)"
+          @update:total="onMediaDurationLoaded"
           @scrub-click="onScrubClick"
         />
         <SlideRail
@@ -791,6 +808,8 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
             :time="time"
             :total-duration="TOTAL_DURATION"
             :slides="SLIDES"
+            :instructor="primaryInstructor"
+            :iil="iilSignals"
           />
           <ChatTab
             v-else-if="rightTab === 'chat'"

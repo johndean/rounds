@@ -394,6 +394,58 @@ async def list_sources(session_id: UUID, db: DbSession, _user: CurrentUser) -> l
     return [dict(r) for r in rows]
 
 
+# ─── media playback URL ────────────────────────────────────────────────
+class MediaUrlOut(BaseModel):
+    role: str
+    filename: Optional[str]
+    content_type: Optional[str]
+    duration_sec: Optional[int]
+    url: str        # signed v4 GET URL, 24h TTL
+
+
+@router.get("/media-url", response_model=MediaUrlOut)
+async def session_media_url(
+    session_id: UUID,
+    db: DbSession,
+    _user: CurrentUser,
+    role: str = "audio",
+) -> dict:
+    """Return a 24h signed GET URL for the session's primary playback source.
+
+    Defaults to `role=audio`; pass `?role=video` for the video file if you
+    want the visual track. Falls through to `audio` if the requested role
+    is missing. 404 if neither exists.
+    """
+    from app.tasks.burn_captions import _generate_signed_url
+
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT role, filename, gcs_uri, content_type, duration_sec
+                  FROM sources
+                 WHERE session_id = :sid AND role IN ('audio', 'video')
+                 ORDER BY (role = :preferred) DESC, created_at ASC
+                """
+            ),
+            {"sid": str(session_id), "preferred": role},
+        )
+    ).mappings().all()
+
+    if not rows:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="No audio/video source for this session.")
+
+    chosen = rows[0]
+    return {
+        "role":         chosen["role"],
+        "filename":     chosen["filename"],
+        "content_type": chosen["content_type"],
+        "duration_sec": chosen["duration_sec"],
+        "url":          _generate_signed_url(chosen["gcs_uri"], hours=24),
+    }
+
+
 # ─── words (real STT data from `words` table) ──────────────────────────
 class WordOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)

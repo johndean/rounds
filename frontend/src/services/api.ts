@@ -227,6 +227,21 @@ export const speakers = {
     ),
 };
 
+export interface MediaUrl {
+  role: string;
+  filename: string | null;
+  content_type: string | null;
+  duration_sec: number | null;
+  url: string;
+}
+
+export const media = {
+  url: (sessionId: string, role: 'audio' | 'video' = 'audio') =>
+    http<MediaUrl>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/media-url?role=${role}`,
+    ),
+};
+
 
 // ─── Corrections (Phase 4 — append-only ledger with undo/redo pointer) ──
 export interface CorrectionRow {

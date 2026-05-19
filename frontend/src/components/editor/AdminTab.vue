@@ -1,12 +1,28 @@
 <script setup lang="ts">
 /**
- * AdminTab — verbatim port of editor.jsx::AdminTab (175-235).
- * Right-rail "Admin" sub-tab body: timeline minimap + per-slide segment list +
- * instructor card + IIL signal previews (cadence / filler ratio).
+ * AdminTab — right-rail "Admin" sub-tab: timeline minimap + per-slide segment
+ * list + instructor card + IIL signal previews (cadence / filler ratio).
+ *
+ * Instructor card pulls from real session_speakers (first row, preferred a
+ * speaker with role='moderator'). If none, the card is hidden — no fixture
+ * lies. IIL signals likewise only render when real data exists.
  */
 import { computed } from 'vue';
 import { slideAccent, type Slide, type Segment } from '@/fixtures/transcript';
 import { withAlpha, fmtTime } from '@/utils/editorHelpers';
+
+interface InstructorLike {
+  name: string;
+  credentials?: string | null;
+  role?: string | null;
+  short?: string | null;
+  avatar_color?: string | null;
+}
+
+interface IilSignals {
+  cadence_wpm?: number | null;
+  filler_ratio?: number | null;
+}
 
 const props = defineProps<{
   slide: Slide | null | undefined;
@@ -14,6 +30,8 @@ const props = defineProps<{
   time: number;
   totalDuration: number;
   slides: readonly Slide[];
+  instructor?: InstructorLike | null;
+  iil?: IilSignals | null;
 }>();
 
 const accent = computed(() => (props.slide ? slideAccent(props.slide.id) : '#4D6995'));
@@ -47,7 +65,13 @@ const slideSegs = computed<Segment[]>(() =>
 );
 
 function isActive(s: Segment): boolean {
-  return props.time >= s.start && props.time < s.end + 0.25;
+  // Boundary-preferring: same rule as EditorView.activeSegment so clicks /
+  // playback crossings don't keep the previous segment lit for 250 ms.
+  const all = props.segments;
+  const idx = all.indexOf(s);
+  if (idx < 0) return false;
+  const next = all[idx + 1];
+  return props.time >= s.start && (!next || props.time < next.start);
 }
 
 function segStyle(s: Segment): Record<string, string | number> {
@@ -89,26 +113,34 @@ function segStyle(s: Segment): Record<string, string | number> {
       </li>
     </ul>
 
-    <div class="rightrail__sectionhead">Instructor</div>
-    <div class="instructor-card">
-      <div class="instructor-card__av">PM</div>
-      <div>
-        <div class="instructor-card__name">Dr. Pamela Mueller, DVM, DACVS</div>
-        <div class="instructor-card__role">Soft Tissue Surgery · University of Wisconsin SVM</div>
-        <div class="instructor-card__meta">23 sessions on VIN · avg 1.0h · 4.8 rating</div>
+    <template v-if="instructor">
+      <div class="rightrail__sectionhead">Instructor</div>
+      <div class="instructor-card">
+        <div
+          class="instructor-card__av"
+          :style="instructor.avatar_color ? { background: instructor.avatar_color } : {}"
+        >{{ instructor.short || instructor.name.split(/\s+/).map(p => p[0]).join('').slice(0,2).toUpperCase() }}</div>
+        <div>
+          <div class="instructor-card__name">
+            {{ instructor.name }}<span v-if="instructor.credentials">, {{ instructor.credentials }}</span>
+          </div>
+          <div v-if="instructor.role" class="instructor-card__role">{{ instructor.role }}</div>
+        </div>
       </div>
-    </div>
+    </template>
 
-    <div class="rightrail__sectionhead">IIL signals (preview)</div>
-    <div :style="{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', fontSize: '11px' }">
-      <div :style="{ padding: '6px 8px', background: 'var(--surface-bg)', border: '1px solid var(--border-subtle)', borderRadius: '6px' }">
-        <div :style="{ color: 'var(--fg2)', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 700 }">Cadence</div>
-        <div :style="{ fontSize: '12px', fontWeight: 700, color: 'var(--fg1)' }">148 wpm</div>
+    <template v-if="iil && (iil.cadence_wpm != null || iil.filler_ratio != null)">
+      <div class="rightrail__sectionhead">IIL signals</div>
+      <div :style="{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', fontSize: '11px' }">
+        <div v-if="iil.cadence_wpm != null" :style="{ padding: '6px 8px', background: 'var(--surface-bg)', border: '1px solid var(--border-subtle)', borderRadius: '6px' }">
+          <div :style="{ color: 'var(--fg2)', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 700 }">Cadence</div>
+          <div :style="{ fontSize: '12px', fontWeight: 700, color: 'var(--fg1)' }">{{ Math.round(iil.cadence_wpm) }} wpm</div>
+        </div>
+        <div v-if="iil.filler_ratio != null" :style="{ padding: '6px 8px', background: 'var(--surface-bg)', border: '1px solid var(--border-subtle)', borderRadius: '6px' }">
+          <div :style="{ color: 'var(--fg2)', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 700 }">Filler ratio</div>
+          <div :style="{ fontSize: '12px', fontWeight: 700, color: 'var(--fg1)' }">{{ (iil.filler_ratio * 100).toFixed(1) }}%</div>
+        </div>
       </div>
-      <div :style="{ padding: '6px 8px', background: 'var(--surface-bg)', border: '1px solid var(--border-subtle)', borderRadius: '6px' }">
-        <div :style="{ color: 'var(--fg2)', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: 700 }">Filler ratio</div>
-        <div :style="{ fontSize: '12px', fontWeight: 700, color: 'var(--fg1)' }">2.1%</div>
-      </div>
-    </div>
+    </template>
   </div>
 </template>
