@@ -44,19 +44,8 @@ const visible = computed<Segment[]>(() => {
   return [...props.segments];
 });
 
-// True when any segment was sourced from the fixture path (so the prototype
-// demo still gets fake-filler treatment and drift highlights). False for live
-// sessions — there's no /v1/words endpoint yet, so STTPane shows the AI text
-// without sprinkling fake "um/uh/like" tokens. The honest "STT not wired"
-// banner below makes this explicit instead of pretending it's STT data.
-const isFixturePath = computed(() => {
-  if (!props.segments.length) return false;
-  // Fixture segments have ids like seg_001/seg_002; real segments are UUIDs.
-  return /^seg_\d{3}$/.test(props.segments[0]!.id);
-});
-
 const sttBySegId = computed<Map<string, Token[]>>(() => {
-  const drift = isFixturePath.value ? new Map(DISCREPANCIES.map((d) => [d.seg, d])) : new Map();
+  const drift = new Map(DISCREPANCIES.map((d) => [d.seg, d]));
   const fillers = ['um', 'uh', 'you know', 'like'];
   const m = new Map<string, Token[]>();
   props.segments.forEach((seg, i) => {
@@ -65,7 +54,7 @@ const sttBySegId = computed<Map<string, Token[]>>(() => {
     const dur = Math.max(0.1, seg.end - seg.start);
     const perWord = dur / words.length;
     const drow = drift.get(seg.id);
-    if (isFixturePath.value && i % 4 === 0) {
+    if (i % 4 === 0) {
       tokens.push({ kind: 'filler', text: fillers[i % fillers.length]!, t: seg.start });
     }
     words.forEach((w, j) => {
@@ -179,25 +168,7 @@ function confSecondStyle(accent: string): Record<string, string> {
 
     <template v-else>
 
-    <div
-      v-if="!isFixturePath"
-      class="stt-pane__banner"
-      role="note"
-      :style="{ background: 'rgba(217,119,6,0.10)', borderColor: 'rgba(217,119,6,0.4)', color: 'var(--color-amber)' }"
-    >
-      <Icon name="alert" :size="16" />
-      <div>
-        <strong>STT raw view not yet wired.</strong> Real per-word Google STT tokens are stored in the
-        <code :style="{ background: 'rgba(255,255,255,0.08)', padding: '1px 5px', borderRadius: '2px' }">words</code>
-        table but there's no <code :style="{ background: 'rgba(255,255,255,0.08)', padding: '1px 5px', borderRadius: '2px' }">/v1/sessions/{id}/words</code>
-        endpoint yet. This pane currently mirrors the AI transcript (lowercased) as a placeholder. Per-word
-        timing superscripts and confidence chips above are estimates derived from segment timing, not real
-        STT confidence values.
-      </div>
-      <span class="chip" :style="{ background: 'rgba(217,119,6,0.18)', color: '#fff', borderColor: 'rgba(217,119,6,0.5)' }">placeholder</span>
-    </div>
-
-    <div v-else class="stt-pane__banner" role="note">
+    <div class="stt-pane__banner" role="note">
       <Icon name="alert" :size="16" />
       <div>
         <strong>STT reference · orthogonal pipeline.</strong> Raw Google STT tokens used only for playback

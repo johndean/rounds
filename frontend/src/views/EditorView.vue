@@ -196,12 +196,16 @@ const {
 onMounted(() => { void load(); wsConnect(); });
 onUnmounted(() => { wsDisconnect(); });
 
-// If words already exist on first load (session has finished STT before user
-// reopens the editor), promote sttReady so we skip the background placeholder.
+// Promote sttReady true as soon as we have any segments. The segments
+// endpoint doesn't return per-word arrays (those live in the words table),
+// so the old `hasWords` check never fired and the STT tab stayed stuck on
+// the "Speech-to-text processing in background" spinner forever. While the
+// STT pane is technically rendering an AI-transcript-mirror placeholder
+// today, the right gate is "do we have anything to show" (= segments exist),
+// not "are there word-level arrays on the segment objects."
 watch(SEGMENTS, (segs) => {
   if (sttReady.value) return;
-  const hasWords = segs.some((s: Segment & { words?: unknown[] }) => Array.isArray(s.words) && s.words.length > 0);
-  if (hasWords) sttReady.value = true;
+  if (segs.length > 0) sttReady.value = true;
 }, { immediate: true });
 
 // ── Derived maps + computeds ─────────────────────────────────────────
