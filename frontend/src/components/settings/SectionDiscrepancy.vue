@@ -13,7 +13,7 @@ import { settingsApi } from '@/services/api';
 import { toast } from '@/composables/useToast';
 
 const backend = ref<string>('gemini-dev');
-const model = ref<string>('gemini-2.5-flash-lite');
+const model = ref<string>('gemini-2.0-flash');
 const loading = ref(true);
 
 onMounted(async () => {
@@ -63,6 +63,6 @@ async function saveModel(e: Event): Promise<void> {
         <option v-for="m in AI_MODELS" :key="m.v" :value="m.v">{{ m.label }}</option>
       </select>
     </FormRow>
-    <div class="set-callout">Default: Gemini 2.5 Flash Lite. If 503 errors persist, switch to Vertex AI backend.</div>
+    <div class="set-callout">Default: Gemini 2.0 Flash. If 503 errors persist, switch to Vertex AI backend.</div>
   </div>
 </template>
