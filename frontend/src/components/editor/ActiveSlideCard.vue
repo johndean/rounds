@@ -6,7 +6,7 @@
  */
 import { computed } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
-import { SLIDES, SEGMENTS, slideAccent, type Slide } from '@/fixtures/transcript';
+import { SLIDES as FIXTURE_SLIDES, SEGMENTS as FIXTURE_SEGMENTS, slideAccent, type Slide, type Segment } from '@/fixtures/transcript';
 import { withAlpha } from '@/utils/editorHelpers';
 import { toast } from '@/composables/useToast';
 
@@ -16,7 +16,19 @@ const props = defineProps<{
   collapsed: boolean;
   time: number;
   totalDuration: number;
+  // Real session slides + segments for the minimap. Without these the
+  // minimap renders the fixture 24-slide timeline regardless of the real
+  // deck. Optional so the fixture/demo path still works.
+  liveSlides?: readonly Slide[];
+  liveSegments?: readonly Segment[];
 }>();
+
+const allSlides = computed<readonly Slide[]>(() =>
+  props.liveSlides && props.liveSlides.length ? props.liveSlides : FIXTURE_SLIDES
+);
+const allSegments = computed<readonly Segment[]>(() =>
+  props.liveSegments && props.liveSegments.length ? props.liveSegments : FIXTURE_SEGMENTS
+);
 
 const emit = defineEmits<{ (e: 'toggle'): void }>();
 
@@ -32,10 +44,10 @@ const previewStyle = computed(() => {
 
 interface MapRect { id: string; x: number; w: number; fill: string; isCurrent: boolean; }
 const minimapRects = computed<MapRect[]>(() => {
-  if (!props.slide) return [];
+  if (!props.slide || props.totalDuration <= 0) return [];
   const out: MapRect[] = [];
-  SLIDES.forEach((s) => {
-    const segs = SEGMENTS.filter((g) => g.slide_id === s.id);
+  allSlides.value.forEach((s) => {
+    const segs = allSegments.value.filter((g) => g.slide_id === s.id);
     if (!segs.length) return;
     const x1 = (segs[0]!.start / props.totalDuration) * 200;
     const x2 = (segs[segs.length - 1]!.end / props.totalDuration) * 200;
@@ -78,7 +90,7 @@ function reassign(): void {
     </div>
     <div class="rightrail__activeslide-body">
       <div class="slide-preview" :style="previewStyle">
-        <div class="slide-preview__no">Slide {{ String(slide.n).padStart(2, '0') }} of {{ SLIDES.length }}</div>
+        <div class="slide-preview__no">Slide {{ String(slide.n).padStart(2, '0') }} of {{ allSlides.length }}</div>
         <div class="slide-preview__title">{{ slide.title }}</div>
         <div class="slide-preview__foot">
           <span>{{ slide.kind }}</span>

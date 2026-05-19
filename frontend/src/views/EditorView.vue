@@ -114,8 +114,70 @@ async function load(): Promise<void> {
       title: row.title || '',
       kind: 'data',
     }));
-    CHAT.value = ch as ChatMessage[];
-    POLLS.value = po as Poll[];
+    // Adapt backend chat shape (anchor_segment, sent_at_ms, body) → editor
+    // ChatMessage shape (anchor, t, text) so ChatTab can render real DB rows
+    // using the same template as the fixture demo.
+    interface ApiChat { id: string; author: string; body: string; sent_at_ms: number; anchor_segment: string | null; placed: boolean }
+    CHAT.value = (ch as unknown as ApiChat[]).map((c): ChatMessage => ({
+      id:     c.id,
+      author: c.author,
+      anchor: c.anchor_segment || '',
+      t:      (c.sent_at_ms ?? 0) / 1000,
+      text:   c.body,
+      placed: c.placed,
+    }));
+
+    // Adapt backend poll shape (total_votes, anchor_segment, opened_at_ms,
+    // options[{seq, votes, label}]) → editor Poll shape (total, anchor, t,
+    // options[{id, label, votes}]). Backend's `metadata.slide_n` is also
+    // surfaced so we can auto-place polls onto the first segment of that
+    // slide (Bug 2 — MIC's polls land on their declared slide; Rounds
+    // wasn't doing that on its own).
+    interface ApiPollOption { id: string; label: string; seq: number; votes: number }
+    interface ApiPoll {
+      id: string; question: string; status: 'open' | 'closed';
+      opened_at_ms: number; closed_at_ms: number | null;
+      total_votes: number; anchor_segment: string | null; placed: boolean;
+      options: ApiPollOption[]; metadata?: { slide_n?: number };
+    }
+    const slidesByIndex = new Map<number, string>();
+    SLIDES.value.forEach((sl) => slidesByIndex.set(sl.n, sl.id));
+    const firstSegBySlide = new Map<string, string>();
+    SEGMENTS.value.forEach((seg) => {
+      if (seg.slide_id && !firstSegBySlide.has(seg.slide_id)) {
+        firstSegBySlide.set(seg.slide_id, seg.id);
+      }
+    });
+    function _inferAnchor(p: ApiPoll): string {
+      if (p.anchor_segment) return p.anchor_segment;
+      const slideN = p.metadata?.slide_n;
+      if (typeof slideN === 'number') {
+        const slideId = slidesByIndex.get(slideN);
+        if (slideId) {
+          const segId = firstSegBySlide.get(slideId);
+          if (segId) return segId;
+        }
+      }
+      return '';
+    }
+    POLLS.value = (po as unknown as ApiPoll[]).map((p): Poll => ({
+      id:       p.id,
+      anchor:   _inferAnchor(p),
+      t:        (p.opened_at_ms ?? 0) / 1000,
+      placed:   p.placed || !!_inferAnchor(p),
+      question: p.question,
+      options:  (p.options || []).map((o) => ({ id: o.id, label: o.label, votes: o.votes })),
+      total:    p.total_votes ?? 0,
+      status:   p.status,
+    }));
+    // Pre-populate the placement map so anchored chat/polls render in their
+    // segment positions on first load (otherwise placements is empty and
+    // anchorsBySegment shows nothing).
+    const initialPlacements: Record<string, string | null> = {};
+    CHAT.value.forEach((c) => { if (c.anchor) initialPlacements[c.id] = c.anchor; });
+    POLLS.value.forEach((p) => { if (p.anchor) initialPlacements[p.id] = p.anchor; });
+    placements.value = { ...placements.value, ...initialPlacements };
+
     DISCREPANCIES.value = di as Array<{ kind: string; meaningful: boolean; status: string }>;
     CORRECTIONS.value = co as Array<{ id: string; t: string; type: string; actor: string; seg: string; prior?: string | null; next?: string | null; note?: string | null }>;
   } finally {
@@ -426,16 +488,21 @@ async function onReassignSpeakerLive(segId: string, _beforeSpeakerId: string | n
     const sp = SPEAKERS_API.value.find((s) => s.id === afterSpeakerId);
     const idx = SEGMENTS.value.findIndex((s) => s.id === segId);
     if (idx >= 0 && sp) {
-      SEGMENTS.value[idx] = {
+      // splice() guarantees array-mutation reactivity even when the runtime
+      // is wrapping SEGMENTS in something other than a plain Proxy. Direct
+      // index assignment SHOULD also work but reports came in that the chip
+      // didn't update — splice is the belt-and-suspenders fix.
+      const updated: Segment = {
         ...SEGMENTS.value[idx]!,
-        speaker_id: sp.id,
-        speaker_name: sp.name,
+        speaker_id:    sp.id,
+        speaker_name:  sp.name,
         speaker_short: sp.short,
         speaker_color: sp.avatar_color ?? null,
-        speaker_role: sp.role,
+        speaker_role:  sp.role,
       };
+      SEGMENTS.value.splice(idx, 1, updated);
     }
-    toast.push('Speaker updated', { tone: 'success' });
+    toast.push(`Speaker → ${sp?.name || 'updated'}`, { tone: 'success' });
   } catch (e) {
     const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Speaker change failed';
     toast.push(msg, { tone: 'error' });
@@ -606,6 +673,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
         :slide-rail-mode="slideRailMode"
         :anchors-by-segment="anchorsBySegment as any"
         :live-speakers="SPEAKERS_API"
+        :live-slides="SLIDES"
         @segment-click="onSegmentClick"
         @word-click="onWordClick"
         @clear-focus="focusedSlideId = null"
@@ -658,6 +726,8 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
           :collapsed="activeSlideCollapsed"
           :time="time"
           :total-duration="TOTAL_DURATION"
+          :live-slides="SLIDES"
+          :live-segments="SEGMENTS"
           @toggle="activeSlideCollapsed = !activeSlideCollapsed"
         />
         <div class="rightrail__tabs" role="tablist">

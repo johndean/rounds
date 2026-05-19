@@ -10,11 +10,12 @@ import Icon from '@/components/shared/Icon.vue';
 import SegmentText from '@/components/editor/SegmentText.vue';
 import AnchorBlock from '@/components/editor/AnchorBlock.vue';
 import {
-  SLIDES,
+  SLIDES as FIXTURE_SLIDES,
   SPEAKERS,
   slideAccent,
-  slideById,
+  slideById as fixtureSlideById,
   speakerDisplay,
+  type Slide,
   type Segment,
   type SpeakerKey,
   type SpeakerDisplay,
@@ -44,7 +45,31 @@ const props = defineProps<{
   // the fixture 3-speaker dict. EditorView passes this from the
   // /v1/sessions/{id}/speakers endpoint.
   liveSpeakers?: readonly LiveSpeaker[];
+  // When present, slide title/number lookups use real session slides instead
+  // of the fixture 24-slide list. Required for segments with real DB UUIDs;
+  // without it every segment shows "Unassigned" in the header.
+  liveSlides?: readonly Slide[];
 }>();
+
+// Build a lookup keyed by slide UUID using real session slides when supplied,
+// falling back to the fixture map for the demo/fixture-only path.
+const slidesById = computed<Map<string, Slide>>(() => {
+  const m = new Map<string, Slide>();
+  if (props.liveSlides && props.liveSlides.length) {
+    props.liveSlides.forEach((s) => m.set(s.id, s));
+  } else {
+    FIXTURE_SLIDES.forEach((s) => m.set(s.id, s));
+  }
+  return m;
+});
+function slideById(slideId: string | null | undefined): Slide | undefined {
+  if (!slideId) return undefined;
+  return slidesById.value.get(slideId) ?? fixtureSlideById(slideId);
+}
+const slidesForReassign = computed<readonly Slide[]>(() => {
+  if (props.liveSlides && props.liveSlides.length) return props.liveSlides;
+  return FIXTURE_SLIDES;
+});
 
 const emit = defineEmits<{
   (e: 'segmentClick', id: string): void;
@@ -375,7 +400,7 @@ function rows(): number {
               class="segment-reassign"
             >
               <button
-                v-for="sl in SLIDES"
+                v-for="sl in slidesForReassign"
                 :key="sl.id"
                 :class="['segment-reassign__tile', sl.id === seg.slide_id ? 'is-current' : '']"
                 @click.stop="saveReassign(seg, sl.id)"
