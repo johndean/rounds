@@ -109,7 +109,7 @@ function exportCsv(): void {
       >No active decisions.</div>
     </div>
     <div v-else class="audit-tab__body audit-tab__body--ledger">
-      <AuditLedger />
+      <AuditLedger :corrections="corrections" />
     </div>
   </section>
 </template>

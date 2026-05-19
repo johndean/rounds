@@ -7,6 +7,7 @@
 import { computed } from 'vue';
 import { type Slide, type Segment } from '@/fixtures/transcript';
 import { fmtTime } from '@/utils/editorHelpers';
+import { wordDiff, diffToHtml } from '@/utils/wordDiff';
 
 interface DecisionCardCorrection {
   id: string;
@@ -44,18 +45,19 @@ const pill = computed<Pill>(() => {
   }
 });
 
-function escapeRe(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
+// text_edit corrections store the FULL old/new segment text. Compute a
+// token-level diff so only the changed words get strikethrough / highlight,
+// not the entire paragraph.
+const textEditDiff = computed(() => {
+  const c = props.c;
+  if (c.type !== 'text_edit') return null;
+  return wordDiff(c.prior ?? '', c.next ?? '');
+});
 
 const wasHtml = computed(() => {
   const c = props.c;
-  if (c.type === 'text_edit' && seg.value && c.next) {
-    let was = seg.value.text;
-    try {
-      was = was.replace(new RegExp(`(${escapeRe(c.next)})`, 'i'), `<s class="dc-was-strike">${c.prior ?? ''}</s>`);
-    } catch (_) { /* noop */ }
-    return `<p>${was}</p>`;
+  if (c.type === 'text_edit' && textEditDiff.value) {
+    return `<p>${diffToHtml(textEditDiff.value.was, 'dc-was-strike', 'dc-now-mark')}</p>`;
   }
   if (c.type === 'chat_insert') return '<p><s class="dc-was-strike">(none)</s></p>';
   if (c.type === 'slide_reassignment')   return `<p>Slide <s class="dc-was-strike">${c.prior ?? ''}</s></p>`;
@@ -66,12 +68,8 @@ const wasHtml = computed(() => {
 
 const nowHtml = computed(() => {
   const c = props.c;
-  if (c.type === 'text_edit' && seg.value && c.next) {
-    let now = seg.value.text;
-    try {
-      now = now.replace(new RegExp(`(${escapeRe(c.next)})`, 'i'), `<mark class="dc-now-mark">${c.next}</mark>`);
-    } catch (_) { /* noop */ }
-    return `<p>${now}</p>`;
+  if (c.type === 'text_edit' && textEditDiff.value) {
+    return `<p>${diffToHtml(textEditDiff.value.now, 'dc-was-strike', 'dc-now-mark')}</p>`;
   }
   if (c.type === 'chat_insert') {
     const parts = c.actor.split(/[. ]/);
