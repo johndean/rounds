@@ -18,14 +18,11 @@ import { computed, ref } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
 import SegmentText from '@/components/editor/SegmentText.vue';
 import {
-  SEGMENTS as FIXTURE_SEGMENTS,
   slideAccent,
-  slideById as fixtureSlideById,
   speakerDisplay,
   type Segment,
   type Slide,
 } from '@/fixtures/transcript';
-import { DISCREPANCIES as FIXTURE_DISCREPANCIES, type Discrepancy } from '@/fixtures/audit';
 import type { DiscrepancyRow, WordRow } from '@/services/api';
 import { withAlpha, fmtTime } from '@/utils/editorHelpers';
 import { toast } from '@/composables/useToast';
@@ -34,8 +31,6 @@ const props = defineProps<{
   activeSegmentId: string | null | undefined;
   focusedSlideId: string | null;
   slideRailMode: 'focus' | 'filter';
-  // Live (real-session) data. When all three are present and non-empty,
-  // the pane renders from real data. Absence = fixture-demo path.
   liveSegments?: readonly Segment[];
   liveSlides?: readonly Slide[];
   liveDiscrepancies?: readonly DiscrepancyRow[];
@@ -49,24 +44,17 @@ const emit = defineEmits<{
 
 const mode = ref<'all' | 'flagged' | 'meaningful'>('flagged');
 
-// ─── Path selector ──────────────────────────────────────────────────────
-const isLive = computed(() => !!(props.liveSegments && props.liveSegments.length));
-
-// ─── Source data (live or fixture) ──────────────────────────────────────
-const segments = computed<readonly Segment[]>(
-  () => (isLive.value ? props.liveSegments! : FIXTURE_SEGMENTS),
-);
+// Real data only. No fixture fallback.
+const segments = computed<readonly Segment[]>(() => props.liveSegments ?? []);
 
 const slidesById = computed<Map<string, Slide>>(() => {
   const m = new Map<string, Slide>();
-  if (isLive.value && props.liveSlides) {
-    props.liveSlides.forEach((s) => m.set(s.id, s));
-  }
+  (props.liveSlides ?? []).forEach((s) => m.set(s.id, s));
   return m;
 });
 function slideById(slideId: string | null | undefined): Slide | undefined {
   if (!slideId) return undefined;
-  return slidesById.value.get(slideId) ?? fixtureSlideById(slideId);
+  return slidesById.value.get(slideId);
 }
 
 // Flagged segments (have at least one real or fixture discrepancy attached).
@@ -82,32 +70,18 @@ interface FlagInfo {
 
 const flagsBySeg = computed<Map<string, FlagInfo[]>>(() => {
   const m = new Map<string, FlagInfo[]>();
-  if (isLive.value) {
-    (props.liveDiscrepancies || []).forEach((d) => {
-      if (!d.segment_id) return;
-      const arr = m.get(d.segment_id) ?? [];
-      arr.push({
-        segmentId:  d.segment_id,
-        aiText:     d.ai_text,
-        sttText:    d.stt_text,
-        category:   d.category,
-        meaningful: d.is_meaningful,
-      });
-      m.set(d.segment_id, arr);
+  (props.liveDiscrepancies ?? []).forEach((d) => {
+    if (!d.segment_id) return;
+    const arr = m.get(d.segment_id) ?? [];
+    arr.push({
+      segmentId:  d.segment_id,
+      aiText:     d.ai_text,
+      sttText:    d.stt_text,
+      category:   d.category,
+      meaningful: d.is_meaningful,
     });
-  } else {
-    FIXTURE_DISCREPANCIES.forEach((d: Discrepancy) => {
-      const arr = m.get(d.seg) ?? [];
-      arr.push({
-        segmentId:  d.seg,
-        aiText:     d.base,
-        sttText:    d.stt,
-        category:   d.kind,
-        meaningful: d.meaningful,
-      });
-      m.set(d.seg, arr);
-    });
-  }
+    m.set(d.segment_id, arr);
+  });
   return m;
 });
 
@@ -120,15 +94,10 @@ const meaningfulSegmentIds = computed<Set<string>>(() => {
   return s;
 });
 
-const totalDiffs = computed(() =>
-  isLive.value ? (props.liveDiscrepancies?.length ?? 0) : FIXTURE_DISCREPANCIES.length,
+const totalDiffs = computed(() => props.liveDiscrepancies?.length ?? 0);
+const meaningfulCount = computed(
+  () => (props.liveDiscrepancies ?? []).filter((d) => d.is_meaningful === true).length,
 );
-const meaningfulCount = computed(() => {
-  if (isLive.value) {
-    return (props.liveDiscrepancies || []).filter((d) => d.is_meaningful === true).length;
-  }
-  return FIXTURE_DISCREPANCIES.filter((d) => d.meaningful).length;
-});
 
 const visibleSegments = computed<Segment[]>(() => {
   let pool: Segment[] = [...segments.value];
@@ -149,47 +118,19 @@ function _escapeRegex(s: string): string {
 }
 
 function renderSTT(seg: Segment): string {
-  const diffs = flagsBySeg.value.get(seg.id) || [];
-
-  // LIVE: real STT text comes from the words table; substitute nothing.
-  if (isLive.value) {
-    const ws = props.liveWords?.get(seg.id) || [];
-    let stt = ws.length
-      ? ws.map((w) => w.word.toLowerCase()).join(' ')
-      // No words yet (e.g. stt_background hasn't finished) — fall back to AI text
-      // so the comparison column isn't blank. Honest banner above will flag this.
-      : seg.text.toLowerCase().replace(/[.,;!?—–]/g, '');
-    // Highlight the stt_text fragment from each discrepancy (real LCS output).
-    let html = stt;
-    diffs.forEach((d) => {
-      if (!d.sttText) return;
-      const frag = _escapeRegex(d.sttText.toLowerCase());
-      try {
-        html = html.replace(new RegExp(`(${frag})`, 'i'), '<mark class="compare-diff">$1</mark>');
-      } catch (_) { /* noop */ }
-    });
-    return html;
-  }
-
-  // FIXTURE-DEMO path (unchanged from prototype).
-  let stt = seg.text.toLowerCase().replace(/[.,;!?—–]/g, '');
+  // Real STT text only. Joined from live words; no fixture path, no
+  // AI-text substitution. If no words exist for the segment yet, return
+  // empty string so the column is honestly blank rather than echoing AI.
+  const ws = props.liveWords?.get(seg.id) ?? [];
+  if (ws.length === 0) return '';
+  let html = ws.map((w) => w.word.toLowerCase()).join(' ');
+  const diffs = flagsBySeg.value.get(seg.id) ?? [];
   diffs.forEach((d) => {
-    if (d.category === 'drift' && d.aiText && d.sttText) {
-      const baseFrag = _escapeRegex(d.aiText.toLowerCase());
-      try {
-        stt = stt.replace(new RegExp(baseFrag, 'i'), d.sttText.toLowerCase());
-      } catch (_) { /* noop */ }
-    }
-  });
-  if (!diffs.length) return stt;
-  let html = stt;
-  diffs.forEach((d) => {
-    if (d.category === 'drift' && d.sttText) {
-      const sttFrag = _escapeRegex(d.sttText.toLowerCase());
-      try {
-        html = html.replace(new RegExp(`(${sttFrag})`, 'i'), '<mark class="compare-diff">$1</mark>');
-      } catch (_) { /* noop */ }
-    }
+    if (!d.sttText) return;
+    const frag = _escapeRegex(d.sttText.toLowerCase());
+    try {
+      html = html.replace(new RegExp(`(${frag})`, 'i'), '<mark class="compare-diff">$1</mark>');
+    } catch (_) { /* noop */ }
   });
   return html;
 }
@@ -232,9 +173,7 @@ function onSegReassign(seg: Segment): void {
       <button class="btn btn--tertiary btn--sm" @click="emit('clearFocus')">Clear filter</button>
     </div>
 
-    <!-- LIVE banner — clear about source -->
     <div
-      v-if="isLive"
       role="note"
       :style="{
         margin: '10px 18px 0', padding: '10px 14px',
@@ -247,7 +186,7 @@ function onSegReassign(seg: Segment): void {
       <span>
         <strong>Live data.</strong> {{ totalDiffs }} LCS-detected diffs from
         <code :style="{ background: 'rgba(255,255,255,0.08)', padding: '1px 5px', borderRadius: '2px' }">transcription_discrepancies</code>;
-        STT column joins real Google STT words per segment.
+        STT column joins real Google STT words per segment. No data shown anywhere is fabricated.
       </span>
     </div>
 

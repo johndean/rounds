@@ -5,20 +5,31 @@
  * for text_edit, chat_insert, slide/speaker reassignment, annotation_add.
  */
 import { computed } from 'vue';
-import type { Correction } from '@/fixtures/audit';
-import { SLIDES, type Segment } from '@/fixtures/transcript';
+import { type Slide, type Segment } from '@/fixtures/transcript';
 import { fmtTime } from '@/utils/editorHelpers';
 
+interface DecisionCardCorrection {
+  id: string;
+  t: string;
+  type: string;
+  actor: string;
+  seg: string;
+  prior?: string | null;
+  next?: string | null;
+  note?: string | null;
+}
+
 const props = defineProps<{
-  c: Correction;
+  c: DecisionCardCorrection;
   segmentsById: Map<string, Segment>;
   activeSegmentId: string | null | undefined;
+  liveSlides?: readonly Slide[];
 }>();
 
 const emit = defineEmits<{ (e: 'segmentClick', id: string): void }>();
 
 const seg = computed(() => props.segmentsById.get(props.c.seg));
-const slide = computed(() => (seg.value ? SLIDES.find((s) => s.id === seg.value!.slide_id) : null));
+const slide = computed(() => (seg.value ? (props.liveSlides ?? []).find((s) => s.id === seg.value!.slide_id) : null));
 const isActive = computed(() => seg.value && seg.value.id === props.activeSegmentId);
 
 interface Pill { label: string; tone: 'amber' | 'blue' }

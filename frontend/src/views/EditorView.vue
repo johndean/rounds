@@ -715,6 +715,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
         :stt-ready="sttReady"
         :stt-failed="sttFailed"
         :live-words="WORDS_BY_SEGMENT"
+        :live-slides="SLIDES"
         @segment-click="onSegmentClick"
         @word-click="onWordClick"
         @clear-focus="focusedSlideId = null"
@@ -735,6 +736,8 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
         v-else
         :session="auditSessionRef"
         :active-segment-id="activeSegment?.id"
+        :live-corrections="CORRECTIONS"
+        :live-segments="SEGMENTS"
         @segment-click="onSegmentClick"
       />
 
@@ -745,6 +748,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
         :time="time"
         :total-duration="TOTAL_DURATION"
         :segments="SEGMENTS"
+        :live-discrepancies="DISCREPANCIES"
       />
       <aside v-else class="rightrail" aria-label="Side panel" data-screen-label="Right Rail">
         <ActiveSlideCard

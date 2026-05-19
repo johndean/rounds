@@ -222,9 +222,11 @@ export function slideAccent(slideId: string | null | undefined): string {
 }
 export function slideById(slideId: string): Slide | undefined { return _slideByIdMap.get(slideId); }
 
-// Resolve a segment's speaker display info. Prefers real fields embedded by
-// EditorView.load (speaker_id/name/short/color/role) and falls back to the
-// fixture SPEAKERS dict so the demo / fixture-only paths still render.
+// Resolve a segment's speaker display info from the real fields embedded by
+// EditorView.load (speaker_id/name/short/color/role). Returns a neutral
+// "Unknown" placeholder when a segment carries no speaker info — no fixture
+// fallback. The SPEAKERS dict above is kept only for the static
+// prototype.html demo build and is not used at runtime by the editor.
 export function speakerDisplay(seg: Segment): SpeakerDisplay {
   if (seg.speaker_name || seg.speaker_short) {
     const color = seg.speaker_color
@@ -233,7 +235,5 @@ export function speakerDisplay(seg: Segment): SpeakerDisplay {
     const short = seg.speaker_short || (seg.speaker_name ? seg.speaker_name.split(/\s+/).slice(0, 2).join(' ') : 'Speaker');
     return { short, name, color, role: seg.speaker_role || '' };
   }
-  const sp = SPEAKERS[seg.speaker];
-  if (sp) return { short: sp.short, name: sp.name, color: sp.color, role: sp.role };
-  return { short: 'Speaker', name: 'Speaker', color: '#4D6995', role: '' };
+  return { short: 'Unknown', name: 'Unknown speaker', color: '#4D6995', role: '' };
 }

@@ -6,7 +6,7 @@
  */
 import { computed } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
-import { SLIDES as FIXTURE_SLIDES, SEGMENTS as FIXTURE_SEGMENTS, slideAccent, type Slide, type Segment } from '@/fixtures/transcript';
+import { slideAccent, type Slide, type Segment } from '@/fixtures/transcript';
 import { withAlpha } from '@/utils/editorHelpers';
 import { toast } from '@/composables/useToast';
 
@@ -16,19 +16,14 @@ const props = defineProps<{
   collapsed: boolean;
   time: number;
   totalDuration: number;
-  // Real session slides + segments for the minimap. Without these the
-  // minimap renders the fixture 24-slide timeline regardless of the real
-  // deck. Optional so the fixture/demo path still works.
+  // Real session slides + segments for the minimap. No fixture fallback —
+  // if absent, the minimap simply renders nothing.
   liveSlides?: readonly Slide[];
   liveSegments?: readonly Segment[];
 }>();
 
-const allSlides = computed<readonly Slide[]>(() =>
-  props.liveSlides && props.liveSlides.length ? props.liveSlides : FIXTURE_SLIDES
-);
-const allSegments = computed<readonly Segment[]>(() =>
-  props.liveSegments && props.liveSegments.length ? props.liveSegments : FIXTURE_SEGMENTS
-);
+const allSlides = computed<readonly Slide[]>(() => props.liveSlides ?? []);
+const allSegments = computed<readonly Segment[]>(() => props.liveSegments ?? []);
 
 const emit = defineEmits<{ (e: 'toggle'): void }>();
 

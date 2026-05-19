@@ -10,19 +10,14 @@ import Icon from '@/components/shared/Icon.vue';
 import SegmentText from '@/components/editor/SegmentText.vue';
 import AnchorBlock from '@/components/editor/AnchorBlock.vue';
 import {
-  SLIDES as FIXTURE_SLIDES,
-  SPEAKERS,
   slideAccent,
-  slideById as fixtureSlideById,
   speakerDisplay,
   type Slide,
   type Segment,
-  type SpeakerKey,
   type SpeakerDisplay,
 } from '@/fixtures/transcript';
 import type { ChatMessage, Poll } from '@/fixtures/chat_polls';
 import { fmtTime } from '@/utils/editorHelpers';
-import { toast } from '@/composables/useToast';
 
 type AnchorEntry = (ChatMessage & { kind: 'chat' }) | (Poll & { kind: 'poll' });
 
@@ -51,25 +46,19 @@ const props = defineProps<{
   liveSlides?: readonly Slide[];
 }>();
 
-// Build a lookup keyed by slide UUID using real session slides when supplied,
-// falling back to the fixture map for the demo/fixture-only path.
+// Real slides only — no fixture fallback. If liveSlides isn't passed, slide
+// lookups return undefined and the template falls back to "—" / "Unassigned"
+// labels, which is honest empty state.
 const slidesById = computed<Map<string, Slide>>(() => {
   const m = new Map<string, Slide>();
-  if (props.liveSlides && props.liveSlides.length) {
-    props.liveSlides.forEach((s) => m.set(s.id, s));
-  } else {
-    FIXTURE_SLIDES.forEach((s) => m.set(s.id, s));
-  }
+  (props.liveSlides ?? []).forEach((s) => m.set(s.id, s));
   return m;
 });
 function slideById(slideId: string | null | undefined): Slide | undefined {
   if (!slideId) return undefined;
-  return slidesById.value.get(slideId) ?? fixtureSlideById(slideId);
+  return slidesById.value.get(slideId);
 }
-const slidesForReassign = computed<readonly Slide[]>(() => {
-  if (props.liveSlides && props.liveSlides.length) return props.liveSlides;
-  return FIXTURE_SLIDES;
-});
+const slidesForReassign = computed<readonly Slide[]>(() => props.liveSlides ?? []);
 
 const emit = defineEmits<{
   (e: 'segmentClick', id: string): void;
@@ -86,7 +75,7 @@ interface InlineEdit {
   segId: string;
   mode: 'edit' | 'reassign' | 'speaker';
   draft?: string;
-  draftSpeaker?: SpeakerKey;
+  draftSpeakerId?: string;
   history?: string[];
   redo?: string[];
 }
@@ -130,7 +119,7 @@ function startReassign(seg: Segment): void {
   inline.value = { segId: seg.id, mode: 'reassign' };
 }
 function startSpeaker(seg: Segment): void {
-  inline.value = { segId: seg.id, mode: 'speaker', draftSpeaker: seg.speaker };
+  inline.value = { segId: seg.id, mode: 'speaker', draftSpeakerId: seg.speaker_id ?? undefined };
 }
 function closeInline(): void { inline.value = null; }
 
@@ -152,11 +141,6 @@ function saveReassign(seg: Segment, slideId: string): void {
   if (slideId !== seg.slide_id) {
     emit('reassignSegment', seg.id, seg.slide_id, slideId);
   }
-  closeInline();
-}
-function saveSpeaker(_seg: Segment, _speakerKey: SpeakerKey): void {
-  // Fixture-only path (no live speakers in session) — no real id to persist.
-  toast.push('Fixture speakers are demo-only — upload a manifest with a Bio block to enable speaker reassignment.', { tone: 'warn' });
   closeInline();
 }
 function saveSpeakerLive(seg: Segment, speakerId: string): void {
@@ -260,27 +244,24 @@ function onDrop(e: DragEvent, segId: string): void {
 }
 
 interface SpeakerPickRow {
-  key: string;                   // pick id (real UUID or fixture key)
+  key: string;                   // real speaker UUID
   short: string;
   name: string;
   color: string;
   role: string;
-  isLive: boolean;               // true → real UUID; false → fixture key
 }
 
 function speakersList(): SpeakerPickRow[] {
-  if (props.liveSpeakers && props.liveSpeakers.length) {
-    return props.liveSpeakers.map((s, i): SpeakerPickRow => ({
-      key:   s.id,
-      short: s.short || s.name || 'Speaker',
-      name:  s.name  || s.short || 'Speaker',
-      color: s.avatar_color || ['#2563eb', '#7c3aed', '#059669', '#d97706', '#dc2626', '#0891b2', '#6366f1', '#ea580c', '#0d9488', '#be185d'][i % 10]!,
-      role:  s.role  || '',
-      isLive: true,
-    }));
-  }
-  return (Object.entries(SPEAKERS) as Array<[SpeakerKey, typeof SPEAKERS[SpeakerKey]]>).map(([key, sp]): SpeakerPickRow => ({
-    key, short: sp.short, name: sp.name, color: sp.color, role: sp.role, isLive: false,
+  // Real session speakers only — no fixture fallback. If a session has no
+  // speakers attached (manifest parse produced none and AI mode didn't
+  // detect any), the picker just shows an empty list and the operator can
+  // add a speaker via Settings → Team & roles or the SpeakersPanel.
+  return (props.liveSpeakers ?? []).map((s, i): SpeakerPickRow => ({
+    key:   s.id,
+    short: s.short || s.name || 'Speaker',
+    name:  s.name  || s.short || 'Speaker',
+    color: s.avatar_color || ['#2563eb', '#7c3aed', '#059669', '#d97706', '#dc2626', '#0891b2', '#6366f1', '#ea580c', '#0d9488', '#be185d'][i % 10]!,
+    role:  s.role  || '',
   }));
 }
 
@@ -421,8 +402,8 @@ function rows(): number {
               <button
                 v-for="row in speakersList()"
                 :key="row.key"
-                :class="['segment-speakerpick__tile', row.key === (seg.speaker_id || inline.draftSpeaker) ? 'is-current' : '']"
-                @click.stop="row.isLive ? saveSpeakerLive(seg, row.key) : saveSpeaker(seg, row.key as SpeakerKey)"
+                :class="['segment-speakerpick__tile', row.key === (seg.speaker_id || inline.draftSpeakerId) ? 'is-current' : '']"
+                @click.stop="saveSpeakerLive(seg, row.key)"
               >
                 <span class="segment-speakerpick__avatar" :style="{ background: row.color }">{{ speakerInitials(row.short) }}</span>
                 <div>

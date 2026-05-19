@@ -9,30 +9,44 @@ import { RouterLink } from 'vue-router';
 import Icon from '@/components/shared/Icon.vue';
 import DecisionCard from '@/components/editor/DecisionCard.vue';
 import AuditLedger from '@/components/audit/AuditLedger.vue';
-import { CORRECTIONS } from '@/fixtures/audit';
-import { SEGMENTS, type Segment } from '@/fixtures/transcript';
+import { type Segment } from '@/fixtures/transcript';
 import { toast } from '@/composables/useToast';
 
-defineProps<{
+interface CorrectionRow {
+  id: string;
+  t: string;
+  type: string;
+  actor: string;
+  seg: string;
+  prior?: string | null;
+  next?: string | null;
+  note?: string | null;
+}
+
+const props = defineProps<{
   session: { id: string };
   activeSegmentId: string | null | undefined;
+  liveCorrections?: readonly CorrectionRow[];
+  liveSegments?: readonly Segment[];
 }>();
 
 const emit = defineEmits<{ (e: 'segmentClick', id: string): void }>();
 
 const view = ref<'decisions' | 'ledger'>('decisions');
 
+const corrections = computed<readonly CorrectionRow[]>(() => props.liveCorrections ?? []);
+
 const segmentsById = computed<Map<string, Segment>>(() => {
   const m = new Map<string, Segment>();
-  SEGMENTS.forEach((s) => m.set(s.id, s));
+  (props.liveSegments ?? []).forEach((s) => m.set(s.id, s));
   return m;
 });
 
 const decisionTypes = new Set(['text_edit', 'chat_insert', 'slide_reassignment', 'speaker_reassignment', 'annotation_add']);
-const decisions = computed(() => CORRECTIONS.filter((c) => decisionTypes.has(c.type)).slice().reverse());
+const decisions = computed(() => corrections.value.filter((c) => decisionTypes.has(c.type)).slice().reverse());
 
 function exportCsv(): void {
-  const csv = CORRECTIONS
+  const csv = corrections.value
     .map((e) => `${e.t},${e.actor},${e.type},"${e.note ?? ''}"`)
     .join('\n') + '\n';
   const blob = new Blob([csv], { type: 'text/csv' });
@@ -50,7 +64,7 @@ function exportCsv(): void {
   <section class="audit-tab" data-screen-label="Audit · Decisions">
     <div class="audit-tab__toolbar">
       <div class="audit-tab__count">
-        <strong>{{ view === 'decisions' ? decisions.length : CORRECTIONS.length }}</strong>
+        <strong>{{ view === 'decisions' ? decisions.length : corrections.length }}</strong>
         {{ view === 'decisions' ? ' active decisions' : ' ledger rows' }}
       </div>
       <div class="audit-tab__flags">

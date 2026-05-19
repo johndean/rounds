@@ -6,12 +6,11 @@
  */
 import { computed, watch, nextTick, useTemplateRef } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
-import { slideAccent, slideById, type Segment } from '@/fixtures/transcript';
-import { DISCREPANCIES } from '@/fixtures/audit';
+import { slideAccent, type Segment, type Slide } from '@/fixtures/transcript';
 import type { WordRow } from '@/services/api';
 import { withAlpha, fmtTime } from '@/utils/editorHelpers';
 
-interface Token { kind: 'filler' | 'drift' | null; text: string; t: number; confidence?: number; }
+interface Token { kind: null; text: string; t: number; confidence?: number; }
 
 const props = withDefaults(defineProps<{
   segments: readonly Segment[];
@@ -25,23 +24,30 @@ const props = withDefaults(defineProps<{
   // standard / enhanced pipelines that finish STT before the editor opens.
   sttReady?: boolean;
   sttFailed?: boolean;
-  // Real Google STT data grouped by segment_id. When this Map has entries
-  // for the active segments, STTPane renders real per-word tokens with
-  // real timestamps + confidence (no fake fillers, no fixture drift).
-  // Falls through to the fixture demo path when the Map is empty/undefined.
+  // Real Google STT data grouped by segment_id. Map of segment_id → WordRow[].
   liveWords?: Map<string, WordRow[]>;
+  // Real session slides for the slide chip lookup. No fixture fallback.
+  liveSlides?: readonly Slide[];
 }>(), {
   sttReady: true,
   sttFailed: false,
   liveWords: () => new Map(),
 });
 
-// True when we have any real STT word rows attached to current segments.
-// Drives the entire fakes-vs-real decision below.
 const hasLiveWords = computed<boolean>(() => {
   if (!props.liveWords || props.liveWords.size === 0) return false;
   return props.segments.some((s) => (props.liveWords!.get(s.id)?.length ?? 0) > 0);
 });
+
+const slidesById = computed<Map<string, Slide>>(() => {
+  const m = new Map<string, Slide>();
+  (props.liveSlides ?? []).forEach((s) => m.set(s.id, s));
+  return m;
+});
+function slideById(id: string | null | undefined): Slide | undefined {
+  if (!id) return undefined;
+  return slidesById.value.get(id);
+}
 
 const emit = defineEmits<{
   (e: 'segmentClick', id: string): void;
@@ -58,61 +64,29 @@ const visible = computed<Segment[]>(() => {
   return [...props.segments];
 });
 
+// Real-only token map. No fixture path. No fake fillers. No invented drift.
+// If liveWords is empty for a segment, the segment shows no tokens — the
+// banner above explains why ("STT not done yet" / "no words extracted").
 const sttBySegId = computed<Map<string, Token[]>>(() => {
   const m = new Map<string, Token[]>();
-  // ─── REAL path: render actual Google STT tokens ───────────────────────
-  if (hasLiveWords.value) {
-    props.segments.forEach((seg) => {
-      const ws = props.liveWords!.get(seg.id) || [];
-      m.set(seg.id, ws.map((w): Token => ({
-        kind: null,
-        text: w.word.toLowerCase(),
-        t:    +(w.start_ms / 1000).toFixed(2),
-        confidence: w.confidence,
-      })));
-    });
-    return m;
-  }
-  // ─── FIXTURE-DEMO path: prototype with hardcoded fillers + fixture drift.
-  // Only reached when liveWords is empty AND we're on the fixture seg ids
-  // (live sessions with no STT yet show the spinner / "no words" banner
-  // below, so we don't fall through here for them).
-  const drift = new Map(DISCREPANCIES.map((d) => [d.seg, d]));
-  const fillers = ['um', 'uh', 'you know', 'like'];
-  props.segments.forEach((seg, i) => {
-    const words = seg.text.toLowerCase().replace(/[.,;!?—–]/g, '').split(/\s+/);
-    const tokens: Token[] = [];
-    const dur = Math.max(0.1, seg.end - seg.start);
-    const perWord = dur / words.length;
-    const drow = drift.get(seg.id);
-    if (i % 4 === 0) {
-      tokens.push({ kind: 'filler', text: fillers[i % fillers.length]!, t: seg.start });
-    }
-    words.forEach((w, j) => {
-      let kind: Token['kind'] = null;
-      let text = w;
-      if (drow && drow.kind === 'drift') {
-        const baseFirstWord = drow.base.toLowerCase().split(/\s+/)[0];
-        if (w === baseFirstWord) {
-          text = drow.stt.toLowerCase().split(/\s+/).join(' ');
-          kind = 'drift';
-        }
-      }
-      tokens.push({ kind, text, t: +(seg.start + j * perWord).toFixed(2) });
-    });
-    m.set(seg.id, tokens);
+  props.segments.forEach((seg) => {
+    const ws = props.liveWords?.get(seg.id) ?? [];
+    m.set(seg.id, ws.map((w): Token => ({
+      kind: null,
+      text: w.word.toLowerCase(),
+      t:    +(w.start_ms / 1000).toFixed(2),
+      confidence: w.confidence,
+    })));
   });
   return m;
 });
 
-// True when we're on a live session (real UUID segments) but no STT words
-// arrived yet. Used to render an honest "STT not available" banner instead
-// of falling through to the fixture-demo fake-filler render.
-const isLiveSessionWithoutWords = computed<boolean>(() => {
-  if (hasLiveWords.value) return false;
-  if (!props.segments.length) return false;
-  return !/^seg_\d{3}$/.test(props.segments[0]!.id);
-});
+// True when there are segments but no STT words on any of them — STT
+// hasn't run / hasn't finished / produced nothing. Drives the "no data"
+// banner instead of rendering empty rows silently.
+const isSessionWithoutWords = computed<boolean>(
+  () => props.segments.length > 0 && !hasLiveWords.value,
+);
 
 watch(
   () => props.activeSegmentId,
@@ -129,23 +103,16 @@ watch(
   }
 );
 
-interface TokenView { kind: Token['kind']; text: string; t: number; cls: string; idx: number; }
+interface TokenView { text: string; t: number; cls: string; idx: number; }
 
 function buildTokenViews(seg: Segment): TokenView[] {
   const tokens = sttBySegId.value.get(seg.id) || [];
   const out: TokenView[] = [];
   const isActive = seg.id === props.activeSegmentId;
-  let nonFillerCount = -1;
-  tokens.forEach((tok) => {
-    if (tok.kind === 'filler') {
-      out.push({ ...tok, cls: 'stt-token stt-token--filler', idx: -1 });
-      return;
-    }
-    nonFillerCount++;
+  tokens.forEach((tok, idx) => {
     const cls = ['stt-token'];
-    if (tok.kind === 'drift') cls.push('stt-token--drift');
-    if (isActive && nonFillerCount === props.activeWordIdx) cls.push('is-current');
-    out.push({ ...tok, cls: cls.join(' '), idx: nonFillerCount });
+    if (isActive && idx === props.activeWordIdx) cls.push('is-current');
+    out.push({ text: tok.text, t: tok.t, cls: cls.join(' '), idx });
   });
   return out;
 }
@@ -154,15 +121,11 @@ function segCls(seg: Segment): string {
   return seg.id === props.activeSegmentId ? 'stt-segment is-active' : 'stt-segment';
 }
 function confLabel(seg: Segment): string {
-  // Real per-segment average confidence when we have live STT words.
-  if (hasLiveWords.value) {
-    const ws = props.liveWords!.get(seg.id) || [];
-    if (ws.length === 0) return 'conf —';
-    const avg = ws.reduce((a, w) => a + w.confidence, 0) / ws.length;
-    return `conf ${avg.toFixed(2)}`;
-  }
-  // Fixture-demo fallback: deterministic-by-index value (cosmetic, demo only).
-  return seg.confidence === 'low' ? 'conf 0.61' : `conf 0.${82 + (seg.idx % 14)}`;
+  // Real per-segment average confidence only. No invented values.
+  const ws = props.liveWords?.get(seg.id) ?? [];
+  if (ws.length === 0) return 'conf —';
+  const avg = ws.reduce((a, w) => a + w.confidence, 0) / ws.length;
+  return `conf ${avg.toFixed(2)}`;
 }
 function confSecondStyle(accent: string): Record<string, string> {
   return { fontFamily: 'var(--font-mono)', color: accent, borderColor: withAlpha(accent, '44') };
@@ -216,11 +179,9 @@ function confSecondStyle(accent: string): Record<string, string> {
 
     <template v-else>
 
-    <!-- LIVE-SESSION WITHOUT WORDS: stt_background hasn't produced rows yet
-         (or was killed by a worker restart). Show an honest "no STT data"
-         banner instead of rendering fake fillers and AI-text-as-STT. -->
+    <!-- Two real states only: words present or no words. No fixture demo. -->
     <div
-      v-if="isLiveSessionWithoutWords"
+      v-if="isSessionWithoutWords"
       class="stt-pane__banner"
       role="note"
       :style="{ background: 'rgba(217,119,6,0.10)', borderColor: 'rgba(217,119,6,0.4)', color: 'var(--color-amber)' }"
@@ -229,16 +190,13 @@ function confSecondStyle(accent: string): Record<string, string> {
       <div>
         <strong>No STT words for this session yet.</strong>
         Google STT runs in <code :style="{ background: 'rgba(255,255,255,0.08)', padding: '1px 5px', borderRadius: '2px' }">stt_background_task</code>
-        after AI-mode upload. If you're seeing this on a session that finished a while ago, the worker may have
-        been restarted mid-run. Re-upload the session or wait for stt_background to retry.
+        after AI-mode upload. If the worker was restarted mid-run, re-upload the session or wait for stt_background to retry.
       </div>
       <span class="chip" :style="{ background: 'rgba(217,119,6,0.18)', color: '#fff', borderColor: 'rgba(217,119,6,0.5)' }">no data</span>
     </div>
 
-    <!-- LIVE WORDS PRESENT: render real Google STT tokens, real timestamps,
-         real per-segment confidence. Banner reflects truth. -->
     <div
-      v-else-if="hasLiveWords"
+      v-else
       class="stt-pane__banner"
       role="note"
       :style="{ background: 'rgba(0,125,97,0.10)', borderColor: 'rgba(0,125,97,0.4)', color: 'var(--color-green)' }"
@@ -252,19 +210,6 @@ function confSecondStyle(accent: string): Record<string, string> {
         and never participate in correction lineage.
       </div>
       <span class="chip" :style="{ background: 'rgba(0,125,97,0.18)', color: '#fff', borderColor: 'rgba(0,125,97,0.5)' }">live</span>
-    </div>
-
-    <!-- FIXTURE-DEMO path (prototype.html): original blue banner kept verbatim. -->
-    <div v-else class="stt-pane__banner" role="note">
-      <Icon name="alert" :size="16" />
-      <div>
-        <strong>STT reference · orthogonal pipeline.</strong> Raw Google STT tokens used only for playback
-        synchronization, word highlighting, and discrepancy classification. These tokens <em>never</em> appear
-        in <code :style="{ background: 'rgba(255,255,255,0.08)', padding: '1px 5px', borderRadius: '2px' }">base_text</code>,
-        never participate in correction lineage, and are never user-editable.
-        Verified by pipeline-isolation test · L2.
-      </div>
-      <span class="chip" :style="{ background: 'rgba(0,151,169,0.18)', color: '#fff', borderColor: 'rgba(0,151,169,0.5)' }">read-only</span>
     </div>
 
     <div
@@ -294,14 +239,12 @@ function confSecondStyle(accent: string): Record<string, string> {
         </span>
       </div>
       <div class="stt-segment__main">
-        <template v-for="(tok, i) in buildTokenViews(seg)" :key="i">
-          <span v-if="tok.kind === 'filler'" :class="tok.cls">[{{ tok.text }}]&nbsp;</span>
-          <span
-            v-else
-            :class="tok.cls"
-            @click.stop="emit('wordClick', seg.id, tok.idx)"
-          >{{ tok.text }}<span class="t">{{ tok.t.toFixed(1) }}</span>{{ ' ' }}</span>
-        </template>
+        <span
+          v-for="(tok, i) in buildTokenViews(seg)"
+          :key="i"
+          :class="tok.cls"
+          @click.stop="emit('wordClick', seg.id, tok.idx)"
+        >{{ tok.text }}<span class="t">{{ tok.t.toFixed(1) }}</span>{{ ' ' }}</span>
       </div>
     </article>
 

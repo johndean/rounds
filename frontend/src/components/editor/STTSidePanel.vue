@@ -7,19 +7,22 @@
 import { computed } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
 import type { Segment } from '@/fixtures/transcript';
-import { DISCREPANCIES } from '@/fixtures/audit';
+import type { DiscrepancyRow } from '@/services/api';
 import { fmtTime } from '@/utils/editorHelpers';
 
 const props = defineProps<{
   time: number;
   totalDuration: number;
   segments: readonly Segment[];
+  // Real per-word LCS diffs from transcription_discrepancies. Categories
+  // power the Token Distribution counts. No fixture fallback.
+  liveDiscrepancies?: readonly DiscrepancyRow[];
 }>();
 
-const driftCount    = computed(() => DISCREPANCIES.filter((d) => d.kind === 'drift').length);
-const punctCount    = computed(() => DISCREPANCIES.filter((d) => d.kind === 'punctuation').length);
-const fillerCount   = computed(() => DISCREPANCIES.filter((d) => d.kind === 'filler').length);
-const lowConfCount  = computed(() => DISCREPANCIES.filter((d) => d.kind === 'low_confidence').length);
+const driftCount    = computed(() => (props.liveDiscrepancies ?? []).filter((d) => d.category === 'drift').length);
+const punctCount    = computed(() => (props.liveDiscrepancies ?? []).filter((d) => d.category === 'punctuation').length);
+const fillerCount   = computed(() => (props.liveDiscrepancies ?? []).filter((d) => d.category === 'filler').length);
+const lowConfCount  = computed(() => (props.liveDiscrepancies ?? []).filter((d) => d.category === 'low_confidence').length);
 </script>
 
 <template>
