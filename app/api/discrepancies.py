@@ -1,13 +1,22 @@
 """
-/v1/sessions/{session_id}/discrepancies — list + resolve discrepancies.
-Editor Discrepancies tab (IMPLEMENTATION.md §6).
+/v1/sessions/{session_id}/discrepancies — list LCS-detected diffs between
+AI normalized text and raw STT, classified as meaningful vs noise by the
+classify task.
+
+Reads from `transcription_discrepancies` (the table lcs_discrepancies_task
+writes to and classify_task updates). Earlier the endpoint pointed at the
+unused `discrepancies` table and always returned [] — see PR/commit history
+for the audit trail.
+
+Shape mirrors MIC `app/api/discrepancies.py:26-93` so the editor can render
+the side-by-side AI ↔ STT comparison from the same response contract.
 """
 from __future__ import annotations
 
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel
 from sqlalchemy import text
 
@@ -18,46 +27,85 @@ router = APIRouter(prefix="/v1/sessions/{session_id}/discrepancies", tags=["disc
 
 
 class DiscrepancyOut(BaseModel):
-    id: UUID
-    segment_id: Optional[UUID]
-    slide_id: Optional[UUID]
-    kind: str
-    severity: str
-    ai_text: Optional[str]
-    stt_text: Optional[str]
-    is_resolved: bool
+    id:               UUID
+    segment_id:       Optional[UUID]
+    ai_text:          Optional[str]
+    stt_text:         Optional[str]
+    category:         Optional[str]
+    is_meaningful:    Optional[bool]
+    classifier_model: Optional[str]
+    classified_at:    Optional[str]
+    created_at:       Optional[str]
 
 
-@router.get("", response_model=list[DiscrepancyOut])
-async def list_discrepancies(session_id: UUID, db: DbSession, _u: CurrentUser,
-                              kind: Optional[str] = None, severity: Optional[str] = None,
-                              open_only: bool = False) -> list[dict]:
-    where, params = ["session_id = :s"], {"s": str(session_id)}
-    if kind:
-        where.append("kind = :k"); params["k"] = kind
-    if severity:
-        where.append("severity = :sev"); params["sev"] = severity
-    if open_only:
-        where.append("is_resolved = FALSE")
+class DiscrepancyListResponse(BaseModel):
+    session_id:            UUID
+    count:                 int
+    classified_count:      int
+    classification_status: str  # 'complete' | 'partial' | 'pending'
+    discrepancies:         list[DiscrepancyOut]
+
+
+@router.get("", response_model=DiscrepancyListResponse)
+async def list_discrepancies(
+    session_id: UUID,
+    db: DbSession,
+    _u: CurrentUser,
+    category: Optional[str] = None,
+    meaningful_only: bool = False,
+) -> dict:
+    """
+    Return all per-segment LCS diffs for this session. Optional filters:
+      - category: medication | terminology | filler | punctuation | drift | low_confidence | other
+      - meaningful_only: true → exclude rows where is_meaningful = false (noise)
+
+    Each row carries the AI fragment (ai_text), the raw STT fragment (stt_text),
+    the classifier's category + meaningful flag, and segment_id so the editor
+    can anchor the side-by-side render to a specific segment.
+    """
+    where, params = ["session_id = CAST(:s AS uuid)"], {"s": str(session_id)}
+    if category:
+        where.append("category = :cat"); params["cat"] = category
+    if meaningful_only:
+        where.append("is_meaningful = TRUE")
+
     rows = (await db.execute(text(
-        "SELECT id, segment_id, slide_id, kind, severity, ai_text, stt_text, is_resolved "
-        f"FROM discrepancies WHERE {' AND '.join(where)} ORDER BY created_at DESC"
+        "SELECT id, segment_id, ai_text, stt_text, category, is_meaningful, "
+        "       classifier_model, classified_at, created_at "
+        "FROM transcription_discrepancies "
+        f"WHERE {' AND '.join(where)} "
+        "ORDER BY created_at ASC"
     ), params)).mappings().all()
-    return [dict(r) for r in rows]
 
+    out_rows = [
+        {
+            "id":               r["id"],
+            "segment_id":       r["segment_id"],
+            "ai_text":          r["ai_text"],
+            "stt_text":         r["stt_text"],
+            "category":         r["category"],
+            "is_meaningful":    r["is_meaningful"],
+            "classifier_model": r["classifier_model"],
+            "classified_at":    r["classified_at"].isoformat() if r["classified_at"] else None,
+            "created_at":       r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+    total = len(out_rows)
+    classified = sum(1 for r in out_rows if r["is_meaningful"] is not None)
+    if total == 0:
+        status_label = "complete"
+    elif classified == total:
+        status_label = "complete"
+    elif classified > 0:
+        status_label = "partial"
+    else:
+        status_label = "pending"
 
-@router.post("/{discrepancy_id}/resolve", response_model=DiscrepancyOut)
-async def resolve(session_id: UUID, discrepancy_id: UUID, db: DbSession, user: CurrentUser) -> dict:
-    row = (await db.execute(text(
-        "UPDATE discrepancies SET is_resolved = TRUE, resolved_by = :a, resolved_at = now() "
-        "WHERE id = :id AND session_id = :s "
-        "RETURNING id, segment_id, slide_id, kind, severity, ai_text, stt_text, is_resolved"
-    ), {"id": str(discrepancy_id), "s": str(session_id), "a": user.email})).mappings().first()
-    if not row:
-        raise HTTPException(status_code=404, detail="Discrepancy not found")
-    await db.execute(text(
-        "INSERT INTO audit_events (session_id, actor_email, kind, summary) "
-        "VALUES (:s, :a, 'discrepancy.resolve', :sum)"
-    ), {"s": str(session_id), "a": user.email, "sum": f"resolved {discrepancy_id}"})
-    await db.commit()
-    return dict(row)
+    return {
+        "session_id":            session_id,
+        "count":                 total,
+        "classified_count":      classified,
+        "classification_status": status_label,
+        "discrepancies":         out_rows,
+    }

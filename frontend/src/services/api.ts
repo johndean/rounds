@@ -156,6 +156,35 @@ export interface SessionSpeaker {
   avatar_color?: string | null;
 }
 
+// ─── Discrepancies (LCS-detected AI ↔ STT diffs, classified by Gemini) ──
+export interface DiscrepancyRow {
+  id:               string;
+  segment_id:       string | null;
+  ai_text:          string | null;
+  stt_text:         string | null;
+  category:         string | null;   // medication | terminology | filler | punctuation | drift | low_confidence | other
+  is_meaningful:    boolean | null;  // null until classify runs
+  classifier_model: string | null;
+  classified_at:    string | null;
+  created_at:       string | null;
+}
+
+export interface DiscrepancyListResponse {
+  session_id:            string;
+  count:                 number;
+  classified_count:      number;
+  classification_status: 'complete' | 'partial' | 'pending';
+  discrepancies:         DiscrepancyRow[];
+}
+
+export const discrepancies = {
+  list: (sessionId: string, opts: { category?: string; meaningful_only?: boolean } = {}) => {
+    const q = _q(opts as Record<string, string | number | undefined>);
+    return http<DiscrepancyListResponse>(`/v1/sessions/${encodeURIComponent(sessionId)}/discrepancies${q}`);
+  },
+};
+
+
 // ─── Words (real Google STT per-token data from `words` table) ───────────
 export interface WordRow {
   id:          string;

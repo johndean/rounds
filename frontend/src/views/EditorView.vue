@@ -31,7 +31,7 @@ import AdminTab from '@/components/editor/AdminTab.vue';
 import ChatTab from '@/components/editor/ChatTab.vue';
 import PollsTab from '@/components/editor/PollsTab.vue';
 import DownloadMenu from '@/components/editor/DownloadMenu.vue';
-import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, words as wordsApi, type SessionSummary, type WordRow } from '@/services/api';
+import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, words as wordsApi, discrepancies as discrepanciesApi, type SessionSummary, type WordRow, type DiscrepancyRow } from '@/services/api';
 import { toast } from '@/composables/useToast';
 import { ApiError } from '@/services/http';
 import { http } from '@/services/http';
@@ -56,7 +56,7 @@ interface ApiSpeaker { id: string; short: string | null; name: string | null; ro
 const SPEAKERS_API = ref<ApiSpeaker[]>([]);
 const CHAT = ref<ChatMessage[]>([]);
 const POLLS = ref<Poll[]>([]);
-const DISCREPANCIES = ref<Array<{ kind: string; meaningful: boolean; status: string }>>([]);
+const DISCREPANCIES = ref<DiscrepancyRow[]>([]);
 const CORRECTIONS = ref<Array<{ id: string; t: string; type: string; actor: string; seg: string; prior?: string | null; next?: string | null; note?: string | null }>>([]);
 // Real Google STT per-word data grouped by segment_id. Populated by
 // stt_background_task after AI MODE direct. Empty until the worker writes
@@ -78,7 +78,7 @@ async function load(): Promise<void> {
       http<ApiSpeaker[]>(`/v1/sessions/${encodeURIComponent(props.id)}/speakers`).catch(() => []),
       http<ChatMessage[]>(`/v1/sessions/${encodeURIComponent(props.id)}/chat`).catch(() => []),
       http<Poll[]>(`/v1/sessions/${encodeURIComponent(props.id)}/polls`).catch(() => []),
-      http<Array<{ kind: string; meaningful: boolean; status: string }>>(`/v1/sessions/${encodeURIComponent(props.id)}/discrepancies`).catch(() => []),
+      discrepanciesApi.list(props.id).catch(() => ({ session_id: props.id, count: 0, classified_count: 0, classification_status: 'pending' as const, discrepancies: [] as DiscrepancyRow[] })),
       auditApi.corrections(props.id).catch(() => []),
       wordsApi.listBySession(props.id).catch(() => [] as WordRow[]),
     ]);
@@ -183,7 +183,9 @@ async function load(): Promise<void> {
     POLLS.value.forEach((p) => { if (p.anchor) initialPlacements[p.id] = p.anchor; });
     placements.value = { ...placements.value, ...initialPlacements };
 
-    DISCREPANCIES.value = di as Array<{ kind: string; meaningful: boolean; status: string }>;
+    // di is the new envelope {session_id, count, classification_status, classified_count, discrepancies}.
+    // Store the inner array; the envelope's totals are derivable from .length.
+    DISCREPANCIES.value = (di as { discrepancies?: DiscrepancyRow[] }).discrepancies ?? [];
     CORRECTIONS.value = co as Array<{ id: string; t: string; type: string; actor: string; seg: string; prior?: string | null; next?: string | null; note?: string | null }>;
 
     // Group real Google STT words by segment_id so STTPane can render real
@@ -398,7 +400,7 @@ function onScrubClick(e: MouseEvent): void {
 const counts = computed(() => ({
   ai:    SEGMENTS.value.length,
   stt:   SEGMENTS.value.length,
-  disc:  DISCREPANCIES.value.filter((d) => d.status === 'open' && d.meaningful).length,
+  disc:  DISCREPANCIES.value.filter((d) => d.is_meaningful === true).length,
   audit: CORRECTIONS.value.length,
 }));
 
@@ -422,10 +424,10 @@ const flagCounts = computed<FlagCounts>(() => {
     });
   });
   DISCREPANCIES.value.forEach((d) => {
-    if (d.kind === 'drift')          c.drift++;
-    if (d.kind === 'punctuation')    c.punctuation++;
-    if (d.kind === 'filler')         c.filler++;
-    if (d.kind === 'low_confidence') c.low_conf++;
+    if (d.category === 'drift')          c.drift++;
+    if (d.category === 'punctuation')    c.punctuation++;
+    if (d.category === 'filler')         c.filler++;
+    if (d.category === 'low_confidence') c.low_conf++;
   });
   return c;
 });
@@ -722,6 +724,10 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
         :active-segment-id="activeSegment?.id"
         :focused-slide-id="focusedSlideId"
         :slide-rail-mode="slideRailMode"
+        :live-segments="SEGMENTS"
+        :live-slides="SLIDES"
+        :live-discrepancies="DISCREPANCIES"
+        :live-words="WORDS_BY_SEGMENT"
         @segment-click="onSegmentClick"
         @clear-focus="focusedSlideId = null"
       />
