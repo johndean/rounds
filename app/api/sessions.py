@@ -33,7 +33,7 @@ class PipelineConfig(BaseModel):
     Pipeline routing captured at upload. Persisted to `session_templates`.
     The 7 UploadView form fields all live here.
     """
-    ai_pipeline: str = Field(default="enhanced")             # direct | enhanced
+    ai_pipeline: str = Field(default="direct")               # direct | enhanced — default flipped 2026-05-20 so legacy clients without a pipeline_config don't silently land on enhanced+transcript (STT-quality output)
     ai_mode: str     = Field(default="transcript")           # transcript | summary | key-moments | structured-notes | custom-prompt
     ai_model: str    = Field(default="gemini-2.5-pro")
     prompt_mode: str = Field(default="transcript")

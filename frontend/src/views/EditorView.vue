@@ -63,6 +63,10 @@ const CORRECTIONS = ref<Array<{ id: string; t: string; type: string; actor: stri
 // stt_background_task after AI MODE direct. Empty until the worker writes
 // the words rows + emits stt_ready over WS.
 const WORDS_BY_SEGMENT = ref<Map<string, WordRow[]>>(new Map());
+// Pipeline config — drives the AI-mode badge in the topbar so a tester can
+// see at a glance whether segments.text came from Gemini direct vs.
+// transcribe+normalize (enhanced). Null while loading or for legacy sessions.
+const pipelineCfg = ref<{ ai_pipeline: string; ai_mode: string; ai_model: string } | null>(null);
 const loading = ref(true);
 
 const TOTAL_DURATION = ref<number>(0);
@@ -74,7 +78,7 @@ const sessionStage = computed(() => 'prep'); // until /sop wiring lands per-edit
 async function load(): Promise<void> {
   loading.value = true;
   try {
-    const [s, sg, sl, sp, ch, po, di, co, wd] = await Promise.all([
+    const [s, sg, sl, sp, ch, po, di, co, wd, pc] = await Promise.all([
       sessionsApi.get(props.id).catch(() => null),
       segmentsApi.list(props.id).catch(() => []),
       http<Slide[]>(`/v1/sessions/${encodeURIComponent(props.id)}/slides`).catch(() => []),
@@ -84,8 +88,10 @@ async function load(): Promise<void> {
       discrepanciesApi.list(props.id).catch(() => ({ session_id: props.id, count: 0, classified_count: 0, classification_status: 'pending' as const, discrepancies: [] as DiscrepancyRow[] })),
       auditApi.corrections(props.id).catch(() => []),
       wordsApi.listBySession(props.id).catch(() => [] as WordRow[]),
+      sessionsApi.pipelineConfig(props.id).catch(() => null),
     ]);
     session.value = s;
+    pipelineCfg.value = pc;
     if (s?.duration_sec) TOTAL_DURATION.value = s.duration_sec;
     // Fetch playback URL in parallel; failure is non-fatal (poster + scrubber stay static).
     // Request video first — backend's ORDER BY (role = :preferred) DESC falls through
@@ -665,7 +671,14 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
           </RouterLink>
           <span v-if="i < SOP_STAGES.length - 1" class="editor__stepper-sep">▸</span>
         </template>
-        <span :style="{ marginLeft: 'auto', fontSize: '10px', fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: session?.status === 'ready' || session?.status === 'complete' ? 'var(--color-green)' : 'var(--fg2)' }">
+        <span
+          v-if="pipelineCfg"
+          :style="{ marginLeft: 'auto', fontSize: '10px', fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: pipelineCfg.ai_pipeline === 'direct' ? 'var(--color-navy)' : 'var(--color-amber)', padding: '2px 8px', border: `1px solid ${pipelineCfg.ai_pipeline === 'direct' ? 'var(--color-navy)' : 'var(--color-amber)'}`, borderRadius: '999px' }"
+          :title="`Pipeline: ${pipelineCfg.ai_pipeline} | mode: ${pipelineCfg.ai_mode} | model: ${pipelineCfg.ai_model}`"
+        >
+          AI: {{ pipelineCfg.ai_pipeline }}
+        </span>
+        <span :style="{ marginLeft: pipelineCfg ? '8px' : 'auto', fontSize: '10px', fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase', color: session?.status === 'ready' || session?.status === 'complete' ? 'var(--color-green)' : 'var(--fg2)' }">
           <Icon name="check" :size="11" /> {{ session?.status === 'ready' || session?.status === 'complete' ? 'AI ready' : (session?.status || 'pending') }}
         </span>
       </div>
