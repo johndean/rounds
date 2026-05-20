@@ -22,6 +22,22 @@ class WordDiff:
     category:   str            # heuristic: medication / terminology / filler / punctuation / drift / low_confidence / other
 
 
+@dataclass
+class WordPair:
+    """
+    One Gemini-word ↔ STT-word pairing produced by LCS alignment.
+
+    Used by L2 word-highlight: every Gemini word in a segment gets a row
+    (matched or unmatched). The frontend reads (stt_start_ms, stt_end_ms)
+    via the word_alignment table to anchor karaoke highlight to real
+    audio timing. Unmatched Gemini words have stt_idx = None and the
+    highlighter passes through them in zero time.
+    """
+    ai_idx:     int            # 0-based Gemini token position (matches seg.text.split())
+    stt_idx:    int | None     # 0-based STT token position, or None if Gemini word didn't match
+    match_kind: str            # 'exact' | 'unmatched'
+
+
 _FILLER_TOKENS = {"um", "uh", "er", "ah", "hm", "mm", "you", "know", "basically", "like"}
 _PUNCT_TOKENS = {".", ",", "!", "?", ";", ":", "-"}
 
@@ -104,3 +120,52 @@ def diff_words(stt_words: list[str], ai_words: list[str]) -> list[WordDiff]:
 
     diffs.reverse()
     return diffs
+
+
+def align_words(stt_words: list[str], ai_words: list[str]) -> list[WordPair]:
+    """
+    Return one WordPair per Gemini token, in order.
+
+    Uses the same LCS DP table as `diff_words` but walks it to emit the
+    *complementary* signal: matched pairs (Gemini word ↔ STT word) plus
+    unmatched Gemini words. Pure STT deletions (STT said it, Gemini
+    dropped it) are silently consumed — they aren't represented in the
+    Gemini token stream so they don't appear in the output.
+
+    Output length always equals `len(ai_words)`. ai_idx values run from
+    0 to len(ai_words)-1 in strict ascending order, making it safe for
+    callers to consume positionally.
+    """
+    n, m = len(stt_words), len(ai_words)
+    if m == 0:
+        return []
+    if n == 0:
+        return [WordPair(ai_idx=j, stt_idx=None, match_kind="unmatched") for j in range(m)]
+
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            if stt_words[i - 1].lower() == ai_words[j - 1].lower():
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            else:
+                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+
+    pairs: list[WordPair] = []
+    i, j = n, m
+    while i > 0 and j > 0:
+        if stt_words[i - 1].lower() == ai_words[j - 1].lower():
+            pairs.append(WordPair(ai_idx=j - 1, stt_idx=i - 1, match_kind="exact"))
+            i -= 1
+            j -= 1
+        elif dp[i - 1][j] >= dp[i][j - 1]:
+            # STT-only token (delete) — not represented in Gemini stream.
+            i -= 1
+        else:
+            pairs.append(WordPair(ai_idx=j - 1, stt_idx=None, match_kind="unmatched"))
+            j -= 1
+    while j > 0:
+        pairs.append(WordPair(ai_idx=j - 1, stt_idx=None, match_kind="unmatched"))
+        j -= 1
+
+    pairs.reverse()
+    return pairs

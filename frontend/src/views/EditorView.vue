@@ -32,7 +32,7 @@ import SpeakerEditPanel from '@/components/editor/SpeakerEditPanel.vue';
 import ChatTab from '@/components/editor/ChatTab.vue';
 import PollsTab from '@/components/editor/PollsTab.vue';
 import DownloadMenu from '@/components/editor/DownloadMenu.vue';
-import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, words as wordsApi, discrepancies as discrepanciesApi, media as mediaApi, placements as placementsApi, type SessionSummary, type WordRow, type DiscrepancyRow } from '@/services/api';
+import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, words as wordsApi, discrepancies as discrepanciesApi, wordAlignment as wordAlignmentApi, media as mediaApi, placements as placementsApi, type SessionSummary, type WordRow, type DiscrepancyRow, type WordAlignmentEntry } from '@/services/api';
 import { toast } from '@/composables/useToast';
 import { ApiError } from '@/services/http';
 import { http } from '@/services/http';
@@ -63,6 +63,13 @@ const CORRECTIONS = ref<Array<{ id: string; t: string; type: string; actor: stri
 // stt_background_task after AI MODE direct. Empty until the worker writes
 // the words rows + emits stt_ready over WS.
 const WORDS_BY_SEGMENT = ref<Map<string, WordRow[]>>(new Map());
+// L2 word-highlight alignment grouped by segment_id. Every Gemini word in a
+// segment gets one entry (matched STT word → real timestamps; unmatched →
+// nulls). The AI Transcript tab uses this to anchor karaoke highlight to
+// real audio timing instead of MIC's drifting proportional interpolation.
+// Empty Map for legacy sessions uploaded before migration 036 — TranscriptPane
+// falls through to a no-highlight render path in that case.
+const ALIGNMENT_BY_SEGMENT = ref<Map<string, WordAlignmentEntry[]>>(new Map());
 // Pipeline config — drives the AI-mode badge in the topbar so a tester can
 // see at a glance whether segments.text came from Gemini direct vs.
 // transcribe+normalize (enhanced). Null while loading or for legacy sessions.
@@ -78,7 +85,7 @@ const sessionStage = computed(() => 'prep'); // until /sop wiring lands per-edit
 async function load(): Promise<void> {
   loading.value = true;
   try {
-    const [s, sg, sl, sp, ch, po, di, co, wd, pc] = await Promise.all([
+    const [s, sg, sl, sp, ch, po, di, co, wd, pc, al] = await Promise.all([
       sessionsApi.get(props.id).catch(() => null),
       segmentsApi.list(props.id).catch(() => []),
       http<Slide[]>(`/v1/sessions/${encodeURIComponent(props.id)}/slides`).catch(() => []),
@@ -89,6 +96,7 @@ async function load(): Promise<void> {
       auditApi.corrections(props.id).catch(() => []),
       wordsApi.listBySession(props.id).catch(() => [] as WordRow[]),
       sessionsApi.pipelineConfig(props.id).catch(() => null),
+      wordAlignmentApi.get(props.id).catch(() => ({ session_id: props.id, count: 0, matched: 0, segments: {} as Record<string, WordAlignmentEntry[]> })),
     ]);
     session.value = s;
     pipelineCfg.value = pc;
@@ -218,6 +226,16 @@ async function load(): Promise<void> {
       else wordsMap.set(w.segment_id, [w]);
     });
     WORDS_BY_SEGMENT.value = wordsMap;
+
+    // L2 word alignment: convert the {segments: {seg_id: [entries…]}} envelope
+    // to a Map keyed by segment_id. Each segment_id maps to a positional array
+    // where index N is the alignment for the Nth Gemini word (seg.text.split()).
+    const alignmentMap = new Map<string, WordAlignmentEntry[]>();
+    const alSegments = (al as { segments?: Record<string, WordAlignmentEntry[]> }).segments || {};
+    Object.entries(alSegments).forEach(([segId, entries]) => {
+      alignmentMap.set(segId, entries);
+    });
+    ALIGNMENT_BY_SEGMENT.value = alignmentMap;
   } finally {
     loading.value = false;
   }
@@ -799,7 +817,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
         :anchors-by-segment="anchorsBySegment as any"
         :live-speakers="SPEAKERS_API"
         :live-slides="SLIDES"
-        :live-words="WORDS_BY_SEGMENT"
+        :live-alignment="ALIGNMENT_BY_SEGMENT"
         :time="time"
         @segment-click="onSegmentClick"
         @word-click="onWordClick"

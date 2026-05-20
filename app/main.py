@@ -30,6 +30,7 @@ from app.api import session_resources as session_resources_router
 from app.api import sessions as sessions_router
 from app.api import settings as settings_router
 from app.api import sop as sop_router
+from app.api import word_alignment as word_alignment_router
 from app.config import settings
 
 _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -146,6 +147,7 @@ app.include_router(session_resources_router.router)
 app.include_router(corrections_router.router)
 app.include_router(segments_router.router)
 app.include_router(disc_router.router)
+app.include_router(word_alignment_router.router)
 app.include_router(sop_router.router)
 app.include_router(audit_router.router)
 app.include_router(improvements_router.router)

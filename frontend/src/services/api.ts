@@ -202,6 +202,30 @@ export const words = {
 };
 
 
+// ─── Word alignment (L2 highlight — per-Gemini-word STT timestamps) ──────
+// Populated by lcs_discrepancies_task. Every Gemini word in the segment
+// gets a row; matched words carry real STT timestamps, unmatched words
+// carry nulls and the highlighter skips them.
+export interface WordAlignmentEntry {
+  g: number;                 // 0-based index into seg.text.split() (Gemini token)
+  s: number | null;          // stt_start_ms — null when match_kind='unmatched'
+  e: number | null;          // stt_end_ms — null when match_kind='unmatched'
+  k: 'exact' | 'unmatched';  // match_kind
+}
+
+export interface WordAlignmentResponse {
+  session_id: string;
+  count:      number;
+  matched:    number;
+  segments:   Record<string, WordAlignmentEntry[]>;
+}
+
+export const wordAlignment = {
+  get: (sessionId: string) =>
+    http<WordAlignmentResponse>(`/v1/sessions/${encodeURIComponent(sessionId)}/word-alignment`),
+};
+
+
 export const speakers = {
   list: (sessionId: string) =>
     http<SessionSpeaker[]>(`/v1/sessions/${encodeURIComponent(sessionId)}/speakers`),

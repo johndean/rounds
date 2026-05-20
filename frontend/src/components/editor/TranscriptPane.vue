@@ -29,10 +29,11 @@ interface LiveSpeaker {
   avatar_color: string | null;
 }
 
-// Matches the shape of WordRow from @/services/api (start_ms/end_ms are
-// millisecond integers). SegmentText converts ms → seconds when writing
-// data-ws/data-we so the time watcher can compare against `time` directly.
-interface LiveWord { word: string; start_ms: number; end_ms: number; }
+// L2 word-alignment row: one entry per Gemini word in a segment. Matched
+// rows carry real STT timestamps (`s`, `e` in ms); unmatched rows carry
+// nulls so SegmentText can render the word without data-ws/data-we and
+// the time watcher below skips over it.
+interface AlignmentEntry { g: number; s: number | null; e: number | null; k: 'exact' | 'unmatched'; }
 
 const props = defineProps<{
   segments: readonly Segment[];
@@ -49,11 +50,12 @@ const props = defineProps<{
   // of the fixture 24-slide list. Required for segments with real DB UUIDs;
   // without it every segment shows "Unassigned" in the header.
   liveSlides?: readonly Slide[];
-  // Real STT per-word data keyed by segment_id. When a segment has live
-  // words, SegmentText renders them as <span class="dw" data-ws data-we>
-  // and the watcher below applies .dw-active to whichever span contains
-  // `time`. MIC parity (mic/frontend/src/views/EditorView.vue:3147-3185).
-  liveWords?: Map<string, readonly LiveWord[]>;
+  // L2 word-highlight alignment keyed by segment_id. Each value is a
+  // positional array (index N = Nth Gemini word per seg.text.split()).
+  // SegmentText renders Gemini words as <span class="dw" data-ws data-we>
+  // for matched rows; unmatched rows render without data attrs and the
+  // watcher below passes through them in zero time.
+  liveAlignment?: Map<string, readonly AlignmentEntry[]>;
   time?: number;
 }>();
 
@@ -463,6 +465,7 @@ watch(() => props.time, (t) => {
                 :text="seg.text"
                 :flags="seg.ai_flags"
                 :active-word-idx="seg.id === activeSegmentId ? activeWordIdx : -1"
+                :live-alignment="liveAlignment?.get(seg.id)"
                 @word-click="(w) => emit('wordClick', seg.id, w)"
               />
               <div class="segment__chiprow">

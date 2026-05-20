@@ -162,6 +162,34 @@ async def reingest(session_id: str, db: DbSession, _u: CurrentUser) -> ReingestR
     )
 
 
+class RealignResult(BaseModel):
+    session_id: str
+    enqueued:   bool
+    detail:     str | None = None
+
+
+@router.post("/realign/{session_id}", response_model=RealignResult)
+async def realign(session_id: str, _db: DbSession, _u: CurrentUser) -> RealignResult:
+    """
+    Manually re-trigger lcs_discrepancies_task for an already-ready session
+    so it can populate the word_alignment table (migration 036 was added
+    after some sessions had finished STT + LCS, so they have discrepancies
+    but no alignment rows). lcs_discrepancies_task itself is idempotent:
+    if discrepancies already exist it preserves them; it only fills in the
+    missing alignment data.
+    """
+    enqueued = False
+    detail: str | None = None
+    try:
+        from app.tasks.lcs_discrepancies import lcs_discrepancies_task
+
+        lcs_discrepancies_task.apply_async(args=[session_id], queue="celery")
+        enqueued = True
+    except Exception as exc:  # noqa: BLE001
+        detail = f"{exc.__class__.__name__}: {exc}"
+    return RealignResult(session_id=session_id, enqueued=enqueued, detail=detail)
+
+
 class ClearSlotsResult(BaseModel):
     email: str
     removed_count: int
