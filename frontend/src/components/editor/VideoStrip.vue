@@ -1,14 +1,24 @@
 <script setup lang="ts">
 /**
  * VideoStrip — visual chrome (16:9 frame, scrubber, slide-chapter marks) plus
- * a real hidden <audio> element so the editor can actually play the lecture.
+ * a real <video> or <audio> element so the editor can actually play the lecture.
  *
- * Source of truth for playback is the <audio> element. `time` / `playing` /
+ * Element choice keyed on `mediaKind` prop:
+ *   - 'video' → visible <video> filling .vstrip__frame (object-fit:contain),
+ *     poster hidden. Operator can visually verify slide-on-speaker's-screen
+ *     matches alignment's claimed active slide. MIC parity.
+ *   - 'audio' → hidden <audio>, poster stays. Same behavior as the old code
+ *     for sessions whose `sources` table has no role='video' row.
+ *   - null  → no media yet; poster stays.
+ *
+ * Source of truth for playback is the media element. `time` / `playing` /
  * `rate` props are mirrored both ways via update:* emits. Parent (EditorView)
  * binds with v-model-style update events; no requestAnimationFrame simulation.
  *
- * If `mediaUrl` is null (still loading / no source), the audio element is
- * skipped and the user sees the static poster — no broken state.
+ * `timeupdate` events are throttled to ~10 Hz (100 ms min between emits) with
+ * leading + trailing edges, ported from MIC stores/playback.js:116-139. Without
+ * this the unthrottled 30+ Hz default fires the per-word highlight watcher in
+ * TranscriptPane too often on large sessions.
  */
 import { computed, ref, watch, onUnmounted } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
@@ -28,6 +38,7 @@ const props = defineProps<{
   cc: boolean;
   segmentsBySlide: Map<string, Segment[]>;
   mediaUrl?: string | null;
+  mediaKind?: 'video' | 'audio' | null;
 }>();
 
 const emit = defineEmits<{
@@ -40,8 +51,14 @@ const emit = defineEmits<{
   (e: 'scrubClick', ev: MouseEvent): void;
 }>();
 
-const audioEl = ref<HTMLAudioElement | null>(null);
+const mediaEl = ref<HTMLMediaElement | null>(null);
 const seeking = ref(false);
+
+// 10 Hz throttle on timeupdate (MIC parity — port of stores/playback.js:116-139).
+// Leading edge fires the first emit immediately; trailing edge guarantees the
+// final value lands when a burst coalesces (prevents stale highlights on pause).
+let timeUpdateLastMs = 0;
+let timeUpdatePendingTimer: ReturnType<typeof setTimeout> | null = null;
 
 const todayIso = new Date().toISOString().slice(0, 10);
 
@@ -75,13 +92,26 @@ function shortPresenter(p?: string): string {
 
 // ─── media ↔ props sync ──────────────────────────────────────────────────
 function onTimeUpdate(): void {
-  const el = audioEl.value;
+  const el = mediaEl.value;
   if (!el || seeking.value) return;
-  emit('update:time', el.currentTime);
+  const now = performance.now();
+  const since = now - timeUpdateLastMs;
+  if (since >= 100) {
+    timeUpdateLastMs = now;
+    emit('update:time', el.currentTime);
+  } else if (!timeUpdatePendingTimer) {
+    timeUpdatePendingTimer = setTimeout(() => {
+      timeUpdatePendingTimer = null;
+      const el2 = mediaEl.value;
+      if (!el2) return;
+      timeUpdateLastMs = performance.now();
+      emit('update:time', el2.currentTime);
+    }, 100 - since);
+  }
 }
 
 function onLoadedMetadata(): void {
-  const el = audioEl.value;
+  const el = mediaEl.value;
   if (!el) return;
   if (!Number.isFinite(el.duration) || el.duration <= 0) return;
   // Only override total if the parent's session.duration_sec was missing.
@@ -95,7 +125,7 @@ function onEnded(): void { emit('update:playing', false); }
 // Parent → media element pushes. Guard against feedback loops by checking
 // whether the desired state already matches.
 watch(() => props.time, (t) => {
-  const el = audioEl.value;
+  const el = mediaEl.value;
   if (!el) return;
   if (Math.abs(el.currentTime - t) > 0.4) {
     seeking.value = true;
@@ -107,44 +137,61 @@ watch(() => props.time, (t) => {
 });
 
 watch(() => props.playing, (p) => {
-  const el = audioEl.value;
+  const el = mediaEl.value;
   if (!el) return;
   if (p && el.paused) void el.play().catch(() => emit('update:playing', false));
   else if (!p && !el.paused) el.pause();
 });
 
 watch(() => props.rate, (r) => {
-  const el = audioEl.value;
+  const el = mediaEl.value;
   if (el && Math.abs(el.playbackRate - r) > 0.001) el.playbackRate = r;
 });
 
 onUnmounted(() => {
-  const el = audioEl.value;
+  if (timeUpdatePendingTimer) { clearTimeout(timeUpdatePendingTimer); timeUpdatePendingTimer = null; }
+  const el = mediaEl.value;
   if (el && !el.paused) el.pause();
 });
 </script>
 
 <template>
   <div class="vstrip" data-screen-label="Video Player">
-    <audio
-      v-if="mediaUrl"
-      ref="audioEl"
-      :src="mediaUrl"
-      preload="metadata"
-      :style="{ display: 'none' }"
-      @timeupdate="onTimeUpdate"
-      @loadedmetadata="onLoadedMetadata"
-      @play="onPlay"
-      @pause="onPause"
-      @ended="onEnded"
-    />
     <div
       class="vstrip__frame"
       role="button"
       :aria-label="playing ? 'Pause video' : 'Play video'"
       @click="emit('togglePlay')"
     >
-      <div class="vstrip__poster">
+      <!-- Real <video> viewport. Mounts when backend returned role='video'. -->
+      <video
+        v-if="mediaUrl && mediaKind === 'video'"
+        ref="mediaEl"
+        class="vstrip__video"
+        :src="mediaUrl"
+        preload="metadata"
+        playsinline
+        @timeupdate="onTimeUpdate"
+        @loadedmetadata="onLoadedMetadata"
+        @play="onPlay"
+        @pause="onPause"
+        @ended="onEnded"
+      />
+      <!-- Hidden <audio> fallback for sessions without a video source. -->
+      <audio
+        v-else-if="mediaUrl && mediaKind === 'audio'"
+        ref="mediaEl"
+        :src="mediaUrl"
+        preload="metadata"
+        :style="{ display: 'none' }"
+        @timeupdate="onTimeUpdate"
+        @loadedmetadata="onLoadedMetadata"
+        @play="onPlay"
+        @pause="onPause"
+        @ended="onEnded"
+      />
+      <!-- Poster shows when no media OR audio-only (slide info as fallback chrome). -->
+      <div v-if="!mediaUrl || mediaKind !== 'video'" class="vstrip__poster">
         <div class="vstrip__slide-no">{{ activeSlide ? activeSlide.title.split(' ')[0]!.toUpperCase() : '—' }}</div>
         <div class="vstrip__slide-title">{{ activeSlide?.title || '—' }}</div>
         <div class="vstrip__slide-meta">

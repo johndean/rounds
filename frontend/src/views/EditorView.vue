@@ -67,6 +67,7 @@ const loading = ref(true);
 
 const TOTAL_DURATION = ref<number>(0);
 const mediaUrl = ref<string | null>(null);
+const mediaKind = ref<'video' | 'audio' | null>(null);
 const sessionCode = computed(() => session.value?.code || props.id);
 const sessionStage = computed(() => 'prep'); // until /sop wiring lands per-editor
 
@@ -87,9 +88,15 @@ async function load(): Promise<void> {
     session.value = s;
     if (s?.duration_sec) TOTAL_DURATION.value = s.duration_sec;
     // Fetch playback URL in parallel; failure is non-fatal (poster + scrubber stay static).
-    void mediaApi.url(props.id, 'audio')
-      .then((m) => { mediaUrl.value = m.url; if (m.duration_sec && TOTAL_DURATION.value <= 0) TOTAL_DURATION.value = m.duration_sec; })
-      .catch(() => { mediaUrl.value = null; });
+    // Request video first — backend's ORDER BY (role = :preferred) DESC falls through
+    // to audio for sessions that don't have a video source.
+    void mediaApi.url(props.id, 'video')
+      .then((m) => {
+        mediaUrl.value = m.url;
+        mediaKind.value = (m.content_type || '').startsWith('video/') ? 'video' : 'audio';
+        if (m.duration_sec && TOTAL_DURATION.value <= 0) TOTAL_DURATION.value = m.duration_sec;
+      })
+      .catch(() => { mediaUrl.value = null; mediaKind.value = null; });
     SPEAKERS_API.value = sp as ApiSpeaker[];
     const speakersById = new Map<string, ApiSpeaker>();
     SPEAKERS_API.value.forEach((row) => speakersById.set(row.id, row));
@@ -275,15 +282,35 @@ async function reloadSpeakers(): Promise<void> {
   } catch (_) { /* non-fatal */ }
 }
 
+// Active segment via O(log n) binary search with VTT-cue-style gap fallback
+// (MIC parity — port of mic/frontend/src/stores/playback.js:42-73). Preserves
+// the boundary-preferring fix: t > seg.end is exclusive, so when t === next.start
+// (the case where clicking slide N seeks to slide N's first-segment.start)
+// the mid=prev branch falls through with t > prev.end false and t < prev.start
+// false, the loop advances, and we return next.
 const activeSegment = computed<Segment | undefined>(() => {
-  // Active = latest segment whose start ≤ time. Boundary-preferring rule so
-  // clicking slide N (which sets time to slide N's first-segment.start) does
-  // NOT match slide N-1's last segment (whose end equals slide N's start).
   const segs = SEGMENTS.value;
-  for (let i = 0; i < segs.length; i++) {
-    if (time.value >= segs[i]!.start && (i === segs.length - 1 || time.value < segs[i + 1]!.start)) return segs[i];
+  if (!segs.length) return undefined;
+  const t = time.value;
+  let lo = 0;
+  let hi = segs.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const seg = segs[mid]!;
+    if (t < seg.start) hi = mid - 1;
+    else if (t > seg.end) lo = mid + 1;
+    else return seg;
   }
-  return segs[segs.length - 1];
+  // t fell into a gap between segs[hi].end and segs[lo].start. Pick the nearer
+  // neighbor (matches MIC's "previously returned strictly preceding segment
+  // produced a whole-segment-behind-captions symptom while audio was in a
+  // silence" comment in playback.js:63-66).
+  const lower = Math.max(0, lo - 1);
+  const upper = Math.min(segs.length - 1, lo);
+  if (upper === lower) return segs[upper];
+  const dLower = t - segs[lower]!.end;
+  const dUpper = segs[upper]!.start - t;
+  return dUpper < dLower ? segs[upper] : segs[lower];
 });
 
 const activeWordIdx = computed(() => {
@@ -714,6 +741,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
           :cc="cc"
           :segments-by-slide="segmentsBySlide"
           :media-url="mediaUrl"
+          :media-kind="mediaKind"
           @toggle-play="playing = !playing"
           @update:rate="(r) => (rate = r)"
           @update:cc="(v) => (cc = v)"
@@ -745,6 +773,8 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
         :anchors-by-segment="anchorsBySegment as any"
         :live-speakers="SPEAKERS_API"
         :live-slides="SLIDES"
+        :live-words="WORDS_BY_SEGMENT"
+        :time="time"
         @segment-click="onSegmentClick"
         @word-click="onWordClick"
         @clear-focus="focusedSlideId = null"

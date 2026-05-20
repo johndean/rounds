@@ -29,6 +29,11 @@ interface LiveSpeaker {
   avatar_color: string | null;
 }
 
+// Matches the shape of WordRow from @/services/api (start_ms/end_ms are
+// millisecond integers). SegmentText converts ms → seconds when writing
+// data-ws/data-we so the time watcher can compare against `time` directly.
+interface LiveWord { word: string; start_ms: number; end_ms: number; }
+
 const props = defineProps<{
   segments: readonly Segment[];
   activeSegmentId: string | null | undefined;
@@ -44,6 +49,12 @@ const props = defineProps<{
   // of the fixture 24-slide list. Required for segments with real DB UUIDs;
   // without it every segment shows "Unassigned" in the header.
   liveSlides?: readonly Slide[];
+  // Real STT per-word data keyed by segment_id. When a segment has live
+  // words, SegmentText renders them as <span class="dw" data-ws data-we>
+  // and the watcher below applies .dw-active to whichever span contains
+  // `time`. MIC parity (mic/frontend/src/views/EditorView.vue:3147-3185).
+  liveWords?: Map<string, readonly LiveWord[]>;
+  time?: number;
 }>();
 
 // Real slides only — no fixture fallback. If liveSlides isn't passed, slide
@@ -277,6 +288,37 @@ function rows(): number {
   const d = inline.value?.draft || '';
   return Math.max(3, Math.ceil(d.length / 90));
 }
+
+// Real-time per-word highlight watcher. Ported from MIC's
+// mic/frontend/src/views/EditorView.vue:3147-3185. Walks the active
+// segment's <span class="dw" data-ws data-we> nodes looking for one whose
+// [ws,we] window contains the current playback time, then toggles
+// .dw-active. The early-out check (prev-still-in-window) makes the common
+// case O(1); only crossing a word boundary triggers a full querySelectorAll.
+let prevActiveWordEl: HTMLElement | null = null;
+
+watch(() => props.time, (t) => {
+  if (t == null || !props.activeSegmentId) return;
+  if (prevActiveWordEl?.isConnected) {
+    const pws = parseFloat(prevActiveWordEl.dataset.ws ?? '');
+    const pwe = parseFloat(prevActiveWordEl.dataset.we ?? '');
+    if (!Number.isNaN(pws) && !Number.isNaN(pwe) && t >= pws && t <= pwe) return;
+    prevActiveWordEl.classList.remove('dw-active');
+    prevActiveWordEl = null;
+  }
+  const root = document.querySelector(`[data-segid="${props.activeSegmentId}"]`);
+  if (!root) return;
+  const spans = root.querySelectorAll<HTMLElement>('.dw[data-ws]');
+  for (const el of spans) {
+    const ws = parseFloat(el.dataset.ws ?? '');
+    const we = parseFloat(el.dataset.we ?? '');
+    if (!Number.isNaN(ws) && !Number.isNaN(we) && t >= ws && t <= we) {
+      el.classList.add('dw-active');
+      prevActiveWordEl = el;
+      return;
+    }
+  }
+}, { flush: 'post' });
 </script>
 
 <template>
@@ -417,9 +459,11 @@ function rows(): number {
             </div>
             <template v-else>
               <SegmentText
+                :data-segid="seg.id"
                 :text="seg.text"
                 :flags="seg.ai_flags"
                 :active-word-idx="seg.id === activeSegmentId ? activeWordIdx : -1"
+                :live-words="props.liveWords?.get(seg.id)"
                 @word-click="(w) => emit('wordClick', seg.id, w)"
               />
               <div class="segment__chiprow">
