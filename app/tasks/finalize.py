@@ -106,6 +106,19 @@ def finalize_task(self, prev_result=None, session_id=None) -> dict:  # noqa: ARG
         except Exception as e:  # noqa: BLE001
             logger.warning(f"finalize: failed to trigger sop_auto_init: {e}")
 
+        # Auto-anchor unplaced polls to the first segment of their declared
+        # slide. Runs after align_task has assigned segment.slide_id, so the
+        # JOIN in poll_autoplace has data to find. Non-fatal — polls just
+        # stay unplaced if this raises. See app/services/poll_autoplace.py.
+        try:
+            from app.services.poll_autoplace import auto_place_polls
+
+            placed = auto_place_polls(engine, session_id)
+            if placed > 0:
+                logger.info(f"finalize: auto-placed {placed} poll(s) for {session_id}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"finalize: poll auto-place failed (non-fatal): {e}")
+
         # 🟡 #38 + #39 — emit timeline_ready + final metrics_update so the
         # ProcessingView signal goes green and the diagnostic counts populate.
         try:

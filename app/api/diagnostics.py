@@ -190,6 +190,42 @@ async def realign(session_id: str, _db: DbSession, _u: CurrentUser) -> RealignRe
     return RealignResult(session_id=session_id, enqueued=enqueued, detail=detail)
 
 
+class AutoplacePollsResult(BaseModel):
+    session_id: str
+    placed:     int
+    detail:     str | None = None
+
+
+@router.post("/autoplace-polls/{session_id}", response_model=AutoplacePollsResult)
+async def autoplace_polls(session_id: str, _db: DbSession, _u: CurrentUser) -> AutoplacePollsResult:
+    """
+    Manually fire poll auto-placement for an already-ingested session.
+
+    Useful for backfilling sessions that completed ingest before the
+    auto-placement service was wired in, or for re-running after the
+    operator has manually cleared anchors and wants the defaults back.
+
+    Idempotent — only places polls with anchor_segment IS NULL.
+    """
+    from sqlalchemy import create_engine
+
+    from app.config import settings
+    from app.services.poll_autoplace import auto_place_polls
+
+    sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+    engine = create_engine(sync_url)
+    try:
+        placed = auto_place_polls(engine, session_id)
+        return AutoplacePollsResult(session_id=session_id, placed=placed)
+    except Exception as exc:  # noqa: BLE001
+        return AutoplacePollsResult(
+            session_id=session_id, placed=0,
+            detail=f"{exc.__class__.__name__}: {exc}",
+        )
+    finally:
+        engine.dispose()
+
+
 class ClearSlotsResult(BaseModel):
     email: str
     removed_count: int

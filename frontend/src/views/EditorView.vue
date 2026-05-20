@@ -364,7 +364,7 @@ const alignedColor = computed(() => {
 });
 
 const tab = ref<TabId>(props.initialTab || 'ai');
-const rightTab = ref<RightTabId>('chat');
+const rightTab = ref<RightTabId>('admin');
 const slideRailMode = ref<'focus' | 'filter'>(
   localStorage.getItem('mic_slide_click_mode') === 'filter' ? 'filter' : 'focus'
 );
@@ -866,13 +866,33 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
 
       <div class="editor__resizer" title="Drag to resize" @mousedown="onResizeRight" />
 
-      <STTSidePanel
+      <aside
         v-if="tab === 'stt'"
-        :time="time"
-        :total-duration="TOTAL_DURATION"
-        :segments="SEGMENTS"
-        :live-discrepancies="DISCREPANCIES"
-      />
+        class="rightrail"
+        aria-label="STT Reference side panel"
+        data-screen-label="STT Right Rail"
+      >
+        <!-- Slide context stays visible on the STT tab so the operator can
+             read STT tokens against the slide the speaker was on at that
+             moment. Deviates from MIC editor.jsx:1413 which only showed
+             STTSidePanel here — explicit user-requested expansion. -->
+        <ActiveSlideCard
+          :slide="activeSlide"
+          :segment-count="segmentsBySlide.get(activeSlide?.id || '')?.length || 0"
+          :collapsed="activeSlideCollapsed"
+          :time="time"
+          :total-duration="TOTAL_DURATION"
+          :live-slides="SLIDES"
+          :live-segments="SEGMENTS"
+          @toggle="activeSlideCollapsed = !activeSlideCollapsed"
+        />
+        <STTSidePanel
+          :time="time"
+          :total-duration="TOTAL_DURATION"
+          :segments="SEGMENTS"
+          :live-discrepancies="DISCREPANCIES"
+        />
+      </aside>
       <aside v-else class="rightrail" aria-label="Side panel" data-screen-label="Right Rail">
         <ActiveSlideCard
           :slide="activeSlide"

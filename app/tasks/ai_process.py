@@ -433,6 +433,17 @@ def _process_direct(
         "duration_sec":  int(round(duration_sec)),
     })
 
+    # Auto-anchor unplaced polls to the first segment of their declared slide.
+    # Non-fatal — failure logs a warning and the polls stay unplaced for the
+    # operator to drag manually. See app/services/poll_autoplace.py for SQL.
+    try:
+        from app.services.poll_autoplace import auto_place_polls
+        placed = auto_place_polls(engine, session_id)
+        if placed > 0:
+            logger.info(f"ai_process[direct]: auto-placed {placed} poll(s) for {session_id}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"ai_process[direct]: poll auto-place failed (non-fatal): {e}")
+
     # ── 8. State transition uploading → ready (AI MODE direct shortcut) ──
     transition_session_sync(
         session_id, "ready",
