@@ -65,7 +65,10 @@ const filtered = computed<SessionSummary[]>(() => {
   if (activeFilter.value === 'complete')   rows = rows.filter(s => s.status === 'complete' || s.status === 'archived');
   if (query.value) {
     const q = query.value.toLowerCase();
-    rows = rows.filter(s => s.title.toLowerCase().includes(q) || (s.presenter || '').toLowerCase().includes(q));
+    rows = rows.filter(s => {
+      const hay = `${s.title} ${s.title_long || ''} ${s.title_short || ''} ${s.presenter || ''}`.toLowerCase();
+      return hay.includes(q);
+    });
   }
   return rows;
 });
@@ -233,7 +236,7 @@ function closeFailureModal(): void { failureModal.value = null; }
       >
         <div class="sessions-table__code">{{ s.code || s.id }}</div>
         <div>
-          <div class="sessions-table__title">{{ s.title }}</div>
+          <div class="sessions-table__title">{{ s.title_long || s.title_short || s.title }}</div>
           <div class="sessions-table__sub">{{ s.presenter || '—' }}</div>
         </div>
         <div>

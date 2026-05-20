@@ -14,6 +14,7 @@
 import { computed, onMounted, ref } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
 import AddFileModal from '@/components/session/AddFileModal.vue';
+import SessionTextEdit from '@/components/session/SessionTextEdit.vue';
 import { SOP_STAGES } from '@/fixtures/sop_stages';
 import {
   sessions as sessionsApi,
@@ -31,6 +32,27 @@ interface SourceRow { id: string; role: string; filename: string; gcs_uri: strin
 interface SlideRow { id: string; slide_index: number; title: string | null; image_uri: string | null; start_ms: number | null; end_ms: number | null; }
 
 const session = ref<SessionSummary | null>(null);
+
+// Title cascade: prefer the extras2-manifest title_long, then title_short,
+// then fall back to the auto-generated upload title. Mirrors MIC's
+// SessionsListView.vue:433 cascade so the ugly upload code never wins
+// when the manifest provided real metadata.
+const displayTitle = computed<string>(() =>
+  (session.value?.title_long
+    || session.value?.title_short
+    || session.value?.title
+    || ''
+  ).trim(),
+);
+
+function onTitleSaved(field: 'title' | 'title_long' | 'title_short', next: string): void {
+  if (!session.value) return;
+  session.value = { ...session.value, [field]: next };
+}
+function onCodeSaved(next: string): void {
+  if (!session.value) return;
+  session.value = { ...session.value, code: next };
+}
 const sources = ref<SourceRow[]>([]);
 const slides   = ref<SlideRow[]>([]);
 const segments = ref<SegmentRow[]>([]);
@@ -205,9 +227,28 @@ function pubLink(p: string): void {
             <span :class="['chip', session.status === 'ready' || session.status === 'complete' ? 'chip--green' : 'chip--amber']">
               <Icon name="check" :size="10" /> {{ session.status }}
             </span>
-            <span class="chip chip--ghost">{{ session.code }}</span>
+            <span class="chip chip--ghost">
+              <SessionTextEdit
+                :value="session.code"
+                :session-id="session.id"
+                field="code"
+                variant="code"
+                placeholder="e.g. 052026_NTproBNP"
+                @save="onCodeSaved"
+              />
+            </span>
           </div>
-          <h1 class="sd-header__title">{{ session.title }}</h1>
+          <h1 class="sd-header__title">
+            <SessionTextEdit
+              :value="displayTitle"
+              :session-id="session.id"
+              field="title_long"
+              variant="title"
+              empty-label="+ Add title"
+              placeholder="Session title"
+              @save="(v) => onTitleSaved('title_long', v)"
+            />
+          </h1>
           <p class="sd-header__sub">{{ session.presenter || '—' }}</p>
         </div>
         <div class="sd-header__actions">
@@ -222,8 +263,27 @@ function pubLink(p: string): void {
       <div class="sd-grid">
         <!-- Left: session meta -->
         <div class="sd-meta">
-          <div class="sd-meta__code">{{ session.code }}</div>
-          <h2 class="sd-meta__title">{{ session.title }}</h2>
+          <div class="sd-meta__code">
+            <SessionTextEdit
+              :value="session.code"
+              :session-id="session.id"
+              field="code"
+              variant="code"
+              placeholder="e.g. 052026_NTproBNP"
+              @save="onCodeSaved"
+            />
+          </div>
+          <h2 class="sd-meta__title">
+            <SessionTextEdit
+              :value="displayTitle"
+              :session-id="session.id"
+              field="title_long"
+              variant="title"
+              empty-label="+ Add title"
+              placeholder="Session title"
+              @save="(v) => onTitleSaved('title_long', v)"
+            />
+          </h2>
           <p class="sd-meta__sub">{{ session.presenter || '—' }}</p>
           <div class="sd-meta__tags">
             <span v-for="t in (session.taxonomy.length ? session.taxonomy : ['untagged'])" :key="t" class="chip chip--blue" :style="{ fontSize: '10px' }">{{ t }}</span>

@@ -58,6 +58,13 @@ class SessionOut(BaseModel):
     id: UUID
     code: str
     title: str
+    # extras2 manifest-derived titles. title_long is the full lecture title
+    # ("Cardiac Biomarkers — NT-proBNP & Troponin"); title_short is the
+    # display label ("NT-proBNP"). Frontend cascades title_long > title_short
+    # > title so the ugly auto-generated upload code never wins when the
+    # manifest provided real metadata. MIC parity (mic/app/api/sessions.py:751-752).
+    title_long: Optional[str] = None
+    title_short: Optional[str] = None
     presenter: Optional[str]
     status: str
     duration_sec: Optional[int]
@@ -65,6 +72,17 @@ class SessionOut(BaseModel):
     segment_count: Optional[int]
     attendee_count: Optional[int]
     taxonomy: list[str]
+
+
+class SessionPatch(BaseModel):
+    """PATCH body — partial update. None means "leave unchanged"; an empty
+    string ("") explicitly clears the field. Whitelist enforced server-side
+    so unknown fields are silently ignored (MIC parity)."""
+    code:        Optional[str] = None
+    title:       Optional[str] = None
+    title_long:  Optional[str] = None
+    title_short: Optional[str] = None
+    presenter:   Optional[str] = None
 
 
 # ─── Endpoints ─────────────────────────────────────────────────────────
@@ -92,7 +110,8 @@ async def list_sessions(
         where.append("(LOWER(code) LIKE :f OR LOWER(title) LIKE :f)")
         params["f"] = f"%{f.lower()}%"
     sql = f"""
-        SELECT s.id, s.code, s.title, s.presenter, s.status, s.duration_sec,
+        SELECT s.id, s.code, s.title, s.title_long, s.title_short,
+               s.presenter, s.status, s.duration_sec,
                s.word_count, s.segment_count, s.attendee_count, s.taxonomy
         FROM sessions s
         {"JOIN sop_state st ON st.session_id = s.id AND st.stage = :stage" if stage else ""}
@@ -134,7 +153,7 @@ async def create_session(payload: SessionIn, db: DbSession, user: CurrentUser) -
                     """
                     INSERT INTO sessions (code, title, presenter, duration_sec, attendee_count, taxonomy, status)
                     VALUES (:code, :title, :presenter, :duration_sec, :attendee_count, CAST(:taxonomy AS jsonb), 'uploading')
-                    RETURNING id, code, title, presenter, status, duration_sec, word_count, segment_count, attendee_count, taxonomy
+                    RETURNING id, code, title, title_long, title_short, presenter, status, duration_sec, word_count, segment_count, attendee_count, taxonomy
                     """
                 ),
                 {
@@ -281,7 +300,9 @@ async def get_session(session_id: UUID, db: DbSession, _user: CurrentUser) -> di
         await db.execute(
             text(
                 """
-                SELECT id, code, title, presenter, status, duration_sec, word_count, segment_count, attendee_count, taxonomy
+                SELECT id, code, title, title_long, title_short,
+                       presenter, status, duration_sec, word_count, segment_count,
+                       attendee_count, taxonomy
                 FROM sessions
                 WHERE id = :id AND deleted_at IS NULL
                 """
@@ -291,6 +312,57 @@ async def get_session(session_id: UUID, db: DbSession, _user: CurrentUser) -> di
     ).mappings().first()
     if not row:
         raise HTTPException(status_code=404, detail="Session not found")
+    return dict(row)
+
+
+@router.patch("/{session_id}", response_model=SessionOut)
+async def update_session(
+    session_id: UUID,
+    payload:    SessionPatch,
+    db:         DbSession,
+    _user:      CurrentUser,
+) -> dict:
+    """
+    Partial update of session metadata. Whitelisted fields only: code, title,
+    title_long, title_short, presenter. Unknown fields are ignored. An empty
+    string explicitly clears a field; null leaves it unchanged.
+
+    Port of MIC `app/api/sessions.py:1479-1513`. Used by the inline-edit UI
+    in SessionDetailView / SessionsView to rename a session or fix a code
+    after upload.
+    """
+    from sqlalchemy import text
+
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updatable fields provided")
+
+    set_clauses = [f"{k} = :{k}" for k in updates]
+    set_clauses.append("updated_at = now()")
+    sql = (
+        f"UPDATE sessions SET {', '.join(set_clauses)} "
+        "WHERE id = :sid AND deleted_at IS NULL "
+        "RETURNING id, code, title, title_long, title_short, presenter, status, "
+        "          duration_sec, word_count, segment_count, attendee_count, taxonomy"
+    )
+    params = {**updates, "sid": str(session_id)}
+    try:
+        row = (await db.execute(text(sql), params)).mappings().first()
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc).lower()
+        if "sessions_code_key" in msg or ("code" in msg and "duplicate" in msg):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code":    "DUPLICATE_CODE",
+                    "message": "Another session already uses that code.",
+                },
+            )
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Session not found")
+    await db.commit()
     return dict(row)
 
 

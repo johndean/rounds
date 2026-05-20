@@ -27,6 +27,11 @@ export interface SessionSummary {
   id: string;
   code: string;
   title: string;
+  // extras2-manifest titles. Frontend cascades title_long > title_short > title
+  // so the ugly auto-generated upload code never wins when the manifest
+  // provided real metadata. Both nullable until the manifest parses.
+  title_long: string | null;
+  title_short: string | null;
   presenter: string | null;
   status: string;
   duration_sec: number | null;
@@ -34,6 +39,14 @@ export interface SessionSummary {
   segment_count: number | null;
   attendee_count: number | null;
   taxonomy: string[];
+}
+
+export interface SessionPatch {
+  code?:        string;
+  title?:       string;
+  title_long?:  string;
+  title_short?: string;
+  presenter?:   string;
 }
 
 export interface SessionFilters {
@@ -93,6 +106,8 @@ export const sessions = {
     http<SessionSummary>(`/v1/sessions/${encodeURIComponent(id)}`),
   create: (payload: { code: string; title: string; presenter?: string; duration_sec?: number | null; attendee_count?: number | null; taxonomy?: string[]; pipeline_config?: PipelineConfig }) =>
     http<SessionSummary>('/v1/sessions', { body: payload, method: 'POST' }),
+  update: (id: string, patch: SessionPatch) =>
+    http<SessionSummary>(`/v1/sessions/${encodeURIComponent(id)}`, { body: patch, method: 'PATCH' }),
   remove: (id: string) =>
     http<{ session_id: string; deleted: boolean }>(`/v1/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   listDeleted: () =>
