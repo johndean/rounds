@@ -463,7 +463,6 @@ watch(() => props.time, (t) => {
                 :text="seg.text"
                 :flags="seg.ai_flags"
                 :active-word-idx="seg.id === activeSegmentId ? activeWordIdx : -1"
-                :live-words="props.liveWords?.get(seg.id)"
                 @word-click="(w) => emit('wordClick', seg.id, w)"
               />
               <div class="segment__chiprow">
