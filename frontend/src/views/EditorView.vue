@@ -326,6 +326,19 @@ const activeWordIdx = computed(() => {
 
 const activeSlide = computed(() => SLIDES.value.find((sl) => sl.id === activeSegment.value?.slide_id));
 
+// MIC-parity alignment count (mic/frontend/src/views/EditorView.vue:3218-3220).
+// Counts segments that actually got a slide_id from the aligner — not the
+// total segment count. Previously the header showed `N/N aligned` which lied
+// when the aligner silently failed and left every segment with NULL slide_id.
+const alignedCount = computed(() => SEGMENTS.value.filter((s) => s.slide_id != null).length);
+const alignedColor = computed(() => {
+  if (SEGMENTS.value.length === 0) return 'var(--fg2)';
+  const pct = (alignedCount.value / SEGMENTS.value.length) * 100;
+  if (pct >= 100) return 'var(--color-green)';
+  if (pct >= 80)  return 'var(--color-amber)';
+  return 'var(--color-red)';
+});
+
 const tab = ref<TabId>(props.initialTab || 'ai');
 const rightTab = ref<RightTabId>('chat');
 const slideRailMode = ref<'focus' | 'filter'>(
@@ -674,7 +687,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
 
       <div class="editor__subrow">
         <span class="editor__align">
-          <span :style="{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--color-green)' }">{{ SEGMENTS.length }}/{{ SEGMENTS.length }}</span> aligned
+          <span :style="{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: alignedColor }">{{ alignedCount }}/{{ SEGMENTS.length }}</span> aligned
         </span>
         <button class="btn btn--secondary btn--sm" data-test-id="editor-find-replace" @click="openFind">
           <Icon name="search" /> Find &amp; Replace

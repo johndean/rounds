@@ -82,6 +82,21 @@ const totalSegs = computed(() => session.value?.segment_count ?? segments.value.
 const totalDurationMs = computed(() => (session.value?.duration_sec ?? 0) * 1000);
 const totalWords = computed(() => session.value?.word_count ?? 0);
 
+// MIC-parity alignment stats (mic/frontend/src/views/EditorView.vue:3218-3220).
+// "Aligned" = has a slide assignment; "review" = has any AI flag set
+// (matches the reviewQueue filter below). Previously these were hard-coded
+// to `100% aligned` + `0 to review`, which lied about session quality
+// whenever the aligner silently failed and left segments.slide_id NULL.
+const alignedSegs = computed(() => segments.value.filter(s => s.slide_id != null).length);
+const reviewSegs  = computed(() => segments.value.filter(s => s.flags && s.flags.length > 0).length);
+const alignedPct  = computed(() => totalSegs.value > 0 ? Math.round((alignedSegs.value / totalSegs.value) * 100) : 0);
+const alignedChipClass = computed(() => {
+  if (totalSegs.value === 0) return 'chip chip--ghost';
+  if (alignedPct.value >= 100) return 'chip chip--green';
+  if (alignedPct.value >= 80)  return 'chip chip--amber';
+  return 'chip chip--red';
+});
+
 function hasFile(role: string): boolean {
   return sources.value.some(s => s.role === role);
 }
@@ -196,8 +211,8 @@ function pubLink(p: string): void {
           <p class="sd-header__sub">{{ session.presenter || '—' }}</p>
         </div>
         <div class="sd-header__actions">
-          <span class="chip chip--amber"><span class="chip__dot" /> 0 to review</span>
-          <span class="chip chip--green"><span class="chip__dot" /> {{ totalSegs > 0 ? 100 : 0 }}% aligned</span>
+          <span :class="['chip', reviewSegs > 0 ? 'chip--amber' : 'chip--green']"><span class="chip__dot" /> {{ reviewSegs }} to review</span>
+          <span :class="alignedChipClass"><span class="chip__dot" /> {{ alignedPct }}% aligned</span>
           <RouterLink :to="`/e/${session.id}/sop`" class="btn btn--secondary"><Icon name="branch" /> Workflow</RouterLink>
           <RouterLink :to="`/e/${session.id}/audit`" class="btn btn--secondary"><Icon name="history" /> Audit</RouterLink>
           <RouterLink :to="`/e/${session.id}`" class="btn btn--primary"><Icon name="edit" /> Open Editor</RouterLink>
@@ -246,7 +261,7 @@ function pubLink(p: string): void {
               <div class="card__header"><h3>Alignment</h3></div>
               <div class="card__body" :style="{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }">
                 <div>
-                  <div :style="{ fontSize: '36px', fontWeight: 800, color: totalSegs > 0 ? 'var(--color-green)' : 'var(--fg2)', lineHeight: 1 }">{{ totalSegs > 0 ? '100' : '—' }}<span v-if="totalSegs > 0">%</span></div>
+                  <div :style="{ fontSize: '36px', fontWeight: 800, color: totalSegs === 0 ? 'var(--fg2)' : alignedPct >= 100 ? 'var(--color-green)' : alignedPct >= 80 ? 'var(--color-amber)' : 'var(--color-red)', lineHeight: 1 }">{{ totalSegs > 0 ? alignedPct : '—' }}<span v-if="totalSegs > 0">%</span></div>
                   <div :style="{ fontSize: '11px', color: 'var(--fg2)', marginTop: '4px', textTransform: 'uppercase', letterSpacing: '.08em', fontWeight: 700 }">Auto-aligned</div>
                 </div>
                 <div>
