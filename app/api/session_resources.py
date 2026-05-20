@@ -567,6 +567,13 @@ class PollOut(BaseModel):
     total_votes: int
     anchor_segment: Optional[UUID]
     placed: bool
+    # JSONB metadata blob from the extras2 manifest parse — carries
+    # `slide_n` (1-based slide the poll was opened on) and `q_n`. The
+    # editor's client-side _inferAnchor() uses metadata.slide_n as a
+    # fallback when anchor_segment is null (sessions ingested before
+    # poll_autoplace ran). Without this field on the wire, the fallback
+    # silently no-ops and polls show as unplaced.
+    metadata: Optional[dict[str, Any]] = None
     options: list[PollOptionOut]
 
 
@@ -577,7 +584,7 @@ async def list_polls(session_id: UUID, db: DbSession, _user: CurrentUser) -> lis
             text(
                 """
                 SELECT id, question, status, opened_at_ms, closed_at_ms,
-                       total_votes, anchor_segment, placed
+                       total_votes, anchor_segment, placed, metadata
                 FROM polls WHERE session_id = :sid ORDER BY opened_at_ms ASC
                 """
             ),
