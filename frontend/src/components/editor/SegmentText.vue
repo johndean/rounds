@@ -17,6 +17,13 @@
  *   3. Fallback — split `text` on whitespace and (optionally) highlight the
  *      `activeWordIdx`. Used for legacy sessions without alignment + without
  *      live STT words.
+ *
+ * Whitespace note: Vue's default `whitespace: 'condense'` compiler strips
+ * literal whitespace inside otherwise-empty spans (so `<span> </span>` becomes
+ * `<span></span>` at runtime, killing line-break opportunities and forcing
+ * the whole segment onto one line). All paths therefore interleave words and
+ * spaces as TEXT CONTENT of spans (`{{ item.tok }}`), which Vue preserves.
+ * The STT pane uses the equivalent `{{ ' ' }}` idiom (STTPane.vue:247).
  */
 import { computed } from 'vue';
 import type { AiFlag } from '@/fixtures/transcript';
@@ -25,9 +32,8 @@ import type { AiFlag } from '@/fixtures/transcript';
 interface LiveWord { word: string; start_ms: number; end_ms: number; }
 
 // L2 alignment row. `s` and `e` are ms (or null when match_kind='unmatched').
-// `g` (the Gemini token index) is unused at render time because the array
-// is already positional — index N === gemini_idx N — but the field is kept
-// for debugging via DevTools inspection.
+// `g` is the Gemini token index — used to look up the alignment for a
+// given word position in `text.split()`.
 interface AlignmentEntry { g: number; s: number | null; e: number | null; k: 'exact' | 'unmatched'; }
 
 const props = withDefaults(defineProps<{
@@ -66,11 +72,7 @@ const items = computed<WordEntry[]>(() => {
   return out;
 });
 
-// Gemini words for the alignment path. Same `text.split()` semantics the
-// backend uses when computing gemini_idx — keep these in lock-step.
-const geminiWords = computed<string[]>(() => props.text.split(/\s+/).filter(Boolean));
-
-// O(1) alignment lookup keyed by gemini_idx.
+// O(1) alignment lookup keyed by gemini_idx. Used only on the alignment path.
 const alignmentByIdx = computed<Map<number, AlignmentEntry>>(() => {
   const m = new Map<number, AlignmentEntry>();
   (props.liveAlignment || []).forEach((a) => m.set(a.g, a));
@@ -94,10 +96,11 @@ function liveClassFor(idx: number): string {
   return parts.join(' ');
 }
 
-function alignClassFor(idx: number): string {
-  const entry = alignmentByIdx.value.get(idx);
+function alignClassFor(item: WordEntry): string {
+  if (item.kind === 'space') return '';
+  const entry = alignmentByIdx.value.get(item.idx);
   const matched = !!entry && entry.s !== null && entry.e !== null;
-  const kind = flagByWord.value.get(idx);
+  const kind = flagByWord.value.get(item.idx);
   // Matched words carry the .dw class so the TranscriptPane time watcher
   // (`querySelectorAll('.dw[data-ws]')`) picks them up. Unmatched words
   // render as plain .word so the watcher skips them entirely.
@@ -106,8 +109,9 @@ function alignClassFor(idx: number): string {
   return parts.join(' ');
 }
 
-function alignAttrsFor(idx: number): Record<string, number> {
-  const entry = alignmentByIdx.value.get(idx);
+function alignAttrsFor(item: WordEntry): Record<string, number> {
+  if (item.kind === 'space') return {};
+  const entry = alignmentByIdx.value.get(item.idx);
   if (!entry || entry.s === null || entry.e === null) return {};
   return { 'data-ws': entry.s / 1000, 'data-we': entry.e / 1000 };
 }
@@ -122,35 +126,28 @@ function onLiveClick(idx: number, e: MouseEvent): void {
   e.stopPropagation();
   emit('wordClick', idx);
 }
-
-function onAlignClick(idx: number, e: MouseEvent): void {
-  e.stopPropagation();
-  emit('wordClick', idx);
-}
 </script>
 
 <template>
   <span class="segment__text">
     <template v-if="useAlignment">
-      <template v-for="(w, i) in geminiWords" :key="i">
-        <span
-          :class="alignClassFor(i)"
-          v-bind="alignAttrsFor(i)"
-          @click="onAlignClick(i, $event)"
-        >{{ w }}</span>
-        <span v-if="i < geminiWords.length - 1"> </span>
-      </template>
+      <span
+        v-for="(item, i) in items"
+        :key="i"
+        :class="alignClassFor(item)"
+        v-bind="alignAttrsFor(item)"
+        @click="onClick(item, $event)"
+      >{{ item.tok }}</span>
     </template>
     <template v-else-if="useLive">
-      <template v-for="(w, i) in props.liveWords" :key="i">
-        <span
-          :class="liveClassFor(i)"
-          :data-ws="w.start_ms / 1000"
-          :data-we="w.end_ms / 1000"
-          @click="onLiveClick(i, $event)"
-        >{{ w.word }}</span>
-        <span v-if="i < (props.liveWords?.length ?? 0) - 1"> </span>
-      </template>
+      <span
+        v-for="(w, i) in props.liveWords"
+        :key="i"
+        :class="liveClassFor(i)"
+        :data-ws="w.start_ms / 1000"
+        :data-we="w.end_ms / 1000"
+        @click="onLiveClick(i, $event)"
+      >{{ w.word }}{{ i < (props.liveWords?.length ?? 0) - 1 ? ' ' : '' }}</span>
     </template>
     <template v-else>
       <span
