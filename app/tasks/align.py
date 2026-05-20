@@ -1,15 +1,27 @@
 """
 align_task — 4-signal per-segment alignment + pre-ready gate.
 
-Phase 6i ports MIC's real align engine, replacing the time-proportional
-stub. Reads segments + slides + slide_time_ranges (from 6h fusion);
-writes alignments table; updates segments.slide_id for editor display.
+Phase 6i ports MIC's real align engine. Reads segments + slides +
+slide_time_ranges (from 6h fusion); writes alignments table; updates
+segments.slide_id for editor display.
 
-When 6h hasn't produced slide_time_ranges (legacy path), falls back to
-the proportional bucketing kept in _align_session_fallback so the
-pipeline never blocks.
+Two gates protect the persist transaction (mirrors MIC tasks/align.py:202-207):
 
-Phase 6i / U108-U112. Closes audit gaps 🔴 #17, 🟠 #15.
+  GATE 1 — fusion_output: if 6h fusion produced 0 slide_time_ranges,
+    halt the session via state machine + audit_events row + WS event.
+    Previously this path silently called _align_session_fallback (time-
+    proportional bucketing), which produced complete-looking but
+    arithmetic-noise alignments with no operator-visible diagnostic.
+    The fallback function is removed.
+
+  GATE 2 — pre_ready_gate (Section 11.4): run BEFORE the persist
+    transaction. Previously a GateFailure was caught as a warning and
+    per-segment status was downgraded to 'review' — but since the API
+    doesn't surface alignment status (Cause C from the slide-align audit),
+    that was effectively a no-op. Now: GateFailure halts the session
+    identically to GATE 1.
+
+Phase 6i / U108-U112 + slide-align audit R1. Closes audit gaps 🔴 #17, 🟠 #15.
 """
 from __future__ import annotations
 
@@ -76,10 +88,26 @@ def _align_session(session_id: str) -> dict:
             logger.info(f"align: no segments for {session_id}")
             return {"session_id": session_id, "assigned": 0, "slides": 0}
 
-        # If 6h hasn't run, fall back to time-proportional bucketing.
+        # GATE 1 — fusion output sanity check (Cause A from slide-align audit).
+        # MIC halts the session when fusion produced 0 usable slide_time_ranges.
+        # Rounds previously fell through to _align_session_fallback (time-
+        # proportional bucketing), which produced a complete-looking but
+        # arithmetic-noise alignment with no operator-visible diagnostic.
         if not slide_range_rows:
-            logger.info(f"align: no slide_time_ranges for {session_id} — fallback path")
-            return _align_session_fallback(session_id, engine, seg_rows)
+            reason = (
+                "fusion produced 0 slide_time_ranges — cannot align. "
+                "Likely causes: visual frame diff produced no boundaries, "
+                "anchor extraction failed, or semantic ranges collapsed. "
+                "Re-run fusion or inspect the upstream tasks."
+            )
+            logger.error(f"align: GATE FAILED for {session_id} — {reason}")
+            _halt_session(engine, session_id, gate_id="fusion_output", reason=reason)
+            return {
+                "session_id": session_id,
+                "halted": True,
+                "gate": "fusion_output",
+                "reason": reason,
+            }
 
         # Build engine inputs
         segments = [
@@ -194,15 +222,24 @@ def _align_session(session_id: str) -> dict:
                 "normalized_text": norm_info.get("normalized_text"),
             })
 
-        gate_failures: list[GateFailure] = []
+        # GATE 2 — pre-ready gate (Section 11.4). Mirrors MIC tasks/align.py:202-207.
+        # Previously this caught GateFailure as a warning and downgraded
+        # per-segment status from 'assigned' to 'review' — but the API never
+        # surfaces alignment status (Cause C from the audit), so the gate was
+        # effectively a no-op. Now: gate failure halts the session via the
+        # state machine + audit_events row + WS event, exactly like MIC.
         try:
             run_pre_ready_gate(gate_input, iil_config or {}, session_template_id or "")
         except GateFailure as gf:
-            logger.warning(f"align: gate failed for {session_id}: {gf} — marking review")
-            gate_failures.append(gf)
-            for rec in results:
-                if rec.status == "assigned":
-                    rec.status = "review"
+            reason = f"{gf.gate_id}: {gf.reason}"
+            logger.error(f"align: GATE FAILED for {session_id} — {reason}")
+            _halt_session(engine, session_id, gate_id=gf.gate_id, reason=gf.reason)
+            return {
+                "session_id": session_id,
+                "halted": True,
+                "gate": gf.gate_id,
+                "reason": gf.reason,
+            }
 
         # Write alignments + update segments.slide_id + speaker_id
         with engine.begin() as conn:
@@ -258,25 +295,19 @@ def _align_session(session_id: str) -> dict:
                 )
 
             # Phase 7b — write validation_results rows for every alignment.
-            # Verdict: APPROVE for assigned/clean, REVIEW for uncertain, ESCALATE
-            # when any pre-ready gate failed (gate_failures non-empty).
-            base_verdict = "ESCALATE" if gate_failures else "APPROVE"
+            # Verdict: APPROVE for assigned/clean, REVIEW for uncertain.
+            # ESCALATE branch removed — gate failure now halts the session
+            # before reaching this code (see GATE 2 above).
             for rec in results:
-                if base_verdict == "ESCALATE":
-                    verdict = "ESCALATE"
-                elif rec.uncertain_flag or rec.status == "review":
+                if rec.uncertain_flag or rec.status == "review":
                     verdict = "REVIEW"
                 else:
                     verdict = "APPROVE"
                 details = {
-                    "signals":      rec.signals,
-                    "drift_flag":   rec.drift_flag,
-                    "anchor_hit":   rec.anchor_hit,
-                    "uncertain":    rec.uncertain_flag,
-                    "gate_failures": [
-                        {"gate": gf.gate_id, "reason": gf.reason}
-                        for gf in gate_failures
-                    ],
+                    "signals":    rec.signals,
+                    "drift_flag": rec.drift_flag,
+                    "anchor_hit": rec.anchor_hit,
+                    "uncertain":  rec.uncertain_flag,
                 }
                 conn.execute(
                     text(
@@ -314,70 +345,51 @@ def _align_session(session_id: str) -> dict:
         engine.dispose()
 
 
-def _align_session_fallback(session_id: str, engine, seg_rows: list) -> dict:
-    """Time-proportional bucketing fallback used when no slide_time_ranges exist."""
+def _halt_session(engine, session_id: str, *, gate_id: str, reason: str) -> None:
+    """Transition the session to 'failed' with durable diagnostic detail.
+
+    Mirrors MIC's RoundsTask._fail_session pattern (tasks/align.py:202-207).
+    Writes an audit_events row with the gate id + reason so the operator
+    can inspect what fired without parsing rotated logs, then transitions
+    via the state machine, then publishes a WS event so the live editor /
+    processing view shows the failure instead of waiting on a finalize
+    that will never come.
+    """
     from sqlalchemy import text
+    from app.engines.state_machine import ConflictError, transition_session_sync
+    from app.engines.ws_bridge import publish_ws_event_sync
 
-    with engine.connect() as conn:
-        slide_rows = conn.execute(
-            text(
-                """
-                SELECT id, slide_index FROM slides
-                 WHERE session_id = CAST(:sid AS uuid)
-                 ORDER BY slide_index ASC
-                """
-            ),
-            {"sid": session_id},
-        ).fetchall()
-        speaker_existing = conn.execute(
-            text("SELECT id FROM speakers WHERE session_id = CAST(:sid AS uuid) LIMIT 1"),
-            {"sid": session_id},
-        ).fetchone()
-
-    speaker_id = None
-    if not speaker_existing:
+    try:
         with engine.begin() as conn:
-            row = conn.execute(
-                text(
-                    """
-                    INSERT INTO speakers (session_id, name, role, avatar_color)
-                    VALUES (CAST(:sid AS uuid), 'Presenter', 'Instructor', '#2563eb')
-                    RETURNING id
-                    """
-                ),
-                {"sid": session_id},
-            ).fetchone()
-            speaker_id = row[0] if row else None
-    else:
-        speaker_id = speaker_existing[0]
-
-    max_end = max(s[3] for s in seg_rows)
-    slide_assignments: dict[int, list[tuple]] = {}
-    if slide_rows:
-        buckets = len(slide_rows)
-        bucket_ms = max(1, max_end // buckets)
-        for s in seg_rows:
-            bucket = min(buckets - 1, s[2] // bucket_ms)
-            slide_assignments.setdefault(bucket, []).append(s)
-    else:
-        slide_assignments[0] = list(seg_rows)
-
-    with engine.begin() as conn:
-        for s in seg_rows:
             conn.execute(
-                text("UPDATE segments SET speaker_id = :spk WHERE id = :sid"),
-                {"spk": speaker_id, "sid": s[0]},
+                text(
+                    "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
+                    "VALUES (CAST(:sid AS uuid), NULL, 'align.gate_failure', :sum, CAST(:det AS jsonb))"
+                ),
+                {
+                    "sid": session_id,
+                    "sum": f"{gate_id}: {reason[:180]}",
+                    "det": json.dumps({"gate": gate_id, "reason": reason}),
+                },
             )
-        for bucket_idx, bucket_segs in slide_assignments.items():
-            if not slide_rows or bucket_idx >= len(slide_rows):
-                continue
-            slide_id = slide_rows[bucket_idx][0]
-            for seg in bucket_segs:
-                conn.execute(
-                    text("UPDATE segments SET slide_id = :sl WHERE id = :seg"),
-                    {"sl": slide_id, "seg": seg[0]},
-                )
-    return {"session_id": session_id, "assigned": len(seg_rows), "slides": len(slide_rows), "fallback": True}
+    except Exception as e:
+        logger.warning(f"_halt_session: audit_events insert failed for {session_id}: {e}")
+
+    try:
+        transition_session_sync(session_id, "failed", actor="align_gate")
+    except ConflictError as e:
+        logger.warning(f"_halt_session: state transition conflict for {session_id}: {e}")
+    except Exception as e:
+        logger.error(f"_halt_session: state transition failed for {session_id}: {e}")
+
+    try:
+        publish_ws_event_sync(session_id, {
+            "type":   "align_gate_failed",
+            "gate":   gate_id,
+            "reason": reason,
+        })
+    except Exception as e:
+        logger.warning(f"_halt_session: ws publish failed for {session_id}: {e}")
 
 
 @celery_app.task(
@@ -391,6 +403,14 @@ def align_task(self, session_id: str) -> dict:
 
     try:
         result = _align_session(session_id)
+
+        # If GATE 1 or GATE 2 halted the session, do NOT advance the state
+        # machine or fire finalize. The session is already in 'failed' state
+        # with an audit_events row and a WS event; let the operator inspect.
+        if result.get("halted"):
+            logger.info(f"align: halted by gate for {session_id} — finalize NOT triggered")
+            return result
+
         try:
             transition_session_sync(session_id, "aligning", actor="align_task")
         except ConflictError:
