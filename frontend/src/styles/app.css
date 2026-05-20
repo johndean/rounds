@@ -938,6 +938,7 @@ body.is-col-resizing .editor__resizer::before {
 /* ── Transcript (center) ───────────────────────────────── */
 .transcript {
   background: var(--surface-bg);
+  position: relative;
   overflow-y: auto;
   padding: 14px 22px 80px;
   scroll-behavior: smooth;
