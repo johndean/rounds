@@ -31,6 +31,46 @@ _FILLER_RX_PATTERN = (
 )
 
 
+def _detect_repetition_loop(text: str) -> tuple[str, bool]:
+    """
+    Detect a Gemini hallucination loop and truncate to the first occurrence.
+
+    Symptom: Gemini multimodal occasionally loses its audio decoder anchor on
+    technical jargon and emits the same paragraph 10-200 times in a row.
+    Example from session dc2a0e34: the phrase "Yes, sample rors have to do
+    with the, it's not so much that it is a half-life of proBNP..." repeated
+    ~180 times inside one segment.
+
+    Algorithm: scan substrings of length MIN_BLOCK. If the same substring
+    appears MIN_REPS times, that's a loop. Truncate at the start of the
+    second occurrence so the first instance of the phrase is preserved.
+
+    Conservative thresholds (MIN_BLOCK=80, MIN_REPS=3) avoid false positives
+    on legitimate repetition like "yes, yes" or "the, the". O(n) memory and
+    time over the segment text. Returns (cleaned_text, was_truncated).
+    """
+    MIN_BLOCK = 80
+    MIN_REPS  = 3
+    n = len(text)
+    if n < MIN_BLOCK * MIN_REPS:
+        return text, False
+
+    seen: dict[str, list[int]] = {}
+    for i in range(n - MIN_BLOCK + 1):
+        s = text[i:i + MIN_BLOCK]
+        positions = seen.get(s)
+        if positions is None:
+            seen[s] = [i]
+            continue
+        positions.append(i)
+        if len(positions) >= MIN_REPS:
+            # Keep everything before the start of the second occurrence,
+            # which preserves the first (real) instance of the phrase.
+            second = positions[1]
+            return text[:second].rstrip(), True
+    return text, False
+
+
 @celery_app.task(
     bind=True,
     base=RoundsTask,
@@ -263,6 +303,30 @@ def _process_direct(
             if t and t[0].islower():
                 t = t[0].upper() + t[1:]
             seg["text"] = t
+
+        # ── 5b. Hallucination loop safety-net ────────────────────────────
+        # Gemini multimodal occasionally gets stuck and re-emits the same
+        # paragraph many times inside a single segment. Detect any 80+ char
+        # block that repeats 3+ times and truncate to the first occurrence.
+        # See _detect_repetition_loop() doc for the dc2a0e34 case study.
+        loop_truncated = 0
+        for seg in parsed:
+            cleaned, was_truncated = _detect_repetition_loop(seg["text"])
+            if was_truncated:
+                logger.warning(
+                    f"ai_process[direct]: repetition loop detected in segment "
+                    f"(orig_len={len(seg['text'])}, kept_len={len(cleaned)})"
+                )
+                seg["text"] = cleaned
+                loop_truncated += 1
+        if loop_truncated > 0:
+            try:
+                publish_ws_event_sync(session_id, {
+                    "type":               "gemini_loop_truncated",
+                    "segments_truncated": loop_truncated,
+                })
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"ai_process: loop-trunc WS emit failed (non-fatal): {e}")
 
         # Drop empties created by the cleanup
         parsed = [s for s in parsed if s["text"].strip()]
