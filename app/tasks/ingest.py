@@ -87,6 +87,31 @@ def ingest_task(self, session_id: str) -> dict:  # noqa: ARG001
 
         ai_pipeline = (cfg[0] if cfg else "enhanced") or "enhanced"
 
+        # Pre-flight guard against silent cross-pipeline overwrites of
+        # segments.text. If this session already has segments (from a prior
+        # ingest run that wasn't explicitly cleared via /v1/diag/reingest,
+        # which DELETEs segments before re-enqueueing), refuse to run again.
+        # Re-running blindly would let transcribe (STT) and ai_process (Gemini)
+        # both target the same content_hash, with whichever ran last winning.
+        with engine.connect() as conn:
+            existing_segs = conn.execute(
+                text("SELECT COUNT(*) FROM segments WHERE session_id = CAST(:sid AS uuid)"),
+                {"sid": session_id},
+            ).scalar() or 0
+        if existing_segs > 0:
+            logger.warning(
+                f"ingest: session {session_id} already has {existing_segs} segments — "
+                f"refusing to re-run pipeline={ai_pipeline} without explicit reingest. "
+                f"Call /v1/diag/reingest/{session_id} to reset state first."
+            )
+            return {
+                "session_id":   session_id,
+                "skipped":      True,
+                "reason":       "segments_exist_no_reingest",
+                "existing_segs": existing_segs,
+                "ai_pipeline":  ai_pipeline,
+            }
+
         # 🟡 #29 — log GCS bucket pre-flight target for ops traceability.
         try:
             with engine.connect() as conn:

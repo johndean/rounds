@@ -120,13 +120,7 @@ def transcribe_task(self, session_id: str) -> dict:  # noqa: ARG001  (bind=True 
                             (session_id, seq, start_ms, end_ms, text, confidence, flags, content_hash)
                         VALUES
                             (CAST(:sid AS uuid), :seq, :st, :et, :tx, :conf, '[]'::jsonb, :hash)
-                        ON CONFLICT (session_id, content_hash) DO UPDATE
-                          SET seq      = EXCLUDED.seq,
-                              start_ms = EXCLUDED.start_ms,
-                              end_ms   = EXCLUDED.end_ms,
-                              text     = EXCLUDED.text,
-                              confidence = EXCLUDED.confidence,
-                              updated_at = now()
+                        ON CONFLICT (session_id, content_hash) DO NOTHING
                         RETURNING id
                         """
                     ),
@@ -140,6 +134,18 @@ def transcribe_task(self, session_id: str) -> dict:  # noqa: ARG001  (bind=True 
                         "hash": seg.segment_id,
                     },
                 ).fetchone()
+                # DO NOTHING returns no row on conflict — segments.text is owned
+                # by ai_process_direct (Gemini) when it ran, so we must not
+                # overwrite. Look up the existing id so the words INSERT below
+                # still attaches per-token timestamps to the right segment.
+                if seg_row is None:
+                    seg_row = conn.execute(
+                        text(
+                            "SELECT id FROM segments "
+                            "WHERE session_id = CAST(:sid AS uuid) AND content_hash = :h"
+                        ),
+                        {"sid": session_id, "h": seg.segment_id},
+                    ).fetchone()
                 if seg_row and seg.words:
                     seg_uuid = str(seg_row[0])
                     for w_seq, w in enumerate(seg.words):
