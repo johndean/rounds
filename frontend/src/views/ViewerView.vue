@@ -15,6 +15,9 @@ import { sessions as sessionsApi, segments as segmentsApi, type SessionSummary, 
 import { http } from '@/services/http';
 import { toast } from '@/composables/useToast';
 
+const bundleSha = ((import.meta as unknown as { env: { VITE_BUILD_SHA?: string } }).env.VITE_BUILD_SHA || 'dev');
+const bundleShort = bundleSha === 'dev' ? 'dev' : bundleSha.slice(0, 7);
+
 const props = defineProps<{ id: string }>();
 
 interface SlideRow { id: string; slide_index: number; title: string | null; start_ms: number | null; end_ms: number | null; }
@@ -179,7 +182,7 @@ function openPub(p: { label: string }, e: Event): void {
       </div>
 
       <div :style="{ padding: '30px 0', textAlign: 'center', fontSize: '11px', color: 'var(--fg2)', fontFamily: 'var(--font-mono)' }">
-        End of preview · {{ segments.length }} segments · {{ slides.length }} slides · build v4.0.0-ssot-r2
+        End of preview · {{ segments.length }} segments · {{ slides.length }} slides · build {{ bundleShort }}
       </div>
     </template>
   </main>

@@ -43,6 +43,9 @@ import { modal } from '@/composables/useModal';
 import FindReplaceModal from '@/components/overlays/FindReplaceModal.vue';
 import { useSyncController } from '@/composables/useSyncController';
 
+const bundleSha = ((import.meta as unknown as { env: { VITE_BUILD_SHA?: string } }).env.VITE_BUILD_SHA || 'dev');
+const bundleShort = bundleSha === 'dev' ? 'dev' : bundleSha.slice(0, 7);
+
 type TabId = 'ai' | 'stt' | 'disc' | 'audit';
 type RightTabId = 'admin' | 'chat' | 'polls';
 
@@ -962,7 +965,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
       <span class="end">
         <span>shortcut: <code>?</code></span>
         <span class="sep" />
-        <span>build <code>v4.0.0-ssot-r2</code></span>
+        <span :title="`Bundle: ${bundleSha}`">build <code>{{ bundleShort }}</code></span>
       </span>
     </div>
   </div>

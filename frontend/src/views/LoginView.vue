@@ -10,6 +10,11 @@ import { useRouter, useRoute } from 'vue-router';
 import { useAuthStore } from '@/stores/auth';
 import { toast } from '@/composables/useToast';
 
+// Bundle's bake-time SHA — same source as AppHeader. Injected by Dockerfile
+// ARG RAILWAY_GIT_COMMIT_SHA → VITE_BUILD_SHA. 'dev' for local builds.
+const bundleSha = ((import.meta as unknown as { env: { VITE_BUILD_SHA?: string } }).env.VITE_BUILD_SHA || 'dev');
+const bundleShort = bundleSha === 'dev' ? 'dev' : bundleSha.slice(0, 7);
+
 const auth = useAuthStore();
 const router = useRouter();
 const route = useRoute();
@@ -66,7 +71,7 @@ function privacyLink(e: Event): void {
       </div>
 
       <h1 class="login__title">Sign in</h1>
-      <span class="login__pill">v4.0.0 · OPERATOR CONSOLE</span>
+      <span class="login__pill" :title="`Build ${bundleSha}`">{{ bundleShort }} · OPERATOR CONSOLE</span>
       <p class="login__lead">
         Audit-traceable transcription workflow for VIN continuing-education sessions · SOP-gated review · append-only correction lineage.
       </p>
@@ -106,7 +111,7 @@ function privacyLink(e: Event): void {
       </button>
 
       <div class="login__foot">
-        <span>Build <code>v4.0.0-ssot-r2</code></span>
+        <span :title="`Bundle: ${bundleSha}`">Build <code>{{ bundleShort }}</code></span>
         <span>·</span>
         <span><a href="#/" @click="statusLink">System status: nominal</a></span>
         <span>·</span>
