@@ -204,15 +204,45 @@ async function refreshVersion() {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
+// Accept the raw UUID, a Rounds URL of any shape (/#/p/<id>, /#/e/<id>,
+// /#/v/<id>), or a query-string form (?sid=<id>). Returns the first
+// UUID-shaped substring or '' if none found. Anything else means the
+// user typed garbage — fail loud rather than hit the backend with it.
+const UUID_RE = /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/;
+function extractSid(raw) {
+  const m = String(raw || '').match(UUID_RE);
+  return m ? m[0] : '';
+}
 function getSid() {
-  return document.getElementById('session-id').value.trim();
+  const raw = document.getElementById('session-id').value.trim();
+  const sid = extractSid(raw);
+  if (!sid && raw) log('warn', `no UUID found in "${raw.slice(0, 80)}" — paste a session_id or a Rounds URL`);
+  return sid;
 }
 function setSessStatus(text, cls) {
   const el = document.getElementById('sess-status');
   el.className = 'stat ' + cls; el.textContent = text;
 }
-document.getElementById('session-id').addEventListener('input', e => {
-  setSessStatus(e.target.value ? 'SET' : '—', e.target.value ? 'info' : '');
+const sidInput = document.getElementById('session-id');
+sidInput.addEventListener('input', e => {
+  const sid = extractSid(e.target.value);
+  setSessStatus(sid ? 'SET' : (e.target.value ? 'NO-UUID' : '—'), sid ? 'info' : (e.target.value ? 'warn' : ''));
+});
+// Normalize on blur / paste so the value matches what we'll actually send.
+sidInput.addEventListener('blur', e => {
+  const sid = extractSid(e.target.value);
+  if (sid && sid !== e.target.value) e.target.value = sid;
+});
+sidInput.addEventListener('paste', e => {
+  // Use setTimeout so we read the post-paste value, not the pre-paste one.
+  setTimeout(() => {
+    const sid = extractSid(sidInput.value);
+    if (sid && sid !== sidInput.value) {
+      sidInput.value = sid;
+      setSessStatus('SET', 'info');
+      log('info', 'extracted session_id from pasted URL', { sid });
+    }
+  }, 0);
 });
 
 async function apiGet(t, path) {
@@ -451,12 +481,15 @@ document.getElementById('btn-initstages').addEventListener('click', () => runTri
 // ── Clear log ─────────────────────────────────────────────────────────
 document.getElementById('btn-clear').addEventListener('click', () => { logEl.innerHTML = ''; });
 
-// ── URL ?sid=… deep-link ──────────────────────────────────────────────
+// ── URL ?sid=… deep-link (also accepts a full Rounds URL in ?sid=…) ──
 (function () {
-  const m = location.search.match(/[?&]sid=([0-9a-fA-F-]+)/);
+  const m = location.search.match(/[?&]sid=([^&]+)/);
   if (m) {
-    document.getElementById('session-id').value = m[1];
-    setSessStatus('SET', 'info');
+    const sid = extractSid(decodeURIComponent(m[1]));
+    if (sid) {
+      document.getElementById('session-id').value = sid;
+      setSessStatus('SET', 'info');
+    }
   }
 })();
 

@@ -333,8 +333,32 @@ function setSessStatus(text, cls) {
   const el = document.getElementById('sess-status');
   el.className = 'stat ' + cls; el.textContent = text;
 }
-document.getElementById('session-id').addEventListener('input', e => {
-  setSessStatus(e.target.value ? 'SET' : '—', e.target.value ? 'info' : '');
+// Accept the raw UUID or a Rounds URL of any shape (/#/p/<id>, /#/e/<id>,
+// /#/v/<id>) — strip everything but the UUID so the body we send to the
+// backend can't drift from what the field shows.
+const UUID_RE = /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/;
+function extractSid(raw) {
+  const m = String(raw || '').match(UUID_RE);
+  return m ? m[0] : '';
+}
+const sidInput = document.getElementById('session-id');
+sidInput.addEventListener('input', e => {
+  const sid = extractSid(e.target.value);
+  setSessStatus(sid ? 'SET' : (e.target.value ? 'NO-UUID' : '—'), sid ? 'info' : (e.target.value ? 'warn' : ''));
+});
+sidInput.addEventListener('blur', e => {
+  const sid = extractSid(e.target.value);
+  if (sid && sid !== e.target.value) e.target.value = sid;
+});
+sidInput.addEventListener('paste', () => {
+  setTimeout(() => {
+    const sid = extractSid(sidInput.value);
+    if (sid && sid !== sidInput.value) {
+      sidInput.value = sid;
+      setSessStatus('SET', 'info');
+      log('info', 'extracted session_id from pasted URL', { sid });
+    }
+  }, 0);
 });
 
 // ── File pickers ──────────────────────────────────────────────────────
@@ -383,8 +407,9 @@ function setProgress(pct) {
 document.getElementById('btn-gcs').addEventListener('click', async () => {
   const t = refreshAuth();
   if (!t) return;
-  const sid = document.getElementById('session-id').value.trim();
-  if (!sid) { log('err', 'no session_id — click "Create new" or paste one'); return; }
+  const raw = document.getElementById('session-id').value.trim();
+  const sid = extractSid(raw);
+  if (!sid) { log('err', `no UUID in "${raw.slice(0, 80)}" — click "Create new" or paste a session_id / Rounds URL`); return; }
 
   const queue = [];
   for (const s of SLOTS) {
