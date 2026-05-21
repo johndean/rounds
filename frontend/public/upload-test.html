@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rounds Upload Diagnostic</title>
+<script>
+  // Auth gate — runs before any render. No token or expired token → /login.
+  (function () {
+    var t = localStorage.getItem('rounds_jwt_v1');
+    if (!t) { window.location.replace('/login'); return; }
+    try {
+      var p = JSON.parse(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      if (p && p.exp && (p.exp * 1000) < Date.now()) {
+        localStorage.removeItem('rounds_jwt_v1');
+        window.location.replace('/login');
+      }
+    } catch (e) {
+      localStorage.removeItem('rounds_jwt_v1');
+      window.location.replace('/login');
+    }
+  })();
+</script>
+<style>
+  :root {
+    --bg: #0c0d10; --surface: #15171c; --surface2: #1c1f26;
+    --border: #2a2e36; --text: #e5e7eb; --muted: #8b93a7; --faint: #555b6a;
+    --accent: #59b1ff; --ok: #66d98c; --err: #ff6a7a; --warn: #e8c36a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; font-size: 13px; }
+  body { padding: 24px; max-width: 1040px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px 0; }
+  .sub { color: var(--muted); margin-bottom: 24px; font-size: 12px; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .panel h2 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 12px 0; font-weight: 600; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  input[type="text"], input[type="file"], select { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 6px; font-family: inherit; font-size: 12px; flex: 1; min-width: 220px; }
+  select { min-width: 130px; flex: 0 0 auto; }
+  button { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 10px 16px; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 600; transition: all .15s; }
+  button:hover:not(:disabled) { background: var(--border); border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { border-color: var(--accent); color: var(--accent); }
+  button.danger  { border-color: var(--err); color: var(--err); }
+  .btn-row { display: flex; gap: 12px; margin-top: 8px; }
+  .btn-row button { flex: 1; padding: 14px; font-size: 13px; }
+  .stat { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-left: 6px; }
+  .stat.ok   { background: #16381f; color: var(--ok); }
+  .stat.err  { background: #381619; color: var(--err); }
+  .stat.warn { background: #38321a; color: var(--warn); }
+  .stat.info { background: #1a2b3b; color: var(--accent); }
+  #log { background: #08090b; border: 1px solid var(--border); border-radius: 6px; padding: 12px; height: 460px; overflow-y: auto; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 11px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+  .log-ts  { color: var(--faint); }
+  .log-lvl { font-weight: 700; display: inline-block; min-width: 48px; }
+  .log-lvl.info { color: var(--accent); }
+  .log-lvl.ok   { color: var(--ok); }
+  .log-lvl.err  { color: var(--err); }
+  .log-lvl.warn { color: var(--warn); }
+  .log-lvl.step { color: var(--text); }
+  .log-ctx { color: var(--muted); }
+  .small { color: var(--muted); font-size: 11px; }
+  .kv { display: flex; gap: 6px; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .kv b { color: var(--text); font-weight: 600; }
+  .progress { height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; margin-top: 6px; display: none; }
+  .progress.active { display: block; }
+  .progress > div { height: 100%; background: var(--accent); width: 0%; transition: width .1s; }
+  .role-label { min-width: 90px; color: var(--muted); font-weight: 600; }
+</style>
+</head>
+<body>
+  <h1>Rounds Upload Diagnostic</h1>
+  <div class="sub">Direct-to-GCS signed URL path. Every step logged so silent failures surface in DevTools.</div>
+
+  <!-- ── Auth panel ───────────────────────────────────────────────────── -->
+  <div class="panel">
+    <h2>1. Auth <span id="auth-status" class="stat">—</span></h2>
+    <div class="kv"><b>rounds_jwt_v1:</b> <span id="token-preview">—</span></div>
+    <div class="kv"><b>payload.sub:</b> <span id="token-sub">—</span></div>
+    <div class="kv"><b>payload.exp:</b> <span id="token-exp">—</span></div>
+    <div class="small">Token pulled from <code>localStorage.rounds_jwt_v1</code>. Log in on <code>/login</code> first if missing.</div>
+  </div>
+
+  <!-- ── Build identity panel ─────────────────────────────────────────── -->
+  <div class="panel">
+    <h2>2. Build identity <span id="ver-status" class="stat">—</span></h2>
+    <div class="kv"><b>api commit:</b> <span id="api-commit">—</span></div>
+    <div class="kv"><b>api env:</b> <span id="api-env">—</span></div>
+    <div class="small">Confirms which Rounds API build is responding. Stale bundle vs. fresh deploy mismatch shows here.</div>
+  </div>
+
+  <!-- ── Session panel ────────────────────────────────────────────────── -->
+  <div class="panel">
+    <h2>3. Session <span id="sess-status" class="stat">—</span></h2>
+    <div class="row">
+      <input type="text" id="session-id" placeholder="Paste session_id or click 'Create new'" />
+      <button id="btn-create">Create new</button>
+    </div>
+    <div class="small">Create issues <code>POST /v1/sessions</code> with a generated code + the pipeline_config below. Returns a UUID we'll upload against.</div>
+  </div>
+
+  <!-- ── Pipeline config panel ────────────────────────────────────────── -->
+  <div class="panel">
+    <h2>4. Pipeline config (sent with Create) <span class="stat info">DEFAULTS</span></h2>
+    <div class="row">
+      <span class="role-label">ai_pipeline:</span>
+      <select id="cfg-pipeline">
+        <option value="direct">direct</option>
+        <option value="enhanced">enhanced</option>
+      </select>
+      <span class="role-label">ai_mode:</span>
+      <select id="cfg-aimode">
+        <option value="transcript">transcript</option>
+        <option value="summary">summary</option>
+        <option value="key-moments">key-moments</option>
+        <option value="structured-notes">structured-notes</option>
+      </select>
+    </div>
+    <div class="row">
+      <span class="role-label">ai_model:</span>
+      <select id="cfg-model">
+        <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+        <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+      </select>
+      <span class="role-label">stt_backend:</span>
+      <select id="cfg-stt">
+        <option value="google_latest_long">google_latest_long</option>
+        <option value="google_phone">google_phone</option>
+      </select>
+    </div>
+    <div class="small">Matches UploadView's <code>buildPipelineConfig()</code>. IIL all-tiers-on, template_id=lecture_v1.</div>
+  </div>
+
+  <!-- ── File panel ───────────────────────────────────────────────────── -->
+  <div class="panel">
+    <h2>5. Files (Rounds roles)</h2>
+    <div class="row">
+      <span class="role-label">video:</span>
+      <input type="file" id="f-video" accept="video/*" />
+    </div>
+    <div class="row">
+      <span class="role-label">audio:</span>
+      <input type="file" id="f-audio" accept="audio/*" />
+    </div>
+    <div class="row">
+      <span class="role-label">slide #1:</span>
+      <input type="file" id="f-slide1" accept=".pdf,.pptx,.ppt" />
+    </div>
+    <div class="row">
+      <span class="role-label">slide #2:</span>
+      <input type="file" id="f-slide2" accept=".pdf,.pptx,.ppt" />
+    </div>
+    <div class="row">
+      <span class="role-label">manifest:</span>
+      <input type="file" id="f-manifest" accept=".txt" />
+    </div>
+    <div class="row">
+      <span class="role-label">chat:</span>
+      <input type="file" id="f-chat" accept=".txt" />
+    </div>
+    <div class="kv" id="file-info" style="margin-top:6px">—</div>
+    <div class="small" style="margin-top:4px">Roles map to the same enum UploadView submits. <code>manifest</code> is the extras2_*.txt; <code>chat</code> is the Zoom chat .txt.</div>
+  </div>
+
+  <!-- ── Upload buttons ───────────────────────────────────────────────── -->
+  <div class="panel">
+    <h2>6. Upload</h2>
+    <div class="btn-row">
+      <button id="btn-gcs" class="primary">Direct to GCS — signed URL per file, then /upload-complete</button>
+    </div>
+    <div class="progress" id="progress"><div></div></div>
+    <div class="small" style="margin-top:8px">Sequential per file: <code>POST /v1/gcs/upload-url</code> → <code>PUT</code> signed URL → next file. After all files: <code>POST /v1/gcs/upload-complete</code> with the gcs_uri list to trigger ingest.</div>
+  </div>
+
+  <!-- ── Log panel ────────────────────────────────────────────────────── -->
+  <div class="panel">
+    <h2>7. Event log <button id="btn-clear" class="danger" style="float:right;padding:4px 10px;font-size:11px">Clear</button></h2>
+    <div id="log"></div>
+  </div>
+
+<script>
+// ── Logging ────────────────────────────────────────────────────────────
+const logEl = document.getElementById('log');
+function log(lvl, msg, ctx) {
+  const ts = new Date().toISOString().substr(11, 12);
+  const line = document.createElement('div');
+  line.innerHTML =
+    `<span class="log-ts">${ts}</span>  <span class="log-lvl ${lvl}">${lvl.toUpperCase()}</span>  ${escapeHtml(msg)}` +
+    (ctx ? `  <span class="log-ctx">${escapeHtml(JSON.stringify(ctx))}</span>` : '');
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ── Global error capture ──────────────────────────────────────────────
+window.addEventListener('error', e => log('err', 'window.onerror: ' + e.message, { file: e.filename, line: e.lineno }));
+window.addEventListener('unhandledrejection', e => log('err', 'unhandledrejection: ' + (e.reason && e.reason.message || e.reason)));
+
+// ── Envelope-aware parse ──────────────────────────────────────────────
+// Rounds wraps every JSON response in {success, data, error, meta}.
+// Strip the envelope so callers can treat the payload as flat.
+function unwrap(body) {
+  try {
+    const j = JSON.parse(body);
+    if (j && typeof j === 'object' && 'success' in j && 'data' in j) {
+      return { ok: j.success !== false, data: j.data, error: j.error, raw: j };
+    }
+    return { ok: true, data: j, error: null, raw: j };
+  } catch (e) {
+    return { ok: false, data: null, error: { code: 'PARSE', message: e.message }, raw: body };
+  }
+}
+
+// ── Auth panel ────────────────────────────────────────────────────────
+function decodeJwt(t) {
+  try {
+    const p = t.split('.')[1];
+    return JSON.parse(atob(p.replace(/-/g, '+').replace(/_/g, '/')));
+  } catch { return null; }
+}
+function refreshAuth() {
+  const t = localStorage.getItem('rounds_jwt_v1');
+  const statusEl = document.getElementById('auth-status');
+  if (!t) {
+    statusEl.className = 'stat err'; statusEl.textContent = 'MISSING';
+    document.getElementById('token-preview').textContent = '(none)';
+    log('err', 'no rounds_jwt_v1 in localStorage — log in on /login first');
+    return null;
+  }
+  document.getElementById('token-preview').textContent = t.slice(0, 40) + '…';
+  const p = decodeJwt(t);
+  if (p) {
+    document.getElementById('token-sub').textContent = p.sub || '—';
+    document.getElementById('token-exp').textContent = p.exp ? new Date(p.exp * 1000).toISOString() : '—';
+    const expired = p.exp && (p.exp * 1000) < Date.now();
+    statusEl.className = 'stat ' + (expired ? 'err' : 'ok');
+    statusEl.textContent = expired ? 'EXPIRED' : 'OK';
+    if (expired) log('err', 'token expired at ' + new Date(p.exp * 1000).toISOString());
+  } else {
+    statusEl.className = 'stat warn'; statusEl.textContent = 'UNDECODABLE';
+  }
+  return t;
+}
+
+// ── Build identity ────────────────────────────────────────────────────
+async function refreshVersion() {
+  const statusEl = document.getElementById('ver-status');
+  try {
+    const res = await fetch('/v1/version');
+    const u = unwrap(await res.text());
+    if (res.ok && u.data) {
+      document.getElementById('api-commit').textContent = (u.data.commit_short || u.data.commit || '—') + (u.data.commit ? ` (${u.data.commit})` : '');
+      document.getElementById('api-env').textContent = u.data.env || '—';
+      statusEl.className = 'stat ok'; statusEl.textContent = 'LIVE';
+      log('ok', 'API /v1/version reachable', { commit: u.data.commit_short, env: u.data.env });
+    } else {
+      statusEl.className = 'stat err'; statusEl.textContent = 'FAIL';
+      log('err', '/v1/version returned non-ok', { status: res.status });
+    }
+  } catch (e) {
+    statusEl.className = 'stat err'; statusEl.textContent = 'NETWORK';
+    log('err', '/v1/version fetch failed: ' + e.message);
+  }
+}
+
+// ── Pipeline-config builder (matches UploadView.buildPipelineConfig) ──
+function buildPipelineConfig() {
+  return {
+    ai_pipeline:   document.getElementById('cfg-pipeline').value,
+    ai_mode:       document.getElementById('cfg-aimode').value,
+    ai_model:      document.getElementById('cfg-model').value,
+    prompt_mode:   document.getElementById('cfg-aimode').value,
+    custom_prompt: null,
+    stt_backend:   document.getElementById('cfg-stt').value,
+    template_id:   'lecture_v1',
+    iil_config:    { enabled: true, tier1: true, tier2: true, tier3: true },
+  };
+}
+
+// ── Generated session code (mirrors UploadView.genCode shape) ─────────
+function genCode(firstFilename) {
+  const d = new Date();
+  const yy = String(d.getFullYear()).slice(-2);
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const stem = (firstFilename || 'upload-test').split('.')[0].slice(0, 24);
+  const clean = stem.replace(/[^A-Za-z0-9_-]/g, '_');
+  const suffix = Math.random().toString(36).slice(2, 6);
+  return `${mm}${dd}${yy}_${clean}_${suffix}`;
+}
+
+// ── Session create ────────────────────────────────────────────────────
+document.getElementById('btn-create').addEventListener('click', async () => {
+  const t = refreshAuth();
+  if (!t) return;
+  const firstFile = SLOTS.map(s => getSlotFile(s.id)).find(f => !!f);
+  const code = genCode(firstFile ? firstFile.name : null);
+  const body = {
+    code,
+    title:           code.replace(/_/g, ' '),
+    presenter:       '',
+    duration_sec:    null,
+    attendee_count:  null,
+    taxonomy:        [],
+    pipeline_config: buildPipelineConfig(),
+  };
+  log('step', 'POST /v1/sessions', { code, pipeline_config: body.pipeline_config });
+  try {
+    const res = await fetch('/v1/sessions', {
+      method: 'POST',
+      headers: {
+        'Content-Type':    'application/json',
+        'Authorization':   'Bearer ' + t,
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+      body: JSON.stringify(body),
+    });
+    const txt = await res.text();
+    const u = unwrap(txt);
+    log(res.ok && u.ok ? 'ok' : 'err', `  response ${res.status}`, { data: u.data, error: u.error });
+    if (res.ok && u.data && u.data.id) {
+      document.getElementById('session-id').value = u.data.id;
+      setSessStatus('CREATED', 'ok');
+      log('ok', 'session_id=' + u.data.id + '  code=' + u.data.code);
+    } else if (!res.ok) {
+      log('err', '  session create failed', { raw: txt.slice(0, 400) });
+    }
+  } catch (e) {
+    log('err', 'fetch failed: ' + e.message);
+  }
+});
+
+function setSessStatus(text, cls) {
+  const el = document.getElementById('sess-status');
+  el.className = 'stat ' + cls; el.textContent = text;
+}
+document.getElementById('session-id').addEventListener('input', e => {
+  setSessStatus(e.target.value ? 'SET' : '—', e.target.value ? 'info' : '');
+});
+
+// ── File pickers ──────────────────────────────────────────────────────
+const SLOTS = [
+  { id: 'f-video',    role: 'video',    label: 'video'    },
+  { id: 'f-audio',    role: 'audio',    label: 'audio'    },
+  { id: 'f-slide1',   role: 'slide',    label: 'slide #1' },
+  { id: 'f-slide2',   role: 'slide',    label: 'slide #2' },
+  { id: 'f-manifest', role: 'manifest', label: 'manifest' },
+  { id: 'f-chat',     role: 'chat',     label: 'chat'     },
+];
+function getSlotFile(id) { return document.getElementById(id).files[0] || null; }
+function renderFileInfo() {
+  const parts = [];
+  let total = 0;
+  for (const s of SLOTS) {
+    const f = getSlotFile(s.id);
+    if (f) { parts.push(`<b>${s.label}:</b> ${escapeHtml(f.name)} (${(f.size/1024/1024).toFixed(2)} MB)`); total += f.size; }
+  }
+  const info = document.getElementById('file-info');
+  info.innerHTML = parts.length ? parts.join('<br/>') + `<br/><b>total:</b> ${(total/1024/1024).toFixed(2)} MB` : '—';
+}
+for (const s of SLOTS) {
+  document.getElementById(s.id).addEventListener('change', e => {
+    const f = e.target.files[0];
+    if (f) log('info', `${s.label} picked`, { name: f.name, size: f.size, type: f.type, role: s.role });
+    renderFileInfo();
+  });
+}
+
+// ── Clear log ─────────────────────────────────────────────────────────
+document.getElementById('btn-clear').addEventListener('click', () => { logEl.innerHTML = ''; });
+
+// ── Progress bar ──────────────────────────────────────────────────────
+function setProgress(pct) {
+  const p = document.getElementById('progress');
+  if (pct === null) { p.classList.remove('active'); p.firstElementChild.style.width = '0%'; return; }
+  p.classList.add('active');
+  p.firstElementChild.style.width = pct + '%';
+}
+
+// ── Direct-to-GCS upload ──────────────────────────────────────────────
+// Mirrors UploadView.processBatch:
+//   per file:  POST /v1/gcs/upload-url → PUT signed URL
+//   then once: POST /v1/gcs/upload-complete with the full file manifest
+document.getElementById('btn-gcs').addEventListener('click', async () => {
+  const t = refreshAuth();
+  if (!t) return;
+  const sid = document.getElementById('session-id').value.trim();
+  if (!sid) { log('err', 'no session_id — click "Create new" or paste one'); return; }
+
+  const queue = [];
+  for (const s of SLOTS) {
+    const f = getSlotFile(s.id);
+    if (f) queue.push({ role: s.role, label: s.label, file: f });
+  }
+  if (!queue.length) { log('err', 'no files selected'); return; }
+
+  log('step', `══ GCS PATH (${queue.length} files, sequential) ══`);
+
+  const completeFiles = [];
+
+  for (const { role, label, file: f } of queue) {
+    log('step', `── ${label} (role=${role}): ${f.name} (${(f.size/1024/1024).toFixed(2)} MB) ──`);
+
+    // Step 1: signed URL
+    const t0 = performance.now();
+    let signedUrl, gcsUri;
+    try {
+      const res = await fetch('/v1/gcs/upload-url', {
+        method: 'POST',
+        headers: {
+          'Content-Type':    'application/json',
+          'Authorization':   'Bearer ' + t,
+          'Idempotency-Key': crypto.randomUUID(),
+        },
+        body: JSON.stringify({
+          session_id: sid,
+          filename:   f.name,
+          role:       role,
+          mime_type:  f.type || 'application/octet-stream',
+        }),
+      });
+      const txt = await res.text();
+      const u = unwrap(txt);
+      log(res.ok && u.ok ? 'ok' : 'err', `  /upload-url ${res.status} in ${Math.round(performance.now()-t0)}ms`,
+          { data: u.data, error: u.error });
+      if (!res.ok || !u.data) { log('err', '  aborting file — signed URL denied'); continue; }
+      signedUrl = u.data.signed_url;
+      gcsUri    = u.data.gcs_uri;
+      if (!signedUrl) { log('err', 'no signed_url in response'); continue; }
+      log('info', `  signed URL acquired, gcs_uri=${gcsUri}`);
+    } catch (e) {
+      log('err', 'signed URL fetch failed: ' + e.message);
+      continue;
+    }
+
+    // Step 2: PUT to GCS
+    const putOk = await new Promise((resolve) => {
+      const t1 = performance.now();
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', signedUrl, true);
+      xhr.setRequestHeader('Content-Type', f.type || 'application/octet-stream');
+      xhr.timeout = 15 * 60 * 1000;
+
+      xhr.upload.onloadstart = () => log('info', '  upload.onloadstart — bytes starting to leave browser');
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) {
+          setProgress((e.loaded / e.total) * 100);
+          if (e.loaded === e.total) log('ok', `  bytes sent: ALL ${e.total}`);
+        }
+      };
+      xhr.upload.onerror   = () => log('err',  '  upload.onerror — PUT DURING body (likely CORS or network)');
+      xhr.upload.ontimeout = () => log('err',  '  upload.ontimeout — PUT timed out DURING body');
+      xhr.upload.onabort   = () => log('warn', '  upload.onabort — aborted DURING body send');
+      xhr.onerror   = () => log('err',  '  xhr.onerror — network layer (status=0 typically means CORS block)');
+      xhr.ontimeout = () => log('err',  '  xhr.ontimeout — request timed out');
+      xhr.onabort   = () => log('warn', '  xhr.onabort — request aborted');
+      xhr.onload = () => {
+        setProgress(null);
+        const ms = Math.round(performance.now() - t1);
+        const ok = xhr.status >= 200 && xhr.status < 300;
+        log(ok ? 'ok' : 'err',
+            `  PUT ${xhr.status} elapsed=${ms}ms`,
+            { body: (xhr.responseText || '').slice(0, 300) });
+        if (ok) log('ok', `  ✓ landed at ${gcsUri}`);
+        resolve(ok);
+      };
+      xhr.onloadend = () => resolve(false);     // safety net (no-op if onload already resolved)
+      xhr.send(f);
+    });
+
+    if (putOk) {
+      completeFiles.push({
+        gcs_uri:      gcsUri,
+        role:         role,
+        filename:     f.name,
+        content_type: f.type || 'application/octet-stream',
+        size_bytes:   f.size,
+      });
+    }
+  }
+
+  // Step 3: finalize → POST /v1/gcs/upload-complete (R7 scope-validated, writes Source rows + kicks ingest)
+  if (!completeFiles.length) {
+    log('err', '══ no files landed — skipping upload-complete ══');
+    return;
+  }
+  log('step', `POST /v1/gcs/upload-complete (${completeFiles.length} files)`);
+  try {
+    const tF = performance.now();
+    const res = await fetch('/v1/gcs/upload-complete', {
+      method: 'POST',
+      headers: {
+        'Content-Type':    'application/json',
+        'Authorization':   'Bearer ' + t,
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+      body: JSON.stringify({ session_id: sid, files: completeFiles }),
+    });
+    const txt = await res.text();
+    const u = unwrap(txt);
+    log(res.ok && u.ok ? 'ok' : 'err', `  /upload-complete ${res.status} in ${Math.round(performance.now()-tF)}ms`,
+        { data: u.data, error: u.error, raw: res.ok ? null : txt.slice(0, 400) });
+    if (res.ok && u.data) {
+      log('ok', `  ✓ accepted ${(u.data.accepted || []).length} file(s) — ingest should be running`);
+      log('info', `  watch progress: /p/${sid}`);
+    }
+  } catch (e) {
+    log('err', '/upload-complete fetch failed: ' + e.message);
+  }
+  log('ok', '══ GCS path complete ══');
+});
+
+// ── Init ──────────────────────────────────────────────────────────────
+refreshAuth();
+refreshVersion();
+log('info', 'diagnostic page loaded — pick a session + file, click "Direct to GCS"');
+</script>
+</body>
+</html>

@@ -193,5 +193,16 @@ if _FRONTEND_DIST.exists():
         return FileResponse(_FRONTEND_DIST / "index.html")
 
     @app.get("/{path:path}")
-    async def spa_fallback(path: str) -> FileResponse:  # noqa: ARG001
+    async def spa_fallback(path: str) -> FileResponse:
+        # Serve a real file when it exists in dist (e.g. prototype.html,
+        # upload-test.html, favicon.svg, fonts/*). Otherwise fall through to
+        # index.html so the Vue router can handle the route client-side.
+        candidate = (_FRONTEND_DIST / path).resolve()
+        try:
+            candidate.relative_to(_FRONTEND_DIST.resolve())
+        except ValueError:
+            # Path-traversal guard — refuse anything outside dist.
+            return FileResponse(_FRONTEND_DIST / "index.html")
+        if candidate.is_file():
+            return FileResponse(candidate)
         return FileResponse(_FRONTEND_DIST / "index.html")
