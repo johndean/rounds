@@ -80,6 +80,27 @@ async function onResetSlots(): Promise<void> {
       >Open upload diagnostic →</a>
     </div>
     <div class="set-card-block">
+      <div class="set-eyebrow">PROCESSING · DEVTOOLS DIAGNOSTIC</div>
+      <h4 :style="{ margin: '6px 0 6px', fontSize: '16px', fontWeight: 700 }">Processing pipeline diagnostic</h4>
+      <p :style="{ fontSize: '13px', color: 'var(--fg2)', lineHeight: 1.6, margin: '0 0 12px' }">
+        Stage 2 of the pipeline — after <code>/upload-complete</code> kicks ingest.
+        <strong>Snapshot</strong> reads every session-scoped endpoint in parallel
+        (status, sources, slides, segments, polls, audit log, failure reason,
+        stage assignees, SOP state, discrepancies). <strong>Subscribe</strong> opens
+        <code>/v1/ws/sessions/{id}</code> and streams every WS event live.
+        <strong>Triggers</strong> re-runs <code>reingest</code> / <code>realign</code> /
+        <code>autoplace-polls</code> / <code>init-session-stages</code> when a stage
+        gets stuck.
+      </p>
+      <a
+        href="/process-test.html"
+        target="_blank"
+        rel="noopener"
+        class="btn btn--tertiary"
+        data-test-id="settings-diag-process-test"
+      >Open processing diagnostic →</a>
+    </div>
+    <div class="set-card-block">
       <div class="set-eyebrow">RATE LIMIT · STUCK SLOT RECOVERY</div>
       <h4 :style="{ margin: '6px 0 6px', fontSize: '16px', fontWeight: 700 }">Reset rate-limit slots</h4>
       <p :style="{ fontSize: '13px', color: 'var(--fg2)', lineHeight: 1.6, margin: '0 0 12px' }">

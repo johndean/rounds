@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rounds Processing Diagnostic</title>
+<script>
+  // Auth gate — runs before any render. No token or expired token → /login.
+  (function () {
+    var t = localStorage.getItem('rounds_jwt_v1');
+    if (!t) { window.location.replace('/login'); return; }
+    try {
+      var p = JSON.parse(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      if (p && p.exp && (p.exp * 1000) < Date.now()) {
+        localStorage.removeItem('rounds_jwt_v1');
+        window.location.replace('/login');
+      }
+    } catch (e) {
+      localStorage.removeItem('rounds_jwt_v1');
+      window.location.replace('/login');
+    }
+  })();
+</script>
+<style>
+  :root {
+    --bg: #0c0d10; --surface: #15171c; --surface2: #1c1f26;
+    --border: #2a2e36; --text: #e5e7eb; --muted: #8b93a7; --faint: #555b6a;
+    --accent: #59b1ff; --ok: #66d98c; --err: #ff6a7a; --warn: #e8c36a;
+    --purple: #b18cf2;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; font-size: 13px; }
+  body { padding: 24px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px 0; }
+  .sub { color: var(--muted); margin-bottom: 24px; font-size: 12px; }
+  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  .panel h2 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 12px 0; font-weight: 600; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  input[type="text"] { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 6px; font-family: inherit; font-size: 12px; flex: 1; min-width: 220px; }
+  button { background: var(--surface2); border: 1px solid var(--border); color: var(--text); padding: 10px 16px; border-radius: 6px; cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 600; transition: all .15s; }
+  button:hover:not(:disabled) { background: var(--border); border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
+  button.primary { border-color: var(--accent); color: var(--accent); }
+  button.warn    { border-color: var(--warn);   color: var(--warn); }
+  button.purple  { border-color: var(--purple); color: var(--purple); }
+  button.danger  { border-color: var(--err);    color: var(--err); }
+  .btn-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+  .btn-grid button { padding: 12px; font-size: 12px; }
+  .stat { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-left: 6px; }
+  .stat.ok   { background: #16381f; color: var(--ok); }
+  .stat.err  { background: #381619; color: var(--err); }
+  .stat.warn { background: #38321a; color: var(--warn); }
+  .stat.info { background: #1a2b3b; color: var(--accent); }
+  #log { background: #08090b; border: 1px solid var(--border); border-radius: 6px; padding: 12px; height: 520px; overflow-y: auto; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 11px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+  .log-ts  { color: var(--faint); }
+  .log-lvl { font-weight: 700; display: inline-block; min-width: 48px; }
+  .log-lvl.info { color: var(--accent); }
+  .log-lvl.ok   { color: var(--ok); }
+  .log-lvl.err  { color: var(--err); }
+  .log-lvl.warn { color: var(--warn); }
+  .log-lvl.step { color: var(--text); }
+  .log-lvl.ws   { color: var(--purple); }
+  .log-ctx { color: var(--muted); }
+  .small { color: var(--muted); font-size: 11px; }
+  .kv { display: flex; gap: 6px; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .kv b { color: var(--text); font-weight: 600; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; font-size: 11px; }
+  .grid-2 b { color: var(--text); font-weight: 600; }
+  .grid-2 .v { color: var(--muted); }
+</style>
+</head>
+<body>
+  <h1>Rounds Processing Diagnostic</h1>
+  <div class="sub">Stage 2 of the pipeline — after upload-complete fires ingest. Snapshot reads every session-scoped endpoint, Subscribe streams every WS event, Triggers re-runs the recoverable stages.</div>
+
+  <!-- ── Auth panel ───────────────────────────────────────────────────── -->
+  <div class="panel">
+    <h2>1. Auth <span id="auth-status" class="stat">—</span></h2>
+    <div class="kv"><b>rounds_jwt_v1:</b> <span id="token-preview">—</span></div>
+    <div class="kv"><b>payload.sub:</b> <span id="token-sub">—</span></div>
+    <div class="kv"><b>payload.exp:</b> <span id="token-exp">—</span></div>
+    <div class="small">Token pulled from <code>localStorage.rounds_jwt_v1</code>.</div>
+  </div>
+
+  <!-- ── Build identity panel ─────────────────────────────────────────── -->
+  <div class="panel">
+    <h2>2. Build identity <span id="ver-status" class="stat">—</span></h2>
+    <div class="kv"><b>api commit:</b> <span id="api-commit">—</span></div>
+    <div class="kv"><b>api env:</b> <span id="api-env">—</span></div>
+  </div>
+
+  <!-- ── Session panel ────────────────────────────────────────────────── -->
+  <div class="panel">
+    <h2>3. Session <span id="sess-status" class="stat">—</span></h2>
+    <div class="row">
+      <input type="text" id="session-id" placeholder="Paste session_id (UUID) — or append ?sid=… to URL" />
+      <button id="btn-snapshot" class="primary">Snapshot</button>
+      <button id="btn-subscribe" class="purple">Subscribe (WS)</button>
+      <button id="btn-unsubscribe" disabled>Unsubscribe</button>
+    </div>
+    <div class="small">Snapshot fires all session-scoped GETs in parallel. Subscribe opens <code>/v1/ws/sessions/{id}</code> and streams every <code>processing_update</code> / <code>metrics_update</code> / <code>session_failed</code> as it happens.</div>
+  </div>
+
+  <!-- ── Snapshot summary card ────────────────────────────────────────── -->
+  <div class="panel" id="snap-card" style="display:none">
+    <h2>4. Snapshot summary <span id="snap-status" class="stat">—</span></h2>
+    <div class="grid-2" id="snap-grid">—</div>
+  </div>
+
+  <!-- ── Manual triggers panel ────────────────────────────────────────── -->
+  <div class="panel">
+    <h2>5. Manual triggers</h2>
+    <div class="btn-grid">
+      <button id="btn-reingest"   class="warn"  title="POST /v1/diag/reingest/{id} — re-runs the full ingest pipeline">Re-ingest</button>
+      <button id="btn-realign"    class="warn"  title="POST /v1/diag/realign/{id} — re-runs the STT↔Gemini alignment">Re-align</button>
+      <button id="btn-autoplace"  class="warn"  title="POST /v1/diag/autoplace-polls/{id} — re-resolves polls.anchor_segment">Autoplace polls</button>
+      <button id="btn-initstages" class="warn"  title="POST /v1/diag/init-session-stages/{id} — applies the Type matrix defaults">Init stages</button>
+    </div>
+    <div class="small" style="margin-top:8px">Each is idempotent. Use these only when Snapshot shows a stage didn't populate or WS shows a stalled state.</div>
+  </div>
+
+  <!-- ── Log panel ────────────────────────────────────────────────────── -->
+  <div class="panel">
+    <h2>6. Event log <button id="btn-clear" class="danger" style="float:right;padding:4px 10px;font-size:11px">Clear</button></h2>
+    <div id="log"></div>
+  </div>
+
+<script>
+// ── Logging ────────────────────────────────────────────────────────────
+const logEl = document.getElementById('log');
+function log(lvl, msg, ctx) {
+  const ts = new Date().toISOString().substr(11, 12);
+  const line = document.createElement('div');
+  line.innerHTML =
+    `<span class="log-ts">${ts}</span>  <span class="log-lvl ${lvl}">${lvl.toUpperCase()}</span>  ${escapeHtml(msg)}` +
+    (ctx ? `  <span class="log-ctx">${escapeHtml(JSON.stringify(ctx))}</span>` : '');
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ── Global error capture ──────────────────────────────────────────────
+window.addEventListener('error', e => log('err', 'window.onerror: ' + e.message, { file: e.filename, line: e.lineno }));
+window.addEventListener('unhandledrejection', e => log('err', 'unhandledrejection: ' + (e.reason && e.reason.message || e.reason)));
+
+// ── Envelope-aware parse ──────────────────────────────────────────────
+function unwrap(body) {
+  try {
+    const j = typeof body === 'string' ? JSON.parse(body) : body;
+    if (j && typeof j === 'object' && 'success' in j && 'data' in j) {
+      return { ok: j.success !== false, data: j.data, error: j.error };
+    }
+    return { ok: true, data: j, error: null };
+  } catch (e) {
+    return { ok: false, data: null, error: { code: 'PARSE', message: e.message } };
+  }
+}
+
+// ── Auth panel ────────────────────────────────────────────────────────
+function decodeJwt(t) {
+  try { return JSON.parse(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); }
+  catch { return null; }
+}
+function refreshAuth() {
+  const t = localStorage.getItem('rounds_jwt_v1');
+  const statusEl = document.getElementById('auth-status');
+  if (!t) {
+    statusEl.className = 'stat err'; statusEl.textContent = 'MISSING';
+    document.getElementById('token-preview').textContent = '(none)';
+    log('err', 'no rounds_jwt_v1 in localStorage — log in on /login first');
+    return null;
+  }
+  document.getElementById('token-preview').textContent = t.slice(0, 40) + '…';
+  const p = decodeJwt(t);
+  if (p) {
+    document.getElementById('token-sub').textContent = p.sub || '—';
+    document.getElementById('token-exp').textContent = p.exp ? new Date(p.exp * 1000).toISOString() : '—';
+    const expired = p.exp && (p.exp * 1000) < Date.now();
+    statusEl.className = 'stat ' + (expired ? 'err' : 'ok');
+    statusEl.textContent = expired ? 'EXPIRED' : 'OK';
+  } else {
+    statusEl.className = 'stat warn'; statusEl.textContent = 'UNDECODABLE';
+  }
+  return t;
+}
+
+// ── Build identity ────────────────────────────────────────────────────
+async function refreshVersion() {
+  const statusEl = document.getElementById('ver-status');
+  try {
+    const res = await fetch('/v1/version');
+    const u = unwrap(await res.text());
+    if (res.ok && u.data) {
+      document.getElementById('api-commit').textContent = (u.data.commit_short || '—') + (u.data.commit ? ` (${u.data.commit})` : '');
+      document.getElementById('api-env').textContent = u.data.env || '—';
+      statusEl.className = 'stat ok'; statusEl.textContent = 'LIVE';
+    } else {
+      statusEl.className = 'stat err'; statusEl.textContent = 'FAIL';
+    }
+  } catch (e) {
+    statusEl.className = 'stat err'; statusEl.textContent = 'NETWORK';
+    log('err', '/v1/version fetch failed: ' + e.message);
+  }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────
+function getSid() {
+  return document.getElementById('session-id').value.trim();
+}
+function setSessStatus(text, cls) {
+  const el = document.getElementById('sess-status');
+  el.className = 'stat ' + cls; el.textContent = text;
+}
+document.getElementById('session-id').addEventListener('input', e => {
+  setSessStatus(e.target.value ? 'SET' : '—', e.target.value ? 'info' : '');
+});
+
+async function apiGet(t, path) {
+  const t0 = performance.now();
+  try {
+    const res = await fetch(path, { headers: { 'Authorization': 'Bearer ' + t } });
+    const txt = await res.text();
+    const u = unwrap(txt);
+    const ms = Math.round(performance.now() - t0);
+    return { ok: res.ok && u.ok, status: res.status, ms, data: u.data, error: u.error, raw: txt };
+  } catch (e) {
+    return { ok: false, status: 0, ms: Math.round(performance.now() - t0), data: null, error: { code: 'NETWORK', message: e.message } };
+  }
+}
+
+async function apiPost(t, path, body) {
+  const t0 = performance.now();
+  try {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: {
+        'Content-Type':    'application/json',
+        'Authorization':   'Bearer ' + t,
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    const txt = await res.text();
+    const u = unwrap(txt);
+    return { ok: res.ok && u.ok, status: res.status, ms: Math.round(performance.now() - t0), data: u.data, error: u.error, raw: txt };
+  } catch (e) {
+    return { ok: false, status: 0, ms: Math.round(performance.now() - t0), data: null, error: { code: 'NETWORK', message: e.message } };
+  }
+}
+
+function fmtCount(label, v) {
+  if (Array.isArray(v)) return `${label}: ${v.length}`;
+  if (v && typeof v === 'object') return `${label}: ${Object.keys(v).length} keys`;
+  return `${label}: ${v ?? '—'}`;
+}
+
+// ── Snapshot ──────────────────────────────────────────────────────────
+const SNAP_GETS = [
+  // key,        label,                       path-builder (sid → url)
+  ['session',   'GET /v1/sessions/{id}',                  sid => `/v1/sessions/${sid}`],
+  ['pipeline',  'GET /v1/sessions/{id}/pipeline-config',  sid => `/v1/sessions/${sid}/pipeline-config`],
+  ['sources',   'GET /v1/sessions/{id}/sources',          sid => `/v1/sessions/${sid}/sources`],
+  ['slides',    'GET /v1/sessions/{id}/slides',           sid => `/v1/sessions/${sid}/slides`],
+  ['segments',  'GET /v1/sessions/{id}/segments',         sid => `/v1/sessions/${sid}/segments`],
+  ['speakers',  'GET /v1/sessions/{id}/speakers',         sid => `/v1/sessions/${sid}/speakers`],
+  ['polls',     'GET /v1/sessions/{id}/polls',            sid => `/v1/sessions/${sid}/polls`],
+  ['chat',      'GET /v1/sessions/{id}/chat',             sid => `/v1/sessions/${sid}/chat`],
+  ['words',     'GET /v1/sessions/{id}/words',            sid => `/v1/sessions/${sid}/words`],
+  ['capvideo',  'GET /v1/sessions/{id}/captioned-video',  sid => `/v1/sessions/${sid}/captioned-video`],
+  ['mediaurl',  'GET /v1/sessions/{id}/media-url',        sid => `/v1/sessions/${sid}/media-url`],
+  ['audit',     'GET /v1/sessions/{id}/audit-log',        sid => `/v1/sessions/${sid}/audit-log`],
+  ['failure',   'GET /v1/sessions/{id}/failure-reason',   sid => `/v1/sessions/${sid}/failure-reason`],
+  ['assignees', 'GET /v1/sessions/{id}/stage-assignees',  sid => `/v1/sessions/${sid}/stage-assignees`],
+  ['sop',       'GET /v1/sop?session_id={id}',            sid => `/v1/sop?session_id=${sid}`],
+  ['discrep',   'GET /v1/discrepancies?session_id={id}',  sid => `/v1/discrepancies?session_id=${sid}`],
+];
+
+document.getElementById('btn-snapshot').addEventListener('click', async () => {
+  const t = refreshAuth();        if (!t) return;
+  const sid = getSid();
+  if (!sid) { log('err', 'no session_id'); return; }
+
+  log('step', `══ SNAPSHOT for ${sid} (${SNAP_GETS.length} endpoints in parallel) ══`);
+  const t0 = performance.now();
+  const results = await Promise.all(SNAP_GETS.map(async ([key, label, build]) => {
+    const r = await apiGet(t, build(sid));
+    log(r.ok ? 'ok' : 'err', `  ${label}  ${r.status}  ${r.ms}ms`,
+        r.ok ? { summary: summarize(key, r.data) } : { error: r.error, raw: (r.raw || '').slice(0, 200) });
+    return [key, r];
+  }));
+  const totalMs = Math.round(performance.now() - t0);
+  log('step', `══ SNAPSHOT complete in ${totalMs}ms ══`);
+
+  // Build the snapshot summary card (top-level pipeline state)
+  renderSnapshot(Object.fromEntries(results));
+});
+
+function summarize(key, data) {
+  if (data === null || data === undefined) return null;
+  if (key === 'session') {
+    return {
+      status: data.status, code: data.code,
+      title: data.title, title_long: data.title_long, title_short: data.title_short,
+      presenter: data.presenter, duration_sec: data.duration_sec,
+      word_count: data.word_count, segment_count: data.segment_count,
+      attendee_count: data.attendee_count, taxonomy_count: (data.taxonomy || []).length,
+      session_type_id: data.session_type_id,
+    };
+  }
+  if (key === 'pipeline') return data;
+  if (Array.isArray(data)) return { count: data.length, sample: data[0] ?? null };
+  return data;
+}
+
+function renderSnapshot(r) {
+  const sess = r.session?.data || {};
+  const sources = r.sources?.data || [];
+  const slides = r.slides?.data || [];
+  const segments = r.segments?.data || [];
+  const speakers = r.speakers?.data || [];
+  const polls = r.polls?.data || [];
+  const chat = r.chat?.data || [];
+  const words = r.words?.data || [];
+  const assignees = r.assignees?.data || [];
+  const audit = r.audit?.data || [];
+  const failure = r.failure?.data;
+  const pcfg = r.pipeline?.data || {};
+  const sop = r.sop?.data || null;
+  const discrep = r.discrep?.data || [];
+
+  const pollsPlaced = polls.filter(p => p.anchor_segment_id || p.anchor_segment).length;
+  const status = sess.status || '—';
+  const isFailed = status === 'failed';
+  document.getElementById('snap-status').className = 'stat ' + (isFailed ? 'err' : (status === 'ready' || status === 'completed' ? 'ok' : 'info'));
+  document.getElementById('snap-status').textContent = status.toUpperCase();
+
+  const rows = [
+    ['code',                    sess.code],
+    ['title (display)',         sess.title],
+    ['title_long',              sess.title_long || '—'],
+    ['title_short',             sess.title_short || '—'],
+    ['presenter',               sess.presenter || '—'],
+    ['session_type_id',         sess.session_type_id || '— (no Type picked)'],
+    ['status',                  status],
+    ['duration_sec',            sess.duration_sec ?? '—'],
+    ['word_count',              sess.word_count ?? '—'],
+    ['segment_count',           sess.segment_count ?? '—'],
+    ['ai_pipeline',             pcfg.ai_pipeline || '—'],
+    ['ai_mode / model',         `${pcfg.ai_mode || '—'} / ${pcfg.ai_model || '—'}`],
+    ['stt_backend',             pcfg.stt_backend || '—'],
+    ['template_id',             pcfg.template_id || '—'],
+    ['iil tiers',               pcfg.iil_config ? `t1=${pcfg.iil_config.tier1} t2=${pcfg.iil_config.tier2} t3=${pcfg.iil_config.tier3}` : '—'],
+    ['sources uploaded',        Array.isArray(sources) ? sources.length : '—'],
+    ['slides extracted',        slides.length],
+    ['segments persisted',      segments.length],
+    ['speakers identified',     speakers.length],
+    ['polls parsed / placed',   `${polls.length} / ${pollsPlaced}`],
+    ['chat messages',           chat.length],
+    ['word alignment rows',     words.length],
+    ['stage assignees rows',    assignees.length],
+    ['discrepancies',           Array.isArray(discrep) ? discrep.length : (discrep?.items?.length ?? '—')],
+    ['audit-log entries',       audit.length],
+    ['sop state',               sop ? (sop.stage || JSON.stringify(sop).slice(0, 60)) : '—'],
+    ['failure reason',          failure?.reason || (isFailed ? '(no reason captured)' : '—')],
+    ['failure category',        failure?.category || '—'],
+  ];
+
+  const card = document.getElementById('snap-card');
+  card.style.display = 'block';
+  document.getElementById('snap-grid').innerHTML = rows.map(([k, v]) =>
+    `<b>${escapeHtml(k)}</b><span class="v">${escapeHtml(String(v))}</span>`
+  ).join('');
+
+  // Tail the audit log so the most recent activity is visible inline
+  if (audit.length) {
+    log('step', `── recent audit-log (last ${Math.min(8, audit.length)} of ${audit.length}) ──`);
+    audit.slice(-8).forEach(row => log('info', `  [${row.ts || row.created_at || '?'}] ${row.event || row.kind || row.action || '?'}`, row));
+  }
+  if (failure?.log_tail?.length) {
+    log('step', `── failure log_tail (${failure.log_tail.length} lines) ──`);
+    failure.log_tail.forEach(line => log('err', `  ${typeof line === 'string' ? line : JSON.stringify(line)}`));
+  }
+}
+
+// ── WebSocket subscribe ───────────────────────────────────────────────
+let ws = null;
+function wsUrl(sid) {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${location.host}/v1/ws/sessions/${sid}`;
+}
+
+document.getElementById('btn-subscribe').addEventListener('click', () => {
+  const sid = getSid();
+  if (!sid) { log('err', 'no session_id'); return; }
+  if (ws) { log('warn', 'already subscribed — unsubscribe first'); return; }
+
+  const url = wsUrl(sid);
+  log('step', `WS open ${url}`);
+  try {
+    ws = new WebSocket(url);
+  } catch (e) {
+    log('err', 'WS construct failed: ' + e.message);
+    return;
+  }
+
+  ws.onopen = () => {
+    log('ok', 'WS connected — streaming events');
+    document.getElementById('btn-subscribe').disabled = true;
+    document.getElementById('btn-unsubscribe').disabled = false;
+    // Send a keep-alive ping every 25s (server echoes-ignores; keeps proxies happy)
+    ws._pingTimer = setInterval(() => { try { ws.send('ping'); } catch {} }, 25000);
+  };
+  ws.onmessage = (ev) => {
+    let parsed;
+    try { parsed = JSON.parse(ev.data); } catch { parsed = ev.data; }
+    const evType = parsed && typeof parsed === 'object' ? (parsed.type || parsed.event || 'message') : 'raw';
+    log('ws', evType, parsed);
+  };
+  ws.onerror = (e) => log('err', 'WS error', { type: e.type, readyState: ws?.readyState });
+  ws.onclose = (e) => {
+    log('warn', `WS closed code=${e.code} reason=${e.reason || '(none)'} clean=${e.wasClean}`);
+    if (ws?._pingTimer) clearInterval(ws._pingTimer);
+    ws = null;
+    document.getElementById('btn-subscribe').disabled = false;
+    document.getElementById('btn-unsubscribe').disabled = true;
+  };
+});
+
+document.getElementById('btn-unsubscribe').addEventListener('click', () => {
+  if (!ws) return;
+  log('step', 'WS unsubscribe (client-initiated)');
+  try { ws.close(1000, 'client'); } catch {}
+});
+
+// ── Manual triggers ───────────────────────────────────────────────────
+async function runTrigger(label, path, body) {
+  const t = refreshAuth(); if (!t) return;
+  const sid = getSid();
+  if (!sid) { log('err', `${label}: no session_id`); return; }
+  log('step', `POST ${path}`);
+  const r = await apiPost(t, path, body);
+  log(r.ok ? 'ok' : 'err', `  ${label}  ${r.status}  ${r.ms}ms`,
+      r.ok ? r.data : { error: r.error, raw: (r.raw || '').slice(0, 300) });
+}
+
+document.getElementById('btn-reingest').addEventListener('click',   () => runTrigger('reingest',    `/v1/diag/reingest/${getSid()}`));
+document.getElementById('btn-realign').addEventListener('click',    () => runTrigger('realign',     `/v1/diag/realign/${getSid()}`));
+document.getElementById('btn-autoplace').addEventListener('click',  () => runTrigger('autoplace',   `/v1/diag/autoplace-polls/${getSid()}`));
+document.getElementById('btn-initstages').addEventListener('click', () => runTrigger('init-stages', `/v1/diag/init-session-stages/${getSid()}`));
+
+// ── Clear log ─────────────────────────────────────────────────────────
+document.getElementById('btn-clear').addEventListener('click', () => { logEl.innerHTML = ''; });
+
+// ── URL ?sid=… deep-link ──────────────────────────────────────────────
+(function () {
+  const m = location.search.match(/[?&]sid=([0-9a-fA-F-]+)/);
+  if (m) {
+    document.getElementById('session-id').value = m[1];
+    setSessStatus('SET', 'info');
+  }
+})();
+
+// ── Init ──────────────────────────────────────────────────────────────
+refreshAuth();
+refreshVersion();
+log('info', 'processing diagnostic loaded — paste session_id, click Snapshot or Subscribe');
+</script>
+</body>
+</html>
