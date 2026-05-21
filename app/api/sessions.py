@@ -72,17 +72,41 @@ class SessionOut(BaseModel):
     segment_count: Optional[int]
     attendee_count: Optional[int]
     taxonomy: list[str]
+    # FK to session_types row chosen at ingest. Drives auto-init of
+    # session_stage_assignees from that Type's matrix (Unit 6). Nullable
+    # until migration 044 backfills or the manifest assigns one.
+    session_type_id: Optional[UUID] = None
 
 
 class SessionPatch(BaseModel):
     """PATCH body — partial update. None means "leave unchanged"; an empty
     string ("") explicitly clears the field. Whitelist enforced server-side
     so unknown fields are silently ignored (MIC parity)."""
-    code:        Optional[str] = None
-    title:       Optional[str] = None
-    title_long:  Optional[str] = None
-    title_short: Optional[str] = None
-    presenter:   Optional[str] = None
+    code:            Optional[str] = None
+    title:           Optional[str] = None
+    title_long:      Optional[str] = None
+    title_short:    Optional[str] = None
+    presenter:       Optional[str] = None
+    session_type_id: Optional[UUID] = None
+
+
+class StageAssigneePatch(BaseModel):
+    """Body for `PUT /v1/sessions/{id}/stage-assignees/{stage}`.
+
+    Supports two shapes:
+      1. Frontend-friendly: `{assignee_email: "...", notify_email: true}` —
+         server resolves the email to either person_id or group_id (matches
+         the existing Settings → Types matrix picker contract).
+      2. Typed: `{person_id: "<uuid>"}` or `{group_id: "<uuid>"}` — direct
+         FK assignment, used when the inline picker knows the ID.
+
+    Empty body (all None) resets the stage to its Type-matrix default via
+    a re-init lookup. CHECK constraint enforces exactly one of
+    person_id/group_id is set; the resolver in the handler upholds that."""
+    assignee_email: Optional[str] = None     # "carlab@vin.com" | "Group: External" | "(unassigned)"
+    person_id:      Optional[UUID] = None
+    group_id:       Optional[UUID] = None
+    notify_email:   Optional[bool] = None
 
 
 # ─── Endpoints ─────────────────────────────────────────────────────────
@@ -112,7 +136,8 @@ async def list_sessions(
     sql = f"""
         SELECT s.id, s.code, s.title, s.title_long, s.title_short,
                s.presenter, s.status, s.duration_sec,
-               s.word_count, s.segment_count, s.attendee_count, s.taxonomy
+               s.word_count, s.segment_count, s.attendee_count, s.taxonomy,
+               s.session_type_id
         FROM sessions s
         {"JOIN sop_state st ON st.session_id = s.id AND st.stage = :stage" if stage else ""}
         WHERE {' AND '.join(where)}
@@ -153,7 +178,7 @@ async def create_session(payload: SessionIn, db: DbSession, user: CurrentUser) -
                     """
                     INSERT INTO sessions (code, title, presenter, duration_sec, attendee_count, taxonomy, status)
                     VALUES (:code, :title, :presenter, :duration_sec, :attendee_count, CAST(:taxonomy AS jsonb), 'uploading')
-                    RETURNING id, code, title, title_long, title_short, presenter, status, duration_sec, word_count, segment_count, attendee_count, taxonomy
+                    RETURNING id, code, title, title_long, title_short, presenter, status, duration_sec, word_count, segment_count, attendee_count, taxonomy, session_type_id
                     """
                 ),
                 {
@@ -293,6 +318,207 @@ async def get_pipeline_config(session_id: UUID, db: DbSession, _u: CurrentUser) 
     return dict(row)
 
 
+@router.get("/{session_id}/stage-assignees")
+async def get_session_stage_assignees(
+    session_id: UUID, db: DbSession, _user: CurrentUser,
+) -> list[dict]:
+    """
+    Per-session, per-stage assignees populated at ingest from the chosen
+    Type's matrix (Unit 6 of the Team & Roles port). Returns one row per
+    stage with the typed FK joined to people/groups so renames + deletes
+    propagate immediately. The Editor's right-rail Admin chip + the SOP
+    stepper render assignees from this endpoint.
+
+    `source` distinguishes 'default' (auto-populated at ingest) from
+    'manual' (operator override via future PATCH endpoint).
+    """
+    rows = (await db.execute(text(
+        """
+        SELECT ssa.stage, ssa.notify_email, ssa.source, ssa.assigned_at,
+               ssa.person_id, ssa.group_id,
+               p.email AS person_email, p.name AS person_name, p.role AS person_role,
+               p.avatar_color AS person_avatar_color,
+               g.name  AS group_name,
+               -- Display label that survives rename — JOIN-resolved.
+               COALESCE(p.name, 'Group: ' || g.name, '(unassigned)') AS assignee_label
+          FROM session_stage_assignees ssa
+          LEFT JOIN people p ON p.id = ssa.person_id
+          LEFT JOIN groups g ON g.id = ssa.group_id
+         WHERE ssa.session_id = :sid
+         ORDER BY ssa.stage
+        """
+    ), {"sid": str(session_id)})).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@router.put("/{session_id}/stage-assignees/{stage}")
+async def set_session_stage_assignee(
+    session_id: UUID,
+    stage:      str,
+    payload:    StageAssigneePatch,
+    db:         DbSession,
+    user:       CurrentUser,
+) -> dict:
+    """
+    Override a single stage's assignee for this session. Sets `source='manual'`
+    so the widget can render an override-indicator dot. Empty body resets the
+    stage to its Type-matrix default and flips `source` back to 'default'.
+
+    Resolution order:
+      1. payload.person_id (typed) wins if non-null.
+      2. payload.group_id (typed) wins if person_id is null.
+      3. payload.assignee_email parsed: "carlab@vin.com" → person,
+         "Group: External" → group, "(unassigned)" → both null (= reset).
+      4. All three null → reset to Type-matrix default for this stage.
+
+    CHECK constraint chk_session_stage_assignees_single_assignee guarantees
+    exactly one of person_id/group_id can be non-null at the DB level.
+    """
+    from sqlalchemy import text
+
+    person_id: str | None = str(payload.person_id) if payload.person_id else None
+    group_id:  str | None = str(payload.group_id)  if payload.group_id  else None
+
+    # Frontend-friendly assignee_email shape (matches the Settings matrix picker).
+    if person_id is None and group_id is None and payload.assignee_email:
+        email = payload.assignee_email.strip()
+        if email and email != "(unassigned)":
+            if email.startswith("Group: "):
+                row = (await db.execute(
+                    text("SELECT id FROM groups WHERE name = :n"),
+                    {"n": email[len("Group: "):]},
+                )).first()
+                group_id = str(row[0]) if row else None
+            else:
+                row = (await db.execute(
+                    text("SELECT id FROM people WHERE LOWER(email) = LOWER(:e)"),
+                    {"e": email},
+                )).first()
+                person_id = str(row[0]) if row else None
+
+    is_reset = person_id is None and group_id is None and payload.assignee_email != "(unassigned)" \
+        and not (payload.assignee_email and payload.assignee_email != "(unassigned)")
+
+    if is_reset:
+        # Pull the default for this stage from the session's Type (or org default).
+        default_row = (await db.execute(text(
+            """
+            SELECT sa.person_id, sa.group_id, sa.notify_email
+              FROM stage_assignees sa
+              JOIN sessions s ON s.id = CAST(:sid AS uuid)
+             WHERE sa.type_id = COALESCE(
+                 s.session_type_id,
+                 (SELECT id FROM session_types WHERE is_default = TRUE LIMIT 1)
+             )
+               AND sa.stage = :stage
+            """
+        ), {"sid": str(session_id), "stage": stage})).first()
+        if default_row:
+            person_id     = str(default_row[0]) if default_row[0] else None
+            group_id      = str(default_row[1]) if default_row[1] else None
+            notify_email  = bool(default_row[2]) if default_row[2] is not None else True
+            source        = "default"
+        else:
+            notify_email = True if payload.notify_email is None else payload.notify_email
+            source       = "default"
+    else:
+        notify_email = True if payload.notify_email is None else payload.notify_email
+        source       = "manual"
+
+    await db.execute(text(
+        """
+        INSERT INTO session_stage_assignees
+            (session_id, stage, person_id, group_id, notify_email, source, assigned_by, assigned_at)
+        VALUES
+            (CAST(:sid AS uuid), :stage,
+             CASE WHEN :pid IS NULL THEN NULL ELSE CAST(:pid AS uuid) END,
+             CASE WHEN :gid IS NULL THEN NULL ELSE CAST(:gid AS uuid) END,
+             :ne, :src, :actor, now())
+        ON CONFLICT (session_id, stage) DO UPDATE
+          SET person_id    = EXCLUDED.person_id,
+              group_id     = EXCLUDED.group_id,
+              notify_email = EXCLUDED.notify_email,
+              source       = EXCLUDED.source,
+              assigned_by  = EXCLUDED.assigned_by,
+              assigned_at  = now()
+        """
+    ), {
+        "sid":   str(session_id),
+        "stage": stage,
+        "pid":   person_id,
+        "gid":   group_id,
+        "ne":    notify_email,
+        "src":   source,
+        "actor": user.email,
+    })
+    await db.commit()
+
+    row = (await db.execute(text(
+        """
+        SELECT ssa.stage, ssa.notify_email, ssa.source, ssa.assigned_at,
+               ssa.person_id, ssa.group_id,
+               p.email AS person_email, p.name AS person_name, p.role AS person_role,
+               p.avatar_color AS person_avatar_color,
+               g.name  AS group_name,
+               COALESCE(p.name, 'Group: ' || g.name, '(unassigned)') AS assignee_label
+          FROM session_stage_assignees ssa
+          LEFT JOIN people p ON p.id = ssa.person_id
+          LEFT JOIN groups g ON g.id = ssa.group_id
+         WHERE ssa.session_id = :sid AND ssa.stage = :stage
+        """
+    ), {"sid": str(session_id), "stage": stage})).mappings().first()
+    return dict(row) if row else {"stage": stage, "source": source}
+
+
+@router.post("/{session_id}/stage-assignees/apply-type-defaults")
+async def apply_type_defaults(
+    session_id: UUID,
+    db:         DbSession,
+    user:       CurrentUser,
+    type_id:    Optional[UUID] = None,
+) -> dict:
+    """
+    Bulk-apply the session's Type matrix into session_stage_assignees.
+
+    Operator-triggered from the Session Detail Type picker's "Apply Type
+    defaults" banner. Overwrites every stage with the (optionally specified)
+    Type's matrix and marks `source='default'`. If `type_id` is omitted,
+    uses the session's existing `session_type_id` (falling back to org default).
+
+    Idempotent: re-running is safe.
+    """
+    from sqlalchemy import create_engine
+
+    from app.config import settings
+    from app.services.session_init import init_session_stages
+
+    # If the operator passed a new type_id, persist it first so init reads it.
+    if type_id is not None:
+        await db.execute(text(
+            "UPDATE sessions SET session_type_id = :tid, updated_at = now() "
+            "WHERE id = :sid AND deleted_at IS NULL"
+        ), {"tid": str(type_id), "sid": str(session_id)})
+
+    # Wipe existing rows so 'manual' overrides are intentionally replaced.
+    # The banner flow asks the operator to confirm this before clicking Apply.
+    await db.execute(text(
+        "DELETE FROM session_stage_assignees WHERE session_id = :sid"
+    ), {"sid": str(session_id)})
+    await db.commit()
+
+    sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+    engine = create_engine(sync_url)
+    try:
+        stages = init_session_stages(
+            engine, str(session_id),
+            type_id=str(type_id) if type_id else None,
+            actor=f"apply-type-defaults:{user.email}",
+        )
+    finally:
+        engine.dispose()
+    return {"session_id": str(session_id), "stages": stages}
+
+
 @router.get("/{session_id}", response_model=SessionOut)
 async def get_session(session_id: UUID, db: DbSession, _user: CurrentUser) -> dict:
     from sqlalchemy import text
@@ -302,7 +528,7 @@ async def get_session(session_id: UUID, db: DbSession, _user: CurrentUser) -> di
                 """
                 SELECT id, code, title, title_long, title_short,
                        presenter, status, duration_sec, word_count, segment_count,
-                       attendee_count, taxonomy
+                       attendee_count, taxonomy, session_type_id
                 FROM sessions
                 WHERE id = :id AND deleted_at IS NULL
                 """
@@ -343,7 +569,8 @@ async def update_session(
         f"UPDATE sessions SET {', '.join(set_clauses)} "
         "WHERE id = :sid AND deleted_at IS NULL "
         "RETURNING id, code, title, title_long, title_short, presenter, status, "
-        "          duration_sec, word_count, segment_count, attendee_count, taxonomy"
+        "          duration_sec, word_count, segment_count, attendee_count, taxonomy, "
+        "          session_type_id"
     )
     params = {**updates, "sid": str(session_id)}
     try:

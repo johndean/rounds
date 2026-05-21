@@ -39,14 +39,37 @@ export interface SessionSummary {
   segment_count: number | null;
   attendee_count: number | null;
   taxonomy: string[];
+  // FK to session_types row chosen at ingest. Null until migration 044
+  // backfill or until the operator picks one via SessionPatch. Drives
+  // auto-init of session_stage_assignees from that Type's matrix.
+  session_type_id?: string | null;
 }
 
 export interface SessionPatch {
-  code?:        string;
-  title?:       string;
-  title_long?:  string;
-  title_short?: string;
-  presenter?:   string;
+  code?:            string;
+  title?:           string;
+  title_long?:      string;
+  title_short?:     string;
+  presenter?:       string;
+  session_type_id?: string;
+}
+
+// One per-session, per-stage assignee row from
+// GET /v1/sessions/{id}/stage-assignees. assignee_label survives renames
+// because the backend joins typed FKs to people/groups at read time.
+export interface SessionStageAssigneeRow {
+  stage:                string;
+  notify_email:         boolean;
+  source:               'default' | 'manual';
+  assigned_at:          string;
+  person_id:            string | null;
+  group_id:             string | null;
+  person_email:         string | null;
+  person_name:          string | null;
+  person_role:          string | null;
+  person_avatar_color:  string | null;
+  group_name:           string | null;
+  assignee_label:       string;
 }
 
 export interface SessionFilters {
@@ -108,6 +131,25 @@ export const sessions = {
     http<SessionSummary>('/v1/sessions', { body: payload, method: 'POST' }),
   update: (id: string, patch: SessionPatch) =>
     http<SessionSummary>(`/v1/sessions/${encodeURIComponent(id)}`, { body: patch, method: 'PATCH' }),
+  stageAssignees: (id: string) =>
+    http<SessionStageAssigneeRow[]>(`/v1/sessions/${encodeURIComponent(id)}/stage-assignees`),
+  setStageAssignee: (id: string, stage: string, body: {
+    assignee_email?: string;
+    person_id?:      string;
+    group_id?:       string;
+    notify_email?:   boolean;
+  }) =>
+    http<SessionStageAssigneeRow>(
+      `/v1/sessions/${encodeURIComponent(id)}/stage-assignees/${encodeURIComponent(stage)}`,
+      { body, method: 'PUT' },
+    ),
+  applyTypeDefaults: (id: string, typeId?: string) =>
+    http<{ session_id: string; stages: number }>(
+      `/v1/sessions/${encodeURIComponent(id)}/stage-assignees/apply-type-defaults${
+        typeId ? `?type_id=${encodeURIComponent(typeId)}` : ''
+      }`,
+      { method: 'POST' },
+    ),
   remove: (id: string) =>
     http<{ session_id: string; deleted: boolean }>(`/v1/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   listDeleted: () =>

@@ -19,12 +19,19 @@ import { SOP_STAGES } from '@/fixtures/sop_stages';
 import {
   sessions as sessionsApi,
   segments as segmentsApi,
+  settingsApi,
   type SessionSummary,
   type SegmentRow,
+  type SessionStageAssigneeRow,
+  type SettingsType,
+  type SettingsPerson,
+  type SettingsGroup,
 } from '@/services/api';
 import { http } from '@/services/http';
 import { slideAccent } from '@/fixtures/transcript';
 import { toast } from '@/composables/useToast';
+import { confirm } from '@/composables/useConfirm';
+import { ApiError } from '@/services/http';
 
 const props = defineProps<{ id: string }>();
 
@@ -61,20 +68,43 @@ const error = ref<string | null>(null);
 
 const stages = SOP_STAGES;
 
+// ─── Stage assignment state (Unit 6 — real DB-backed, replaces fixture) ──
+const stageAssignments = ref<SessionStageAssigneeRow[]>([]);
+const sessionTypes     = ref<SettingsType[]>([]);
+const teamPeople       = ref<SettingsPerson[]>([]);
+const teamGroups       = ref<SettingsGroup[]>([]);
+
+// Picker state: which stage is currently expanded for inline reassign.
+const reassignStageOpen = ref<string | null>(null);
+const reassignSaving    = ref(false);
+
+// "Type changed — apply defaults?" banner state. Set when the operator
+// changes the Type via the dropdown; cleared once they Apply or Dismiss.
+const pendingTypeId = ref<string | null>(null);
+const applyingType  = ref(false);
+
 async function load(): Promise<void> {
   loading.value = true;
   error.value = null;
   try {
-    const [s, src, sl, sg] = await Promise.all([
+    const [s, src, sl, sg, sa, tps, pp, gg] = await Promise.all([
       sessionsApi.get(props.id).catch(() => null),
       http<SourceRow[]>(`/v1/sessions/${encodeURIComponent(props.id)}/sources`).catch(() => []),
       http<SlideRow[]>(`/v1/sessions/${encodeURIComponent(props.id)}/slides`).catch(() => []),
       segmentsApi.list(props.id).catch(() => []),
+      sessionsApi.stageAssignees(props.id).catch(() => [] as SessionStageAssigneeRow[]),
+      settingsApi.types().catch(() => [] as SettingsType[]),
+      settingsApi.people().catch(() => [] as SettingsPerson[]),
+      settingsApi.groups().catch(() => [] as SettingsGroup[]),
     ]);
     session.value = s;
     sources.value = src;
     slides.value = sl;
     segments.value = sg;
+    stageAssignments.value = sa;
+    sessionTypes.value = tps;
+    teamPeople.value = pp.filter((p) => p.is_active !== false);
+    teamGroups.value = gg;
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Failed to load';
   } finally {
@@ -83,14 +113,105 @@ async function load(): Promise<void> {
 }
 onMounted(load);
 
-const stageAssignments = [
-  { stage: 'copy_draft', who: '(unassigned)',                  group: false, faded: true },
-  { stage: 'medical',    who: 'V@V · Heather Howell',           group: false, faded: false },
-  { stage: 'copy_final', who: 'Main Contact · Ruth Schoonover', group: false, faded: false },
-  { stage: 'cms',        who: 'Content Team (default)',         group: true,  faded: false },
-  { stage: 'captions',   who: 'Content Team',                   group: false, faded: false },
-  { stage: 'qa',         who: 'Content Team (default)',         group: true,  faded: false },
-];
+// Row lookup by stage id — fixture renders one row per SOP_STAGES entry
+// and pulls the per-stage assignee out of stageAssignments by stage key.
+function assigneeFor(stageId: string): SessionStageAssigneeRow | undefined {
+  return stageAssignments.value.find((a) => a.stage === stageId);
+}
+
+async function onTypePickerChange(e: Event): Promise<void> {
+  const newTypeId = (e.target as HTMLSelectElement).value;
+  if (!newTypeId || !session.value) return;
+  if (newTypeId === session.value.session_type_id) {
+    pendingTypeId.value = null;
+    return;
+  }
+  // Persist the FK immediately; the banner asks before overwriting per-stage assignees.
+  try {
+    const updated = await sessionsApi.update(props.id, { session_type_id: newTypeId });
+    session.value = { ...session.value, session_type_id: updated.session_type_id };
+    pendingTypeId.value = newTypeId;
+  } catch (err) {
+    toast.push(errMsg(err), { tone: 'error' });
+  }
+}
+
+async function applyTypeDefaults(): Promise<void> {
+  if (!pendingTypeId.value || applyingType.value) return;
+  const ok = await confirm.open({
+    title: 'Apply Type defaults?',
+    body: 'This overwrites every stage assignee for this session with the chosen Type\'s matrix. Manual overrides will be replaced.',
+    confirmLabel: 'Apply',
+    danger: true,
+  });
+  if (!ok) return;
+  applyingType.value = true;
+  try {
+    await sessionsApi.applyTypeDefaults(props.id, pendingTypeId.value);
+    stageAssignments.value = await sessionsApi.stageAssignees(props.id);
+    pendingTypeId.value = null;
+    toast.push('Stage assignees updated from Type defaults', { tone: 'success' });
+  } catch (err) {
+    toast.push(errMsg(err), { tone: 'error' });
+  } finally {
+    applyingType.value = false;
+  }
+}
+
+function dismissTypeBanner(): void {
+  pendingTypeId.value = null;
+}
+
+function openReassign(stageId: string): void {
+  reassignStageOpen.value = reassignStageOpen.value === stageId ? null : stageId;
+}
+
+async function selectAssignee(stageId: string, body: { person_id?: string; group_id?: string }): Promise<void> {
+  if (reassignSaving.value) return;
+  reassignSaving.value = true;
+  try {
+    const updated = await sessionsApi.setStageAssignee(props.id, stageId, body);
+    stageAssignments.value = stageAssignments.value
+      .filter((a) => a.stage !== stageId)
+      .concat([updated])
+      .sort((a, b) => a.stage.localeCompare(b.stage));
+    reassignStageOpen.value = null;
+    toast.push(`Reassigned ${stageId}`, { tone: 'success' });
+  } catch (err) {
+    toast.push(errMsg(err), { tone: 'error' });
+  } finally {
+    reassignSaving.value = false;
+  }
+}
+
+async function resetStageToDefault(stageId: string): Promise<void> {
+  if (reassignSaving.value) return;
+  reassignSaving.value = true;
+  try {
+    // Empty body triggers backend reset to Type-matrix default for this stage.
+    const updated = await sessionsApi.setStageAssignee(props.id, stageId, {});
+    stageAssignments.value = stageAssignments.value
+      .filter((a) => a.stage !== stageId)
+      .concat([updated])
+      .sort((a, b) => a.stage.localeCompare(b.stage));
+    toast.push(`${stageId} reset to Type default`, { tone: 'success' });
+  } catch (err) {
+    toast.push(errMsg(err), { tone: 'error' });
+  } finally {
+    reassignSaving.value = false;
+  }
+}
+
+function errMsg(e: unknown): string {
+  if (e instanceof ApiError) {
+    const body = e.body as { detail?: { message?: string } | string } | undefined;
+    const detail = body?.detail;
+    if (detail && typeof detail === 'object' && typeof detail.message === 'string') return detail.message;
+    if (typeof detail === 'string') return detail;
+    return e.message;
+  }
+  return e instanceof Error ? e.message : 'Request failed';
+}
 
 const publishingLinks = ['Zoom recording', 'Slides', 'Podbean', 'VINcast', 'Intranet', 'Session page'];
 const downloads = [
@@ -168,12 +289,8 @@ function downloadFile(ext: string): void {
     { tone: 'warn' },
   );
 }
-function reassignStage(name: string): void {
-  toast.push(
-    `Stage reassign for ${name} not yet wired — ships with Phase 6 SOP control plane.`,
-    { tone: 'warn' },
-  );
-}
+// (Legacy reassignStage handler removed — widget now uses openReassign() /
+// selectAssignee() via the inline picker.)
 
 // ─── Session-files modal wiring (MIC AddFileModal port) ──────────────
 const modalOpen = ref(false);
@@ -379,28 +496,118 @@ function pubLink(p: string): void {
           <div class="card">
             <div class="card__header">
               <h3>Stage Assignments</h3>
-              <select class="btn btn--secondary btn--sm" :style="{ paddingRight: '24px', fontSize: '11px' }">
-                <option>Type: default</option>
-                <option>Type: lecture</option>
-                <option>Type: rounds</option>
+              <select
+                class="btn btn--secondary btn--sm"
+                :style="{ paddingRight: '24px', fontSize: '11px' }"
+                :value="session.session_type_id || ''"
+                @change="onTypePickerChange"
+              >
+                <option value="" disabled>Type: select…</option>
+                <option v-for="t in sessionTypes" :key="t.id" :value="t.id">
+                  Type: {{ t.code }}{{ t.is_default ? ' (default)' : '' }}
+                </option>
               </select>
             </div>
+            <div
+              v-if="pendingTypeId"
+              :style="{
+                padding: '10px 14px', background: 'rgba(217,119,6,0.10)',
+                borderTop: '1px solid var(--border-subtle)',
+                borderBottom: '1px solid var(--border-subtle)',
+                display: 'flex', gap: '10px', alignItems: 'center',
+                fontSize: '12px', color: 'var(--fg1)',
+              }"
+            >
+              <Icon name="alert" :size="14" />
+              <span :style="{ flex: 1 }">
+                Type changed — apply this Type's stage defaults? This overwrites manual overrides.
+              </span>
+              <button
+                class="btn btn--primary btn--sm"
+                :disabled="applyingType"
+                @click="applyTypeDefaults"
+              >{{ applyingType ? 'Applying…' : 'Apply' }}</button>
+              <button class="btn btn--ghost btn--sm" @click="dismissTypeBanner">Dismiss</button>
+            </div>
             <div class="card__body" :style="{ padding: 0 }">
-              <template v-for="a in stageAssignments" :key="a.stage">
-                <div v-if="stages.find(x => x.id === a.stage)" class="sd-stage-row">
-                  <div>
-                    <div class="sd-stage-row__name">{{ stages.find(x => x.id === a.stage)?.name }}</div>
-                    <div :class="['sd-stage-row__who', { 'is-faded': a.faded }]">
-                      <span v-if="a.group" :style="{ fontSize: '10px', color: 'var(--fg2)', marginRight: '4px', fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase' }">Group:</span>
-                      {{ a.who }}
+              <template v-for="st in stages" :key="st.id">
+                <div class="sd-stage-row">
+                  <div :style="{ flex: 1 }">
+                    <div class="sd-stage-row__name">
+                      {{ st.name }}
+                      <span
+                        v-if="assigneeFor(st.id)?.source === 'manual'"
+                        :style="{
+                          marginLeft: '6px', width: '6px', height: '6px',
+                          background: 'var(--color-amber)', borderRadius: '50%',
+                          display: 'inline-block',
+                        }"
+                        title="Manual override (not from Type matrix)"
+                      ></span>
+                    </div>
+                    <div
+                      :class="['sd-stage-row__who', { 'is-faded': !assigneeFor(st.id) || assigneeFor(st.id)?.assignee_label === '(unassigned)' }]"
+                    >
+                      <template v-if="assigneeFor(st.id)?.group_name">
+                        <span :style="{ fontSize: '10px', color: 'var(--fg2)', marginRight: '4px', fontWeight: 700, letterSpacing: '.06em', textTransform: 'uppercase' }">Group:</span>
+                        {{ assigneeFor(st.id)?.group_name }}
+                      </template>
+                      <template v-else>
+                        {{ assigneeFor(st.id)?.assignee_label || '(unassigned)' }}
+                      </template>
                     </div>
                   </div>
-                  <button
-                    class="btn btn--ghost btn--icon btn--sm"
-                    :data-test-id="`sd-reassign-${a.stage}`"
-                    title="Reassign"
-                    @click="reassignStage(stages.find(x => x.id === a.stage)?.name ?? '')"
-                  ><Icon name="edit" /></button>
+                  <div :style="{ display: 'inline-flex', gap: '4px', alignItems: 'center' }">
+                    <button
+                      v-if="assigneeFor(st.id)?.source === 'manual'"
+                      class="btn btn--ghost btn--sm"
+                      :style="{ fontSize: '10px' }"
+                      :data-test-id="`sd-reset-${st.id}`"
+                      title="Reset to Type default"
+                      @click="resetStageToDefault(st.id)"
+                    >Reset</button>
+                    <button
+                      class="btn btn--ghost btn--icon btn--sm"
+                      :data-test-id="`sd-reassign-${st.id}`"
+                      title="Reassign"
+                      @click="openReassign(st.id)"
+                    ><Icon name="edit" /></button>
+                  </div>
+                </div>
+                <div
+                  v-if="reassignStageOpen === st.id"
+                  :style="{
+                    padding: '10px 14px', background: 'var(--surface-bg)',
+                    borderTop: '1px solid var(--border-subtle)',
+                    borderBottom: '1px solid var(--border-subtle)',
+                  }"
+                >
+                  <div :style="{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.06em', color: 'var(--fg2)', fontWeight: 700, marginBottom: '6px' }">
+                    People
+                  </div>
+                  <div :style="{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '10px' }">
+                    <button
+                      v-for="p in teamPeople"
+                      :key="p.id"
+                      class="chip"
+                      :style="{ cursor: reassignSaving ? 'progress' : 'pointer', fontSize: '11px' }"
+                      :disabled="reassignSaving"
+                      @click="selectAssignee(st.id, { person_id: p.id })"
+                    >{{ p.name }}</button>
+                  </div>
+                  <div :style="{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.06em', color: 'var(--fg2)', fontWeight: 700, marginBottom: '6px' }">
+                    Groups
+                  </div>
+                  <div :style="{ display: 'flex', flexWrap: 'wrap', gap: '4px' }">
+                    <button
+                      v-for="g in teamGroups"
+                      :key="g.id"
+                      class="chip"
+                      :style="{ cursor: reassignSaving ? 'progress' : 'pointer', fontSize: '11px' }"
+                      :disabled="reassignSaving"
+                      @click="selectAssignee(st.id, { group_id: g.id })"
+                    >Group: {{ g.name }}</button>
+                  </div>
                 </div>
               </template>
             </div>

@@ -190,6 +190,49 @@ async def realign(session_id: str, _db: DbSession, _u: CurrentUser) -> RealignRe
     return RealignResult(session_id=session_id, enqueued=enqueued, detail=detail)
 
 
+class InitStagesResult(BaseModel):
+    session_id:  str
+    type_id:     str | None
+    stages:      int
+    detail:      str | None = None
+
+
+@router.post("/init-session-stages/{session_id}", response_model=InitStagesResult)
+async def init_session_stages_diag(
+    session_id: str,
+    _db:        DbSession,
+    _u:         CurrentUser,
+    type_id:    str | None = None,
+) -> InitStagesResult:
+    """
+    Manually fire session_stage_assignees init for a session. Useful for
+    sessions ingested before the auto-init hook was wired (Unit 6) or
+    when an operator changes the session's Type and wants the new
+    matrix's defaults populated.
+
+    Pass `?type_id=<uuid>` to force a specific Type; omit to use the
+    session's existing session_type_id, falling back to the org default.
+    Idempotent — only writes stages that don't already have an assignee.
+    """
+    from sqlalchemy import create_engine
+
+    from app.config import settings
+    from app.services.session_init import init_session_stages
+
+    sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+    engine = create_engine(sync_url)
+    try:
+        stages = init_session_stages(engine, session_id, type_id=type_id, actor="diag/init-session-stages")
+        return InitStagesResult(session_id=session_id, type_id=type_id, stages=stages)
+    except Exception as exc:  # noqa: BLE001
+        return InitStagesResult(
+            session_id=session_id, type_id=type_id, stages=0,
+            detail=f"{exc.__class__.__name__}: {exc}",
+        )
+    finally:
+        engine.dispose()
+
+
 class AutoplacePollsResult(BaseModel):
     session_id: str
     placed:     int
