@@ -119,6 +119,28 @@ async def health() -> JSONResponse:
     return JSONResponse({"status": "ok", "version": app.version, "env": settings.ENVIRONMENT})
 
 
+@app.get("/v1/version")
+async def version() -> JSONResponse:
+    """
+    Build identity. Frontend AppHeader fetches this on mount and compares
+    against its baked-in VITE_BUILD_SHA — when they diverge the chip turns
+    amber + prompts a refresh. That eliminates the "am I looking at a 14-hour-old
+    bundle?" guessing whenever a deploy goes out.
+
+    `commit` is the git SHA baked into the runtime image by the Dockerfile
+    ARG RAILWAY_GIT_COMMIT_SHA. Defaults to 'dev' when not built via Railway.
+    No auth: monitoring + DevTools probes shouldn't need a JWT to confirm
+    which build they're hitting.
+    """
+    import os
+    commit = os.environ.get("ROUNDS_COMMIT_SHA") or "dev"
+    return JSONResponse({
+        "commit":      commit,
+        "commit_short": commit[:7],
+        "env":         settings.ENVIRONMENT,
+    })
+
+
 @app.websocket("/v1/ws/sessions/{session_id}")
 async def session_ws(websocket: WebSocket, session_id: str):
     """Live session updates: processing_update, metrics_update, session_failed, etc."""

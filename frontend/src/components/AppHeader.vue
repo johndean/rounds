@@ -5,7 +5,7 @@
  * __nav, __tools, __icon-btn, __status, __user, __avatar) from app.css.
  * Mock Kate Schultz replaced with live auth.email; ⌘K wired through commandPalette.
  */
-import { computed } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { RouterLink, useRoute, useRouter } from 'vue-router';
 import Icon from '@/components/shared/Icon.vue';
 import { commandPalette } from '@/composables/useCommandPalette';
@@ -18,7 +18,48 @@ const router = useRouter();
 const auth = useAuthStore();
 const ui = useUiStore();
 
-const build = 'v4.0.0-ssot-r2';
+// Bundle's bake-time SHA — injected by Dockerfile ARG RAILWAY_GIT_COMMIT_SHA
+// → VITE_BUILD_SHA in the frontend-build stage. 'dev' for local builds without
+// Railway env. Stays constant for the life of this bundle in the browser.
+const bundleSha = ((import.meta as unknown as { env: { VITE_BUILD_SHA?: string } }).env.VITE_BUILD_SHA || 'dev');
+const bundleShort = bundleSha === 'dev' ? 'dev' : bundleSha.slice(0, 7);
+
+// Api's runtime SHA — fetched on mount from /v1/version (the unauthenticated
+// build-identity endpoint added at the same time as this chip). When the api
+// commit differs from the bundle, the user is looking at a cached frontend
+// older than the live deploy → show an amber refresh prompt.
+const apiSha = ref<string>('');
+const apiShaShort = computed(() => apiSha.value.slice(0, 7));
+const versionMismatch = computed(() =>
+  apiSha.value !== '' && bundleSha !== 'dev' && apiShaShort.value !== bundleShort,
+);
+
+onMounted(async () => {
+  try {
+    // Plain fetch — /v1/version is unauthenticated, no need for the http() wrapper.
+    const r = await fetch('/v1/version');
+    if (!r.ok) return;
+    const data = await r.json().catch(() => null) as { commit?: string } | null;
+    apiSha.value = data?.commit || '';
+  } catch {
+    /* silent — version chip is non-essential */
+  }
+});
+
+async function copyBuildInfo(): Promise<void> {
+  const info = `bundle=${bundleShort} api=${apiShaShort.value || 'unknown'}`;
+  try {
+    await navigator.clipboard.writeText(info);
+    toast.push(`Copied: ${info}`, { tone: 'info' });
+  } catch {
+    toast.push(info, { tone: 'info' });
+  }
+}
+
+async function reloadForLatest(): Promise<void> {
+  // Force-bust the cache so the new index.html + bundle SHA come through.
+  window.location.reload();
+}
 
 function isActive(prefixes: string[]): boolean {
   return prefixes.some(p => route.path.startsWith(p));
@@ -61,7 +102,30 @@ void ui;  // silence unused
       <span class="app-header__divider" />
       <span class="app-header__product">transcript<strong>.software</strong></span>
     </RouterLink>
-    <span class="app-header__build" :title="`Build ${build}`">{{ build }}</span>
+    <span
+      class="app-header__build"
+      :title="`Bundle: ${bundleSha}\nApi: ${apiSha || 'unknown'}\nClick to copy`"
+      :style="{ cursor: 'pointer', fontFamily: 'var(--font-mono)' }"
+      @click="copyBuildInfo"
+    >{{ bundleShort }}</span>
+    <button
+      v-if="versionMismatch"
+      class="app-header__build"
+      :style="{
+        background: 'rgba(217, 119, 6, 0.18)',
+        color: 'var(--color-amber)',
+        border: '1px solid rgba(217, 119, 6, 0.55)',
+        borderRadius: '999px',
+        padding: '2px 10px',
+        marginLeft: '6px',
+        cursor: 'pointer',
+        fontFamily: 'var(--font-mono)',
+        fontSize: '11px',
+        fontWeight: 700,
+      }"
+      :title="`API is on ${apiSha} but your bundle is ${bundleSha}. Click to hard-reload.`"
+      @click="reloadForLatest"
+    >⟳ reload for {{ apiShaShort }}</button>
 
     <nav class="app-header__nav" aria-label="Primary">
       <RouterLink to="/dashboard"     :class="{ 'is-active': isActive(['/dashboard']) }">Dashboard</RouterLink>
