@@ -37,8 +37,23 @@ class PersonPayload(BaseModel):
     avatar_color: str | None = None
 
 
+class PersonPatch(BaseModel):
+    """Partial-update body for PUT /people/{id}. None means leave unchanged."""
+    email:        str | None = None
+    name:         str | None = None
+    role:         str | None = None
+    avatar_color: str | None = None
+    is_active:    bool | None = None
+
+
 class GroupPayload(BaseModel):
     name: str
+    description: str | None = None
+
+
+class GroupPatch(BaseModel):
+    """Partial-update body for PUT /groups/{id}. None means leave unchanged."""
+    name:        str | None = None
     description: str | None = None
 
 
@@ -114,6 +129,45 @@ async def remove_person(person_id: UUID, db: DbSession, user: CurrentUser):
     return Response(status_code=204)
 
 
+@router.put("/people/{person_id}")
+async def update_person(person_id: UUID, payload: PersonPatch, db: DbSession, user: CurrentUser) -> dict:
+    """
+    Partial update of a person row. Whitelisted fields only: email, name, role,
+    avatar_color, is_active. Unknown / unset fields are ignored. Port of MIC
+    PUT /v1/sop/people/{person_id}.
+    """
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updatable fields provided")
+
+    # Lowercase email at the boundary to match POST behavior.
+    if "email" in updates and updates["email"]:
+        updates["email"] = updates["email"].lower()
+
+    set_clauses = ", ".join(f"{k} = :{k}" for k in updates)
+    sql = (
+        f"UPDATE people SET {set_clauses} WHERE id = :pid "
+        "RETURNING id, email, name, role, avatar_color, is_active"
+    )
+    try:
+        row = (await db.execute(text(sql), {**updates, "pid": str(person_id)})).mappings().first()
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc).lower()
+        if "people_email_key" in msg or ("email" in msg and "duplicate" in msg):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "DUPLICATE_EMAIL", "message": "Another person already uses that email."},
+            )
+        raise HTTPException(status_code=500, detail=str(exc))
+    if not row:
+        raise HTTPException(status_code=404, detail="Person not found")
+    await db.execute(text(
+        "INSERT INTO audit_events (actor_email, kind, summary) VALUES (:a, 'settings.people.update', :s)"
+    ), {"a": user.email, "s": f"updated {person_id} fields={list(updates.keys())}"})
+    await db.commit()
+    return dict(row)
+
+
 @router.get("/groups")
 async def list_groups(db: DbSession, _u: CurrentUser) -> list[dict]:
     rows = (await db.execute(text("SELECT id, name, description FROM groups ORDER BY name"))).mappings().all()
@@ -127,14 +181,122 @@ async def add_group(payload: GroupPayload, db: DbSession, user: CurrentUser) -> 
         "ON CONFLICT (name) DO UPDATE SET description = EXCLUDED.description "
         "RETURNING id, name, description"
     ), {"n": payload.name, "d": payload.description})).mappings().one()
+    await db.execute(text(
+        "INSERT INTO audit_events (actor_email, kind, summary) VALUES (:a, 'settings.groups.add', :s)"
+    ), {"a": user.email, "s": f"added group {payload.name}"})
     await db.commit()
     return dict(row)
+
+
+@router.put("/groups/{group_id}")
+async def update_group(group_id: UUID, payload: GroupPatch, db: DbSession, user: CurrentUser) -> dict:
+    """Partial update — rename + description. Port of MIC PUT /v1/sop/groups/{group_id}."""
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updatable fields provided")
+    set_clauses = ", ".join(f"{k} = :{k}" for k in updates)
+    sql = (
+        f"UPDATE groups SET {set_clauses} WHERE id = :gid "
+        "RETURNING id, name, description"
+    )
+    try:
+        row = (await db.execute(text(sql), {**updates, "gid": str(group_id)})).mappings().first()
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc).lower()
+        if "groups_name_key" in msg or ("name" in msg and "duplicate" in msg):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "DUPLICATE_NAME", "message": "Another group already uses that name."},
+            )
+        raise HTTPException(status_code=500, detail=str(exc))
+    if not row:
+        raise HTTPException(status_code=404, detail="Group not found")
+    await db.execute(text(
+        "INSERT INTO audit_events (actor_email, kind, summary) VALUES (:a, 'settings.groups.update', :s)"
+    ), {"a": user.email, "s": f"updated {group_id} fields={list(updates.keys())}"})
+    await db.commit()
+    return dict(row)
+
+
+@router.delete("/groups/{group_id}", status_code=204, response_class=Response)
+async def remove_group(group_id: UUID, db: DbSession, user: CurrentUser):
+    """Hard-delete a group. group_members rows cascade. Port of MIC DELETE /v1/sop/groups/{group_id}.
+
+    Stage assignees stored as "Group: X" strings in stage_assignees.assignee_email are
+    not affected here — those are TEXT, not FKs. The follow-up Unit 5 plan migrates
+    that surface to typed FKs and adds ON DELETE SET NULL behavior.
+    """
+    result = await db.execute(text("DELETE FROM groups WHERE id = :id"), {"id": str(group_id)})
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Group not found")
+    await db.execute(text(
+        "INSERT INTO audit_events (actor_email, kind, summary) VALUES (:a, 'settings.groups.remove', :s)"
+    ), {"a": user.email, "s": f"removed group {group_id}"})
+    await db.commit()
+    return Response(status_code=204)
+
+
+@router.get("/groups/{group_id}/members")
+async def list_group_members(group_id: UUID, db: DbSession, _u: CurrentUser) -> list[dict]:
+    """Members of a group, joined to people for display fields."""
+    rows = (await db.execute(text(
+        "SELECT p.id, p.email, p.name, p.role, p.avatar_color, p.is_active "
+        "FROM group_members gm JOIN people p ON p.id = gm.person_id "
+        "WHERE gm.group_id = :gid AND p.is_active = TRUE "
+        "ORDER BY p.name"
+    ), {"gid": str(group_id)})).mappings().all()
+    return [dict(r) for r in rows]
+
+
+@router.post("/groups/{group_id}/members/{person_id}", status_code=201)
+async def add_group_member(
+    group_id: UUID, person_id: UUID, db: DbSession, user: CurrentUser,
+) -> dict:
+    """Add person to group. Idempotent via ON CONFLICT. Port of MIC POST /v1/sop/groups/{gid}/members/{pid}."""
+    try:
+        await db.execute(text(
+            "INSERT INTO group_members (group_id, person_id) VALUES (:g, :p) "
+            "ON CONFLICT (group_id, person_id) DO NOTHING"
+        ), {"g": str(group_id), "p": str(person_id)})
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc).lower()
+        if "foreign key" in msg or "fk" in msg:
+            raise HTTPException(status_code=404, detail="Group or person not found")
+        raise HTTPException(status_code=500, detail=str(exc))
+    await db.execute(text(
+        "INSERT INTO audit_events (actor_email, kind, summary) VALUES (:a, 'settings.groups.member_add', :s)"
+    ), {"a": user.email, "s": f"added {person_id} to {group_id}"})
+    await db.commit()
+    return {"group_id": str(group_id), "person_id": str(person_id), "added": True}
+
+
+@router.delete("/groups/{group_id}/members/{person_id}", status_code=204, response_class=Response)
+async def remove_group_member(
+    group_id: UUID, person_id: UUID, db: DbSession, user: CurrentUser,
+):
+    """Remove person from group. Port of MIC DELETE /v1/sop/groups/{gid}/members/{pid}."""
+    result = await db.execute(text(
+        "DELETE FROM group_members WHERE group_id = :g AND person_id = :p"
+    ), {"g": str(group_id), "p": str(person_id)})
+    if result.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Membership not found")
+    await db.execute(text(
+        "INSERT INTO audit_events (actor_email, kind, summary) VALUES (:a, 'settings.groups.member_remove', :s)"
+    ), {"a": user.email, "s": f"removed {person_id} from {group_id}"})
+    await db.commit()
+    return Response(status_code=204)
 
 
 # ─── Session types + stage assignee matrix ──────────────────────────────
 @router.get("/types")
 async def list_types(db: DbSession, _u: CurrentUser) -> list[dict]:
-    rows = (await db.execute(text("SELECT id, code, label FROM session_types ORDER BY label"))).mappings().all()
+    """List Types ordered with the default row first, then alphabetical. Default
+    flag is surfaced so the frontend can render the DEFAULT chip + prevent
+    delete. is_default column is added by migration 038."""
+    rows = (await db.execute(text(
+        "SELECT id, code, label, is_default FROM session_types "
+        "ORDER BY is_default DESC, label"
+    ))).mappings().all()
     return [dict(r) for r in rows]
 
 
@@ -144,7 +306,7 @@ async def add_type(payload: TypePayload, db: DbSession, user: CurrentUser) -> di
     row = (await db.execute(text(
         "INSERT INTO session_types (code, label) VALUES (:c, :l) "
         "ON CONFLICT (code) DO UPDATE SET label = EXCLUDED.label "
-        "RETURNING id, code, label"
+        "RETURNING id, code, label, is_default"
     ), {"c": payload.code, "l": payload.label or payload.code})).mappings().one()
     await db.execute(text(
         "INSERT INTO audit_events (actor_email, kind, summary) VALUES (:a, 'settings.types.add', :s)"
@@ -156,6 +318,17 @@ async def add_type(payload: TypePayload, db: DbSession, user: CurrentUser) -> di
 @router.delete("/types/{type_id}", status_code=204, response_class=Response)
 async def remove_type(type_id: UUID, db: DbSession, user: CurrentUser):
     _require_admin(user)
+    # Refuse to delete the org default — every session needs a starting Type.
+    # Frontend hides the Remove button on the default row but a malicious client
+    # could still send DELETE; enforce server-side too. Port of MIC SettingsTypes.vue:91.
+    is_default_row = (await db.execute(text(
+        "SELECT is_default FROM session_types WHERE id = :id"
+    ), {"id": str(type_id)})).scalar()
+    if is_default_row is True:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "DEFAULT_TYPE_LOCKED", "message": "Cannot delete the default Type."},
+        )
     # Hard delete is fine — stage_assignees + email_templates cascade.
     await db.execute(text("DELETE FROM session_types WHERE id = :id"), {"id": str(type_id)})
     await db.execute(text(

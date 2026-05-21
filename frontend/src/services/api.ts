@@ -483,12 +483,27 @@ export interface SettingsGroup {
 }
 export interface SettingsType {
   id: string; code: string; label: string;
+  // Added by migration 038. The default Type can't be removed and seeds
+  // new sessions' starting assignees once Unit 6 lands.
+  is_default?: boolean;
 }
 export interface StageAssigneeRow {
   id?: string;
   stage: string;
   assignee_email: string;
   notify_email: boolean;
+}
+
+export interface SettingsPersonPatch {
+  email?:        string;
+  name?:         string;
+  role?:         string;
+  avatar_color?: string;
+  is_active?:    boolean;
+}
+export interface SettingsGroupPatch {
+  name?:        string;
+  description?: string;
 }
 
 export const settingsApi = {
@@ -498,11 +513,29 @@ export const settingsApi = {
   people: () => http<SettingsPerson[]>('/v1/settings/people'),
   peopleAdd: (payload: { email: string; name: string; role?: string; avatar_color?: string }) =>
     http<SettingsPerson>('/v1/settings/people', { body: payload, method: 'POST' }),
+  peopleUpdate: (id: string, patch: SettingsPersonPatch) =>
+    http<SettingsPerson>(`/v1/settings/people/${encodeURIComponent(id)}`, { body: patch, method: 'PUT' }),
   peopleRemove: (id: string) =>
     http(`/v1/settings/people/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   groups: () => http<SettingsGroup[]>('/v1/settings/groups'),
   groupsAdd: (payload: { name: string; description?: string }) =>
     http<SettingsGroup>('/v1/settings/groups', { body: payload, method: 'POST' }),
+  groupsUpdate: (id: string, patch: SettingsGroupPatch) =>
+    http<SettingsGroup>(`/v1/settings/groups/${encodeURIComponent(id)}`, { body: patch, method: 'PUT' }),
+  groupsRemove: (id: string) =>
+    http(`/v1/settings/groups/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  groupMembers: (id: string) =>
+    http<SettingsPerson[]>(`/v1/settings/groups/${encodeURIComponent(id)}/members`),
+  groupMemberAdd: (groupId: string, personId: string) =>
+    http<{ added: boolean }>(
+      `/v1/settings/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(personId)}`,
+      { method: 'POST' },
+    ),
+  groupMemberRemove: (groupId: string, personId: string) =>
+    http(
+      `/v1/settings/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(personId)}`,
+      { method: 'DELETE' },
+    ),
   types: () => http<SettingsType[]>('/v1/settings/types'),
   typesAdd: (payload: { code: string; label?: string }) =>
     http<SettingsType>('/v1/settings/types', { body: payload, method: 'POST' }),

@@ -22,6 +22,7 @@ interface TypeRow {
   id: string | null;        // null until persisted
   code: string;
   label: string;
+  is_default?: boolean;
 }
 
 const types = ref<TypeRow[]>(SESSION_TYPES.map((c) => ({ id: null, code: c, label: c })));
@@ -81,7 +82,7 @@ onMounted(async () => {
   try {
     const rows = await settingsApi.types();
     if (rows && rows.length) {
-      types.value = rows.map((r) => ({ id: r.id, code: r.code, label: r.label }));
+      types.value = rows.map((r) => ({ id: r.id, code: r.code, label: r.label, is_default: r.is_default }));
       // Preserve current active selection by code if possible; default to first.
       const found = types.value.find((t) => t.code === active.value.code) ?? types.value[0]!;
       active.value = found;
@@ -112,7 +113,7 @@ async function addType(): Promise<void> {
 }
 
 async function removeType(t: TypeRow): Promise<void> {
-  if (t.code === 'default') return;
+  if (t.is_default || t.code === 'default') return;
   const ok = await confirm.open({ title: `Remove ${t.code}?`, danger: true, confirmLabel: 'Remove' });
   if (!ok) return;
   if (!t.id) {
@@ -174,10 +175,10 @@ async function saveMatrix(): Promise<void> {
       >
         <span>
           {{ t.code }}
-          <span v-if="t.code === 'default'" class="set-default-pill">DEFAULT</span>
+          <span v-if="t.is_default || t.code === 'default'" class="set-default-pill">DEFAULT</span>
         </span>
         <button
-          v-if="t.code !== 'default'"
+          v-if="!(t.is_default || t.code === 'default')"
           class="set-link set-link--danger"
           @click.stop="removeType(t)"
         >Remove</button>
