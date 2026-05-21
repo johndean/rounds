@@ -111,12 +111,23 @@
   <div class="panel">
     <h2>5. Manual triggers</h2>
     <div class="btn-grid">
-      <button id="btn-reingest"   class="warn"  title="POST /v1/diag/reingest/{id} — re-runs the full ingest pipeline">Re-ingest</button>
+      <button id="btn-reingest"   class="warn"  title="POST /v1/diag/reingest/{id} — re-runs the full ingest pipeline. DESTRUCTIVE: wipes segments. Fire ONCE.">Re-ingest <small style="opacity:.7">(once)</small></button>
       <button id="btn-realign"    class="warn"  title="POST /v1/diag/realign/{id} — re-runs the STT↔Gemini alignment">Re-align</button>
       <button id="btn-autoplace"  class="warn"  title="POST /v1/diag/autoplace-polls/{id} — re-resolves polls.anchor_segment">Autoplace polls</button>
       <button id="btn-initstages" class="warn"  title="POST /v1/diag/init-session-stages/{id} — applies the Type matrix defaults">Init stages</button>
     </div>
     <div class="small" style="margin-top:8px">Each is idempotent. Use these only when Snapshot shows a stage didn't populate or WS shows a stalled state.</div>
+    <div class="small" style="margin-top:6px; color: var(--err)"><strong>⚠ Client-side debounce: every button blocks repeat-fire for 60s.</strong> Server-side debounce arrives in a follow-up. Don't paste these into a DevTools loop.</div>
+  </div>
+
+  <!-- ── Recovery panel (queue flush + force-fail) ────────────────────── -->
+  <div class="panel">
+    <h2>5b. Recovery <span class="stat err">DESTRUCTIVE</span></h2>
+    <div class="btn-grid">
+      <button id="btn-flush-queue"   class="danger" title="POST /v1/diag/flush-celery-queue — drains ALL pending Celery messages broker-wide">Flush Celery queue</button>
+      <button id="btn-abort-session" class="danger" title="POST /v1/diag/abort-session/{id} — force status to 'failed' so the UI stops looping">Abort session → failed</button>
+    </div>
+    <div class="small" style="margin-top:8px">Use after a stampede. <strong>Flush</strong> drains the entire broker queue (currently-running tasks finish, but nothing new starts). <strong>Abort</strong> forces this one session out of 'uploading' so the UI exits the "Preparing files" loop.</div>
   </div>
 
   <!-- ── Log panel ────────────────────────────────────────────────────── -->
@@ -463,10 +474,26 @@ document.getElementById('btn-unsubscribe').addEventListener('click', () => {
 });
 
 // ── Manual triggers ───────────────────────────────────────────────────
-async function runTrigger(label, path, body) {
+// 60s per-button debounce so a stuck Enter key or paste-loop can't fire
+// the same trigger 100x — the reingest stampede on 2026-05-21 was a
+// reminder that DevTools snippets without guards are dangerous.
+const _lastFiredAt = new Map();        // path → epoch ms of last fire
+const DEBOUNCE_MS  = 60_000;
+
+async function runTrigger(label, path, body, opts = {}) {
   const t = refreshAuth(); if (!t) return;
-  const sid = getSid();
-  if (!sid) { log('err', `${label}: no session_id`); return; }
+  const sid = opts.requireSid === false ? null : getSid();
+  if (opts.requireSid !== false && !sid) { log('err', `${label}: no session_id`); return; }
+
+  const now = Date.now();
+  const last = _lastFiredAt.get(path);
+  if (last && (now - last) < DEBOUNCE_MS) {
+    const wait = Math.ceil((DEBOUNCE_MS - (now - last)) / 1000);
+    log('warn', `${label}: debounced — fire again in ${wait}s`);
+    return;
+  }
+  _lastFiredAt.set(path, now);
+
   log('step', `POST ${path}`);
   const r = await apiPost(t, path, body);
   log(r.ok ? 'ok' : 'err', `  ${label}  ${r.status}  ${r.ms}ms`,
@@ -477,6 +504,12 @@ document.getElementById('btn-reingest').addEventListener('click',   () => runTri
 document.getElementById('btn-realign').addEventListener('click',    () => runTrigger('realign',     `/v1/diag/realign/${getSid()}`));
 document.getElementById('btn-autoplace').addEventListener('click',  () => runTrigger('autoplace',   `/v1/diag/autoplace-polls/${getSid()}`));
 document.getElementById('btn-initstages').addEventListener('click', () => runTrigger('init-stages', `/v1/diag/init-session-stages/${getSid()}`));
+
+// Recovery (queue flush is broker-wide; abort-session is per-session)
+document.getElementById('btn-flush-queue').addEventListener('click', () =>
+  runTrigger('flush-celery-queue', '/v1/diag/flush-celery-queue', null, { requireSid: false }));
+document.getElementById('btn-abort-session').addEventListener('click', () =>
+  runTrigger('abort-session', `/v1/diag/abort-session/${getSid()}`));
 
 // ── Clear log ─────────────────────────────────────────────────────────
 document.getElementById('btn-clear').addEventListener('click', () => { logEl.innerHTML = ''; });

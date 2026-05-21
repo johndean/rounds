@@ -335,3 +335,134 @@ async def sop_deadline_check(_u: CurrentUser) -> dict:
         return {"ok": True, **(result or {})}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}
+
+
+class FlushQueueResult(BaseModel):
+    purged:     int
+    per_worker: dict | None = None
+    detail:     str | None = None
+
+
+@router.post("/flush-celery-queue", response_model=FlushQueueResult)
+async def flush_celery_queue(_u: CurrentUser) -> FlushQueueResult:
+    """
+    Drain ALL pending messages from the Celery broker queue. Use this
+    after an operator mistake stacks redundant tasks that need to be
+    discarded en masse (e.g. a reingest stampede).
+
+    Mechanics: calls celery_app.control.purge(), which removes queued-but-
+    not-yet-started messages from the broker. Currently-running tasks
+    finish (Celery has no way to revoke a task mid-execution from the
+    broker side — only the worker can cancel its own current task).
+
+    Scope: this purges the entire Rounds Celery queue. There is no
+    per-session filter because Celery doesn't index queue messages by
+    args. Pair with /v1/diag/abort-session/{id} to also break the
+    target session out of 'uploading' so the user can retry cleanly.
+    """
+    try:
+        from app.tasks.celery_app import celery_app
+
+        # control.purge() returns a dict[worker_hostname, count] under
+        # normal operation, an int in some configurations, or None if
+        # no workers respond. Normalize.
+        raw = celery_app.control.purge()
+        if isinstance(raw, dict):
+            total = sum(int(v or 0) for v in raw.values())
+            return FlushQueueResult(purged=total, per_worker=raw)
+        if isinstance(raw, int):
+            return FlushQueueResult(purged=raw)
+        if raw is None:
+            return FlushQueueResult(purged=0, detail="no workers responded — queue may still hold messages")
+        return FlushQueueResult(purged=0, detail=f"unexpected purge() result type: {type(raw).__name__}")
+    except Exception as exc:  # noqa: BLE001
+        return FlushQueueResult(purged=0, detail=f"{exc.__class__.__name__}: {exc}")
+
+
+class AbortSessionResult(BaseModel):
+    session_id:    str
+    status_before: str
+    status_after:  str
+    detail:        str | None = None
+
+
+@router.post("/abort-session/{session_id}", response_model=AbortSessionResult)
+async def abort_session(
+    session_id: str, db: DbSession, _u: CurrentUser,
+) -> AbortSessionResult:
+    """
+    Force a session into 'failed' status, bypassing the state machine.
+
+    Companion to /flush-celery-queue: after draining the broker, this
+    breaks the target session out of 'uploading' so the operator can
+    retry cleanly without the UI looping on "Preparing files".
+
+    Bypasses ALLOWED_TRANSITIONS (same escape-hatch pattern reingest
+    uses). Appends an audit log entry so the post-mortem is traceable.
+    """
+    row = (
+        await db.execute(
+            text("SELECT status FROM sessions WHERE id = CAST(:sid AS uuid)"),
+            {"sid": session_id},
+        )
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"session {session_id} not found")
+    status_before = row[0]
+
+    if status_before == "failed":
+        return AbortSessionResult(
+            session_id=session_id, status_before=status_before,
+            status_after=status_before, detail="already failed — no-op",
+        )
+
+    await db.execute(
+        text(
+            """
+            UPDATE sessions SET status = 'failed', updated_at = now()
+             WHERE id = CAST(:sid AS uuid)
+            """
+        ),
+        {"sid": session_id},
+    )
+
+    import json as _json
+    from datetime import datetime, timezone
+    entry = {
+        "ts":     datetime.now(timezone.utc).isoformat(),
+        "prev":   status_before,
+        "next":   "failed",
+        "actor":  "diag/abort-session",
+        "reason": "operator abort (queue flush companion)",
+    }
+    await db.execute(
+        text(
+            """
+            INSERT INTO session_audit (session_id, processing_log)
+            VALUES (CAST(:sid AS uuid), CAST(:e AS jsonb))
+            ON CONFLICT (session_id) DO UPDATE
+              SET processing_log = session_audit.processing_log || EXCLUDED.processing_log,
+                  updated_at = now()
+            """
+        ),
+        {"sid": session_id, "e": _json.dumps([entry])},
+    )
+    await db.commit()
+
+    # Also publish a session_failed WS event so any open SessionDetail /
+    # ProcessingView tabs flip out of the "Preparing files" loop without
+    # a manual refresh.
+    try:
+        from app.engines.ws_bridge import publish_ws_event_sync
+        publish_ws_event_sync(session_id, {
+            "type":         "session_failed",
+            "category":     "operator_abort",
+            "user_message": "Session aborted by operator. Reingest or delete to retry.",
+            "reason":       "diag/abort-session",
+        })
+    except Exception:  # noqa: BLE001
+        pass
+
+    return AbortSessionResult(
+        session_id=session_id, status_before=status_before, status_after="failed",
+    )
