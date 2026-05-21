@@ -62,6 +62,24 @@ async function onResetSlots(): Promise<void> {
       <button class="btn btn--tertiary" :style="{ marginTop: '8px' }" @click="view = 'gcs'">Open GCS QA →</button>
     </div>
     <div class="set-card-block">
+      <div class="set-eyebrow">UPLOAD · DEVTOOLS DIAGNOSTIC</div>
+      <h4 :style="{ margin: '6px 0 6px', fontSize: '16px', fontWeight: 700 }">Upload pipeline diagnostic</h4>
+      <p :style="{ fontSize: '13px', color: 'var(--fg2)', lineHeight: 1.6, margin: '0 0 12px' }">
+        Standalone page that exercises the direct-to-GCS path step by step —
+        session create, signed-URL, PUT, <code>upload-complete</code>. Every step
+        logs timestamp + status + response body so silent failures surface in
+        DevTools. Surfaces <code>/v1/version</code> so a stale-bundle vs.
+        fresh-deploy mismatch is obvious before you start blaming the upload.
+      </p>
+      <a
+        href="/upload-test.html"
+        target="_blank"
+        rel="noopener"
+        class="btn btn--tertiary"
+        data-test-id="settings-diag-upload-test"
+      >Open upload diagnostic →</a>
+    </div>
+    <div class="set-card-block">
       <div class="set-eyebrow">RATE LIMIT · STUCK SLOT RECOVERY</div>
       <h4 :style="{ margin: '6px 0 6px', fontSize: '16px', fontWeight: 700 }">Reset rate-limit slots</h4>
       <p :style="{ fontSize: '13px', color: 'var(--fg2)', lineHeight: 1.6, margin: '0 0 12px' }">
