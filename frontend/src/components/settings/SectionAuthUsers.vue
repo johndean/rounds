@@ -39,15 +39,15 @@ const adding      = ref(false);
 // looks like "the button doesn't work".
 const addUserHint = computed(() => {
   if (!newEmail.value) return 'Enter an email to begin.';
-  if (!newPassword.value) return 'Enter an initial password (min 12 chars).';
-  if (newPassword.value.length < 12) {
-    return `Password is ${newPassword.value.length} chars — need at least 12.`;
+  if (!newPassword.value) return 'Enter an initial password (min 10 chars).';
+  if (newPassword.value.length < 10) {
+    return `Password is ${newPassword.value.length} chars — need at least 10.`;
   }
   return 'Ready. Share the password out-of-band (1Password, Slack DM, etc.) — the user can\'t see it later.';
 });
 const addUserReady = computed(() =>
   newEmail.value.length > 0 &&
-  newPassword.value.length >= 12,
+  newPassword.value.length >= 10,
 );
 
 // ── Empty-state recovery (re-seed from AUTH_USERS env) ─────────────────
@@ -119,8 +119,8 @@ async function addUser(): Promise<void> {
     toast.push('Email and password are both required.', { tone: 'warn' });
     return;
   }
-  if (password.length < 12) {
-    toast.push('Password must be at least 12 characters.', { tone: 'warn' });
+  if (password.length < 10) {
+    toast.push('Password must be at least 10 characters.', { tone: 'warn' });
     return;
   }
   adding.value = true;
@@ -181,8 +181,8 @@ function closeReset(): void {
 }
 async function submitReset(): Promise<void> {
   if (!resetTargetId.value) return;
-  if (resetPassword.value.length < 12) {
-    toast.push('Password must be at least 12 characters.', { tone: 'warn' });
+  if (resetPassword.value.length < 10) {
+    toast.push('Password must be at least 10 characters.', { tone: 'warn' });
     return;
   }
   resetSaving.value = true;
@@ -284,7 +284,7 @@ async function reseedFromEnv(): Promise<void> {
         <input
           v-model="newPassword"
           type="password"
-          placeholder="initial password (min 12 chars)"
+          placeholder="initial password (min 10 chars)"
           autocomplete="new-password"
           data-test-id="auth-users-new-password"
           :style="{ padding: '8px 10px', border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--surface)', color: 'var(--fg1)', fontSize: '13px' }"
@@ -429,7 +429,7 @@ async function reseedFromEnv(): Promise<void> {
         <input
           v-model="resetPassword"
           type="password"
-          placeholder="new password (min 12 chars)"
+          placeholder="new password (min 10 chars)"
           autocomplete="new-password"
           data-test-id="auth-users-reset-password"
           :style="{ width: '100%', padding: '8px 10px', border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--bg)', color: 'var(--fg1)', fontSize: '13px', fontFamily: 'var(--font-mono)' }"
@@ -439,7 +439,7 @@ async function reseedFromEnv(): Promise<void> {
           <button class="btn btn--ghost" :disabled="resetSaving" @click="closeReset">Cancel</button>
           <button
             class="btn btn--primary"
-            :disabled="resetSaving || resetPassword.length < 12"
+            :disabled="resetSaving || resetPassword.length < 10"
             data-test-id="auth-users-reset-submit"
             @click="submitReset"
           >{{ resetSaving ? 'Resetting…' : 'Reset password' }}</button>

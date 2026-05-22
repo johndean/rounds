@@ -468,7 +468,7 @@ _AUTH_USER_SELECT = (
 
 class AuthUserCreate(BaseModel):
     email:    str = Field(..., min_length=3, max_length=255)
-    password: str = Field(..., min_length=12, max_length=256)
+    password: str = Field(..., min_length=10, max_length=256)
     role:     str = Field(default="user")
 
 
@@ -480,7 +480,7 @@ class AuthUserPatch(BaseModel):
 
 
 class AuthUserResetPassword(BaseModel):
-    password: str = Field(..., min_length=12, max_length=256)
+    password: str = Field(..., min_length=10, max_length=256)
 
 
 def _row_to_auth_user(row) -> dict:
