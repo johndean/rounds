@@ -27,6 +27,7 @@ import SectionExport from '@/components/settings/SectionExport.vue';
 import SectionPromptTemplates from '@/components/settings/SectionPromptTemplates.vue';
 import SectionManifest from '@/components/settings/SectionManifest.vue';
 import SectionEmail from '@/components/settings/SectionEmail.vue';
+import SectionAuthUsers from '@/components/settings/SectionAuthUsers.vue';
 import SectionDiagnostics from '@/components/settings/SectionDiagnostics.vue';
 import SectionDeleted from '@/components/settings/SectionDeleted.vue';
 
@@ -45,6 +46,7 @@ const sections: readonly SectionItem[] = Object.freeze([
   { id: 'prompts',     label: 'Prompt templates' },
   { id: 'manifest',    label: 'Session manifest' },
   { id: 'email',       label: 'Email' },
+  { id: 'auth-users',  label: 'Auth & logins' },
   { id: 'diagnostics', label: 'Diagnostics' },
   { id: 'deleted',     label: 'Deleted sessions' },
 ]);
@@ -80,6 +82,7 @@ function pick(id: string): void {
       <SectionPromptTemplates v-else-if="active === 'prompts'" />
       <SectionManifest v-else-if="active === 'manifest'" />
       <SectionEmail v-else-if="active === 'email'" />
+      <SectionAuthUsers v-else-if="active === 'auth-users'" />
       <SectionDiagnostics v-else-if="active === 'diagnostics'" />
       <SectionDeleted v-else-if="active === 'deleted'" />
       <SectionGeneral v-else />

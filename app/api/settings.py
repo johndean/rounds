@@ -452,3 +452,204 @@ async def list_email_templates(db: DbSession, _u: CurrentUser) -> list[dict]:
         "FROM email_templates ORDER BY stage"
     ))).mappings().all()
     return [dict(r) for r in rows]
+
+
+# ─── Auth users (Settings → Auth & Logins) ──────────────────────────────
+# Reset-only password model: passwords are bcrypt-hashed at rest and never
+# returned by any GET. The only way to set a new password is the explicit
+# reset endpoint, which accepts plaintext over the same TLS boundary as
+# /v1/auth/login. See docs/plans/2026-05-21-auth-users-db-backed.md.
+_AUTH_USER_SELECT = (
+    "SELECT id, email, role, is_active, last_login_at, password_reset_at, "
+    "       created_at, updated_at "
+    "  FROM auth_users "
+)
+
+
+class AuthUserCreate(BaseModel):
+    email:    str = Field(..., min_length=3, max_length=255)
+    password: str = Field(..., min_length=12, max_length=256)
+    role:     str = Field(default="user")
+
+
+class AuthUserPatch(BaseModel):
+    """Role / activation toggles. Password changes go through the dedicated
+    reset endpoint so we never overload PATCH with privileged plaintext."""
+    role:      str | None = None
+    is_active: bool | None = None
+
+
+class AuthUserResetPassword(BaseModel):
+    password: str = Field(..., min_length=12, max_length=256)
+
+
+def _row_to_auth_user(row) -> dict:
+    """Whitelist projection — password_hash is NEVER included in API responses."""
+    return {
+        "id":                 str(row["id"]),
+        "email":              row["email"],
+        "role":               row["role"],
+        "is_active":          bool(row["is_active"]),
+        "last_login_at":      row["last_login_at"].isoformat() if row["last_login_at"] else None,
+        "password_reset_at":  row["password_reset_at"].isoformat() if row["password_reset_at"] else None,
+        "created_at":         row["created_at"].isoformat() if row["created_at"] else None,
+        "updated_at":         row["updated_at"].isoformat() if row["updated_at"] else None,
+    }
+
+
+async def _count_active_admins(db) -> int:
+    return (await db.execute(text(
+        "SELECT count(*) FROM auth_users WHERE role = 'admin' AND is_active = TRUE"
+    ))).scalar() or 0
+
+
+async def _get_auth_user_or_404(db, user_id: UUID) -> dict:
+    row = (await db.execute(
+        text(_AUTH_USER_SELECT + "WHERE id = :id"),
+        {"id": str(user_id)},
+    )).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="user not found")
+    return dict(row)
+
+
+@router.get("/auth-users")
+async def list_auth_users(db: DbSession, user: CurrentUser) -> list[dict]:
+    _require_admin(user)
+    rows = (await db.execute(text(_AUTH_USER_SELECT + "ORDER BY email"))).mappings().all()
+    return [_row_to_auth_user(r) for r in rows]
+
+
+@router.post("/auth-users", status_code=201)
+async def add_auth_user(payload: AuthUserCreate, db: DbSession, user: CurrentUser) -> dict:
+    _require_admin(user)
+    if payload.role not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail={"code": "BAD_ROLE", "message": "role must be 'admin' or 'user'"})
+
+    from app.services.auth_users import hash_password
+
+    hashed = hash_password(payload.password)
+    try:
+        row = (await db.execute(text(
+            "INSERT INTO auth_users (email, password_hash, role) "
+            "VALUES (:e, :h, :r) "
+            "RETURNING id, email, role, is_active, last_login_at, password_reset_at, "
+            "          created_at, updated_at"
+        ), {"e": payload.email.lower().strip(), "h": hashed, "r": payload.role})).mappings().one()
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc).lower()
+        if "auth_users_email_lower_uq" in msg or ("email" in msg and ("duplicate" in msg or "unique" in msg)):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "DUPLICATE_EMAIL", "message": "That email already has a login."},
+            )
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    await db.execute(text(
+        "INSERT INTO audit_events (actor_email, kind, summary) "
+        "VALUES (:a, 'settings.auth_user.add', :s)"
+    ), {"a": user.email, "s": f"added {payload.email.lower()} role={payload.role}"})
+    await db.commit()
+    return _row_to_auth_user(row)
+
+
+@router.put("/auth-users/{user_id}")
+async def update_auth_user(user_id: UUID, payload: AuthUserPatch, db: DbSession, user: CurrentUser) -> dict:
+    _require_admin(user)
+
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updatable fields provided")
+
+    if "role" in updates and updates["role"] not in ("admin", "user"):
+        raise HTTPException(status_code=400, detail={"code": "BAD_ROLE", "message": "role must be 'admin' or 'user'"})
+
+    # Last-admin guard: refuse to demote or disable the only active admin.
+    current = await _get_auth_user_or_404(db, user_id)
+    would_demote = (current["role"] == "admin" and updates.get("role") == "user")
+    would_disable = (current["is_active"] is True and updates.get("is_active") is False)
+    if (would_demote or (would_disable and current["role"] == "admin")):
+        admins = await _count_active_admins(db)
+        if admins <= 1:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "LAST_ADMIN_PROTECTED",
+                    "message": "Cannot demote or disable the only active admin. Add a second admin first.",
+                },
+            )
+
+    set_clauses = ", ".join(f"{k} = :{k}" for k in updates) + ", updated_at = now()"
+    sql = (
+        f"UPDATE auth_users SET {set_clauses} WHERE id = :uid "
+        "RETURNING id, email, role, is_active, last_login_at, password_reset_at, "
+        "          created_at, updated_at"
+    )
+    row = (await db.execute(text(sql), {**updates, "uid": str(user_id)})).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="user not found")
+
+    await db.execute(text(
+        "INSERT INTO audit_events (actor_email, kind, summary) "
+        "VALUES (:a, 'settings.auth_user.update', :s)"
+    ), {"a": user.email, "s": f"updated {user_id} fields={list(updates.keys())}"})
+    await db.commit()
+    return _row_to_auth_user(row)
+
+
+@router.post("/auth-users/{user_id}/reset-password")
+async def reset_auth_user_password(
+    user_id: UUID, payload: AuthUserResetPassword, db: DbSession, user: CurrentUser,
+) -> dict:
+    _require_admin(user)
+    from app.services.auth_users import hash_password
+
+    current = await _get_auth_user_or_404(db, user_id)
+    hashed = hash_password(payload.password)
+    await db.execute(text(
+        "UPDATE auth_users "
+        "   SET password_hash = :h, password_reset_at = now(), updated_at = now() "
+        " WHERE id = :uid"
+    ), {"h": hashed, "uid": str(user_id)})
+    await db.execute(text(
+        "INSERT INTO audit_events (actor_email, kind, summary) "
+        "VALUES (:a, 'settings.auth_user.reset_password', :s)"
+    ), {"a": user.email, "s": f"reset password for {current['email']}"})
+    await db.commit()
+    return {
+        "email":              current["email"],
+        "password_reset_at":  datetime_now_iso(),
+    }
+
+
+def datetime_now_iso() -> str:
+    """Tiny helper so the reset response surface uses the same shape as
+    other timestamps without dragging a datetime import to module top."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+@router.delete("/auth-users/{user_id}", status_code=204, response_class=Response)
+async def remove_auth_user(user_id: UUID, db: DbSession, user: CurrentUser):
+    _require_admin(user)
+
+    current = await _get_auth_user_or_404(db, user_id)
+    # Last-admin guard.
+    if current["role"] == "admin" and current["is_active"]:
+        admins = await _count_active_admins(db)
+        if admins <= 1:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "LAST_ADMIN_PROTECTED",
+                    "message": "Cannot delete the only active admin. Add a second admin first.",
+                },
+            )
+
+    await db.execute(text("DELETE FROM auth_users WHERE id = :uid"), {"uid": str(user_id)})
+    await db.execute(text(
+        "INSERT INTO audit_events (actor_email, kind, summary) "
+        "VALUES (:a, 'settings.auth_user.delete', :s)"
+    ), {"a": user.email, "s": f"deleted {current['email']}"})
+    await db.commit()
+    return Response(status_code=204)

@@ -548,6 +548,23 @@ export interface SettingsGroupPatch {
   description?: string;
 }
 
+// Auth user row from /v1/settings/auth-users. password_hash is NEVER
+// returned by the API, so it's absent from this interface by design.
+export interface AuthUser {
+  id:                 string;
+  email:              string;
+  role:               'admin' | 'user';
+  is_active:          boolean;
+  last_login_at:      string | null;
+  password_reset_at:  string | null;
+  created_at:         string | null;
+  updated_at:         string | null;
+}
+export interface AuthUserPatch {
+  role?:      'admin' | 'user';
+  is_active?: boolean;
+}
+
 export const settingsApi = {
   list: () => http<Record<string, unknown>>('/v1/settings'),
   set: (key: string, value: unknown) =>
@@ -591,6 +608,23 @@ export const settingsApi = {
       { body: { rows }, method: 'PUT' },
     ),
   emailTemplates: () => http<unknown[]>('/v1/settings/email-templates'),
+
+  // ─── Auth users (Settings → Auth & Logins) ──────────────────────────
+  // Reset-only: passwords are never returned by any GET. The reset endpoint
+  // accepts plaintext over TLS; the server bcrypt-hashes before storage.
+  authUsersList: () =>
+    http<AuthUser[]>('/v1/settings/auth-users'),
+  authUsersAdd: (payload: { email: string; password: string; role?: 'admin' | 'user' }) =>
+    http<AuthUser>('/v1/settings/auth-users', { body: payload, method: 'POST' }),
+  authUsersUpdate: (id: string, patch: AuthUserPatch) =>
+    http<AuthUser>(`/v1/settings/auth-users/${encodeURIComponent(id)}`, { body: patch, method: 'PUT' }),
+  authUsersResetPassword: (id: string, password: string) =>
+    http<{ email: string; password_reset_at: string }>(
+      `/v1/settings/auth-users/${encodeURIComponent(id)}/reset-password`,
+      { body: { password }, method: 'POST' },
+    ),
+  authUsersRemove: (id: string) =>
+    http(`/v1/settings/auth-users/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 };
 
 // ─── Audit ───────────────────────────────────────────────────────────────

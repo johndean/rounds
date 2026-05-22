@@ -53,6 +53,26 @@ async def lifespan(_app: FastAPI):
                 flush=True,
             )
 
+    # Seed auth_users from the AUTH_USERS env var on first boot. Idempotent:
+    # the row-count short-circuit makes every subsequent boot a ~0.3ms no-op.
+    # If the seed fails (DB unreachable mid-deploy, schema not migrated yet),
+    # we log and continue — login will start working once the table exists.
+    try:
+        from sqlalchemy import create_engine
+
+        from app.services.auth_users import seed_from_env_if_empty
+
+        _sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+        _seed_engine = create_engine(_sync_url)
+        try:
+            seeded = seed_from_env_if_empty(_seed_engine, settings.AUTH_USERS)
+            if seeded > 0:
+                print(f"[boot] seeded {seeded} auth_users rows from AUTH_USERS env", flush=True)
+        finally:
+            _seed_engine.dispose()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[boot] auth_users seed skipped: {exc}", flush=True)
+
     # Start the WS bridge — subscribes to Redis pub/sub + fans out to clients.
     from app.engines.ws_bridge import WSManager, start_ws_bridge
 

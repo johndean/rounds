@@ -1,15 +1,18 @@
 """
-Auth — JWT bearer-token login backed by the AUTH_USERS env CSV.
+Auth — JWT bearer-token login backed by the `auth_users` table (bcrypt-hashed).
 
-Ports MIC's `app/auth.py` posture (audit §6 + §10 finding #7):
-  • AUTH_USERS is a comma-separated `email:password,email:password,...` CSV.
-  • Plaintext passwords in env. Known-debt; rotation = regenerate full CSV
-    + redeploy. Schedule for hashed-at-rest migration outside this plan.
-  • Tokens: HS256, signed with API_SECRET_KEY, expire after
-    ACCESS_TOKEN_EXPIRE_MINUTES (default 480 = 8 hours).
+Replaces the plaintext AUTH_USERS env CSV that was loaded into an in-memory
+dict at import time (audit §6 + §10 finding #7). AUTH_USERS still exists as
+the DR bootstrap source: on first boot `app/services/auth_users.seed_from_env_if_empty`
+copies it into the table with bcrypt-hashed passwords. After that, the env
+var is unused and can be cleared.
+
+Tokens are unchanged: HS256, signed with API_SECRET_KEY, expire after
+ACCESS_TOKEN_EXPIRE_MINUTES (default 480 = 8 hours).
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Optional
@@ -18,8 +21,12 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
 from pydantic import BaseModel
+from sqlalchemy import create_engine
+from sqlalchemy.engine import Engine
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 # ─── User registry ───────────────────────────────────────────────────────
@@ -32,6 +39,10 @@ def _parse_auth_users(csv: str) -> dict[str, str]:
     """
     Parse AUTH_USERS into {email: password}. Robust to surrounding whitespace
     and trailing commas. Empty entries are skipped.
+
+    Kept for: (a) the boot-time seed in app/services/auth_users.py, and
+    (b) tests/test_auth.py which validates the parsing edge cases directly.
+    No longer used as a live login registry.
     """
     out: dict[str, str] = {}
     for entry in csv.split(","):
@@ -49,27 +60,45 @@ def _parse_auth_users(csv: str) -> dict[str, str]:
     return out
 
 
-_USER_DB: dict[str, str] = _parse_auth_users(settings.AUTH_USERS)
+# ─── DB engine (lazy, module-scoped) ──────────────────────────────────────
+# Created on first authentication call. Reused across logins + every
+# protected request's `get_current_user` check. `pool_pre_ping=True` keeps
+# the connection healthy across Postgres restarts.
+_engine: Optional[Engine] = None
 
 
+def _get_engine() -> Engine:
+    global _engine
+    if _engine is None:
+        sync_url = settings.DATABASE_URL.replace("+asyncpg", "")
+        _engine = create_engine(sync_url, pool_pre_ping=True, pool_size=5, max_overflow=2)
+    return _engine
+
+
+# ─── Authentication ──────────────────────────────────────────────────────
 def authenticate(email: str, password: str) -> Optional[User]:
-    """Constant-time-ish lookup against AUTH_USERS. Returns User on success."""
-    expected = _USER_DB.get(email.lower())
-    if expected is None:
-        return None
-    if not _constant_time_eq(expected, password):
-        return None
-    return User(email=email.lower())
+    """
+    Verify (email, password) against the `auth_users` table. Returns a `User`
+    on success, `None` on any failure (unknown email, inactive, wrong password).
 
+    Bcrypt verify is ~50ms by design — the cost is what makes brute-force
+    attacks expensive. Only fires on POST /v1/auth/login, not per-request.
+    """
+    from app.services.auth_users import lookup_user, verify_password, touch_last_login
 
-def _constant_time_eq(a: str, b: str) -> bool:
-    """Byte-equal comparison that doesn't short-circuit on first mismatch."""
-    if len(a) != len(b):
-        return False
-    result = 0
-    for x, y in zip(a.encode("utf-8"), b.encode("utf-8")):
-        result |= x ^ y
-    return result == 0
+    engine = _get_engine()
+    try:
+        row = lookup_user(engine, email)
+        if row is None or not row.is_active:
+            return None
+        if not verify_password(password, row.password_hash):
+            return None
+        # Best-effort timestamp update; never blocks login on failure.
+        touch_last_login(engine, row.email)
+        return User(email=row.email.lower())
+    except Exception as exc:  # noqa: BLE001 — DB outage shouldn't 500 the login endpoint
+        logger.error(f"authenticate({email}) DB error: {exc}", exc_info=True)
+        return None
 
 
 # ─── Token issuance / verification ────────────────────────────────────────
@@ -99,6 +128,17 @@ def _credentials_exception() -> HTTPException:
 
 
 async def get_current_user(token: Annotated[Optional[str], Depends(oauth2_scheme)]) -> User:
+    """
+    Decode the JWT, then verify the user is still active in the DB. Both
+    legs must pass — an admin can revoke a session by disabling/deleting a
+    user, and the next request rejects the still-valid token.
+
+    The DB check is a single indexed `SELECT 1 … WHERE lower(email)=… AND is_active=TRUE`
+    — ~1ms with a warm pool, identical user-facing latency to the prior
+    dict lookup.
+    """
+    from app.services.auth_users import user_is_active
+
     if not token:
         raise _credentials_exception()
     try:
@@ -109,9 +149,14 @@ async def get_current_user(token: Annotated[Optional[str], Depends(oauth2_scheme
     email = payload.get("sub")
     if not isinstance(email, str):
         raise _credentials_exception()
-    # Still in the registry? (AUTH_USERS could have rotated)
-    if email.lower() not in _USER_DB:
-        raise _credentials_exception()
+    try:
+        if not user_is_active(_get_engine(), email):
+            raise _credentials_exception()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — DB outage → fail closed
+        logger.error(f"get_current_user DB check failed for {email}: {exc}")
+        raise _credentials_exception() from exc
     return User(email=email.lower())
 
 
