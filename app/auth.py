@@ -75,30 +75,69 @@ def _get_engine() -> Engine:
     return _engine
 
 
+# Env-CSV fallback — parsed once at module load. Used when the DB path
+# returns nothing (migration not yet applied, seed didn't fire, transient
+# DB outage, etc.). This is the "zero-risk cutover" promise from the
+# auth-users plan: if the new DB-backed path fails for any reason, the
+# old env-dict path still lets known users in.
+_ENV_FALLBACK_DB: dict[str, str] = _parse_auth_users(settings.AUTH_USERS)
+
+
+def _constant_time_eq(a: str, b: str) -> bool:
+    """Byte-equal comparison that doesn't short-circuit on first mismatch."""
+    if len(a) != len(b):
+        return False
+    result = 0
+    for x, y in zip(a.encode("utf-8"), b.encode("utf-8")):
+        result |= x ^ y
+    return result == 0
+
+
 # ─── Authentication ──────────────────────────────────────────────────────
 def authenticate(email: str, password: str) -> Optional[User]:
     """
-    Verify (email, password) against the `auth_users` table. Returns a `User`
-    on success, `None` on any failure (unknown email, inactive, wrong password).
+    Verify (email, password) against the `auth_users` table, with a fallback
+    to the AUTH_USERS env CSV when the DB path returns nothing or errors.
 
-    Bcrypt verify is ~50ms by design — the cost is what makes brute-force
-    attacks expensive. Only fires on POST /v1/auth/login, not per-request.
+    Order of precedence:
+      1. DB row found + bcrypt verify succeeds → success.
+      2. DB row found + bcrypt verify fails → fail (don't fall through —
+         admin may have intentionally rotated; env still has old password).
+      3. DB row missing OR DB error → try env CSV. If matches, success.
+      4. Otherwise fail.
+
+    Bcrypt verify is ~50ms by design. Env path is a constant-time string
+    compare. Only fires on POST /v1/auth/login.
     """
     from app.services.auth_users import lookup_user, verify_password, touch_last_login
 
+    db_row_existed = False
     engine = _get_engine()
     try:
         row = lookup_user(engine, email)
-        if row is None or not row.is_active:
-            return None
-        if not verify_password(password, row.password_hash):
-            return None
-        # Best-effort timestamp update; never blocks login on failure.
-        touch_last_login(engine, row.email)
-        return User(email=row.email.lower())
-    except Exception as exc:  # noqa: BLE001 — DB outage shouldn't 500 the login endpoint
-        logger.error(f"authenticate({email}) DB error: {exc}", exc_info=True)
+        if row is not None:
+            db_row_existed = True
+            if not row.is_active:
+                return None
+            if verify_password(password, row.password_hash):
+                touch_last_login(engine, row.email)
+                return User(email=row.email.lower())
+            return None  # known user, wrong password — do NOT fall through
+    except Exception as exc:  # noqa: BLE001 — DB outage falls through to env
+        logger.error(f"authenticate DB path failed for {email}: {exc}", exc_info=True)
+
+    # Fallback: env CSV. Reached when there's no DB row OR the DB raised.
+    expected = _ENV_FALLBACK_DB.get(email.lower())
+    if expected is None:
         return None
+    if not _constant_time_eq(expected, password):
+        return None
+    if not db_row_existed:
+        logger.warning(
+            f"authenticate: env-CSV fallback used for {email} — DB has no row yet "
+            "(seed may have failed or migration not applied)"
+        )
+    return User(email=email.lower())
 
 
 # ─── Token issuance / verification ────────────────────────────────────────
@@ -129,13 +168,10 @@ def _credentials_exception() -> HTTPException:
 
 async def get_current_user(token: Annotated[Optional[str], Depends(oauth2_scheme)]) -> User:
     """
-    Decode the JWT, then verify the user is still active in the DB. Both
-    legs must pass — an admin can revoke a session by disabling/deleting a
-    user, and the next request rejects the still-valid token.
-
-    The DB check is a single indexed `SELECT 1 … WHERE lower(email)=… AND is_active=TRUE`
-    — ~1ms with a warm pool, identical user-facing latency to the prior
-    dict lookup.
+    Decode the JWT, then verify the user is still active. DB lookup first,
+    env-CSV fallback if the DB has no row OR the DB call errors. Keeps
+    every existing JWT valid through the cutover, even if migration 045
+    or its seed hasn't landed.
     """
     from app.services.auth_users import user_is_active
 
@@ -149,15 +185,21 @@ async def get_current_user(token: Annotated[Optional[str], Depends(oauth2_scheme
     email = payload.get("sub")
     if not isinstance(email, str):
         raise _credentials_exception()
+
+    # Try DB path. On success or explicit "not active" we're done.
     try:
-        if not user_is_active(_get_engine(), email):
-            raise _credentials_exception()
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001 — DB outage → fail closed
+        if user_is_active(_get_engine(), email):
+            return User(email=email.lower())
+        # DB query succeeded but row is missing or inactive — fall through to env.
+    except Exception as exc:  # noqa: BLE001
         logger.error(f"get_current_user DB check failed for {email}: {exc}")
-        raise _credentials_exception() from exc
-    return User(email=email.lower())
+        # Don't fail closed — fall through to env so existing JWTs still validate.
+
+    # Env CSV fallback: the user must still be present in the original registry.
+    if email.lower() in _ENV_FALLBACK_DB:
+        return User(email=email.lower())
+
+    raise _credentials_exception()
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
