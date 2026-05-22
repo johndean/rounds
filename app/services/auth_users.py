@@ -42,15 +42,41 @@ class AuthUserRow:
     last_login_at:    Optional[str]
 
 
+# bcrypt's hard input limit: 72 bytes. Pre-4.x silently truncated; 4.x raises.
+# We replicate the historical "truncate" behavior so a legacy >72-byte password
+# in AUTH_USERS doesn't kill the seed. Truncation happens identically in
+# hash and verify, so round-trips are stable. Two passwords that share their
+# first 72 bytes will collide — acceptable risk; ops should set sane lengths.
+_BCRYPT_MAX_BYTES = 72
+
+
+def _truncate_to_bcrypt_limit(plain: str) -> str:
+    encoded = plain.encode("utf-8")
+    if len(encoded) <= _BCRYPT_MAX_BYTES:
+        return plain
+    # Decode the first 72 bytes back to a string. Cut at a codepoint boundary
+    # to avoid a UnicodeDecodeError when the cut lands inside a multibyte char.
+    truncated = encoded[:_BCRYPT_MAX_BYTES]
+    while truncated:
+        try:
+            return truncated.decode("utf-8")
+        except UnicodeDecodeError:
+            truncated = truncated[:-1]
+    return ""
+
+
 def hash_password(plain: str) -> str:
-    """Bcrypt-hash a plaintext password. ~50ms by design."""
-    return _pwd.hash(plain)
+    """Bcrypt-hash a plaintext password. ~50ms by design. Inputs longer than
+    72 bytes are truncated to match bcrypt's historical pre-4.x behavior."""
+    return _pwd.hash(_truncate_to_bcrypt_limit(plain))
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    """Constant-time bcrypt verify. Returns False on any error (corrupt hash, etc.)."""
+    """Constant-time bcrypt verify. Returns False on any error (corrupt hash,
+    truncation mismatch, etc.). Truncation mirrors hash_password so a
+    too-long input that was hashed via the truncate path still verifies."""
     try:
-        return _pwd.verify(plain, hashed)
+        return _pwd.verify(_truncate_to_bcrypt_limit(plain), hashed)
     except Exception:  # noqa: BLE001 — never let a hash error leak; treat as auth failure
         return False
 
@@ -153,24 +179,31 @@ def seed_from_env_if_empty(engine, auth_users_csv: str) -> int:
     if not parsed:
         return 0
 
+    seeded = 0
     with engine.begin() as conn:
         existing = conn.execute(text("SELECT count(*) FROM auth_users")).scalar() or 0
         if existing > 0:
             return 0
-        seeded = 0
         for email, password in parsed.items():
-            role = "admin" if email.lower() == _ADMIN_EMAIL.lower() else "user"
-            hashed = hash_password(password)
-            result = conn.execute(
-                text(
-                    """
-                    INSERT INTO auth_users (email, password_hash, role)
-                    VALUES (:e, :h, :r)
-                    ON CONFLICT ((lower(email))) DO NOTHING
-                    """
-                ),
-                {"e": email, "h": hashed, "r": role},
-            )
-            # rowcount is 1 on insert, 0 if the unique-index ON CONFLICT fired.
-            seeded += result.rowcount or 0
-        return seeded
+            try:
+                role = "admin" if email.lower() == _ADMIN_EMAIL.lower() else "user"
+                hashed = hash_password(password)
+                result = conn.execute(
+                    text(
+                        """
+                        INSERT INTO auth_users (email, password_hash, role)
+                        VALUES (:e, :h, :r)
+                        ON CONFLICT ((lower(email))) DO NOTHING
+                        """
+                    ),
+                    {"e": email, "h": hashed, "r": role},
+                )
+                # rowcount is 1 on insert, 0 if the unique-index ON CONFLICT fired.
+                seeded += result.rowcount or 0
+            except Exception as exc:  # noqa: BLE001
+                # Don't let one bad row (e.g. bcrypt corner case, encoding,
+                # constraint violation) abort the whole seed. Log and continue.
+                logger.warning(
+                    f"seed_from_env_if_empty: skipping {email} — {type(exc).__name__}: {exc}"
+                )
+    return seeded
