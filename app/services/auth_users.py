@@ -17,14 +17,18 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from passlib.context import CryptContext
+import bcrypt
 from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
-# bcrypt is the only scheme today; `deprecated="auto"` future-proofs us for
-# argon2 migration without breaking existing hashes.
-_pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Direct bcrypt usage (not passlib). passlib 1.7.x's bcrypt backend has a
+# broken self-test (`detect_wrap_bug`) under bcrypt 4.x that fires a
+# synthetic >72-byte password and raises on the resulting ValueError —
+# making _pwd.hash() unusable for any input. bcrypt is already in deps
+# via passlib[bcrypt] and produces the same on-wire $2b$... format, so
+# this swap is fully backward-compatible with any hashes already stored.
+# See https://github.com/pyca/bcrypt/issues/684 for the upstream context.
 
 # Matches the ADMIN_EMAIL constant in app/api/settings.py — kept in sync by
 # convention. When a future commit adds role-based middleware, this becomes
@@ -66,18 +70,31 @@ def _truncate_to_bcrypt_limit(plain: str) -> str:
 
 
 def hash_password(plain: str) -> str:
-    """Bcrypt-hash a plaintext password. ~50ms by design. Inputs longer than
-    72 bytes are truncated to match bcrypt's historical pre-4.x behavior."""
-    return _pwd.hash(_truncate_to_bcrypt_limit(plain))
+    """
+    Bcrypt-hash a plaintext password. ~50ms by design.
+
+    Inputs longer than 72 bytes are truncated at a codepoint boundary —
+    bcrypt 4.x rejects them outright (pre-4.x silently truncated). The
+    return value is a stable, version-prefixed string ($2b$...) — same
+    format passlib produced, fully cross-verifiable.
+    """
+    secret = _truncate_to_bcrypt_limit(plain).encode("utf-8")
+    return bcrypt.hashpw(secret, bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
-    """Constant-time bcrypt verify. Returns False on any error (corrupt hash,
-    truncation mismatch, etc.). Truncation mirrors hash_password so a
-    too-long input that was hashed via the truncate path still verifies."""
+    """
+    Constant-time bcrypt verify. Returns False on any error (corrupt
+    hash, encoding issue, etc.) — never lets an exception leak as a
+    "successful" auth failure.
+
+    Truncation mirrors hash_password so a too-long input that was hashed
+    via the truncate path still verifies.
+    """
     try:
-        return _pwd.verify(_truncate_to_bcrypt_limit(plain), hashed)
-    except Exception:  # noqa: BLE001 — never let a hash error leak; treat as auth failure
+        secret = _truncate_to_bcrypt_limit(plain).encode("utf-8")
+        return bcrypt.checkpw(secret, hashed.encode("utf-8"))
+    except Exception:  # noqa: BLE001 — treat any error as auth failure
         return False
 
 

@@ -269,21 +269,29 @@ async function reseedFromEnv(): Promise<void> {
   </div>
 
   <template v-else>
-    <!-- Add user inline form -->
+    <!-- Add user inline form. Wrapped in a real <form> so password
+         managers can offer to save the credential, browser autofill
+         works, and Enter inside any field submits natively. -->
     <div class="set-card-block">
       <div class="set-eyebrow">ADD LOGIN</div>
-      <div :style="{ display: 'grid', gridTemplateColumns: '1.6fr 1.6fr 0.8fr auto', gap: '8px', marginTop: '8px' }">
+      <form
+        autocomplete="off"
+        :style="{ display: 'grid', gridTemplateColumns: '1.6fr 1.6fr 0.8fr auto', gap: '8px', marginTop: '8px' }"
+        @submit.prevent="addUser"
+      >
         <input
           v-model="newEmail"
           type="email"
+          name="email"
           placeholder="email@vin.com"
-          autocomplete="off"
+          autocomplete="username"
           data-test-id="auth-users-new-email"
           :style="{ padding: '8px 10px', border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--surface)', color: 'var(--fg1)', fontSize: '13px' }"
         />
         <input
           v-model="newPassword"
           type="password"
+          name="new-password"
           placeholder="initial password (min 10 chars)"
           autocomplete="new-password"
           data-test-id="auth-users-new-password"
@@ -291,6 +299,7 @@ async function reseedFromEnv(): Promise<void> {
         />
         <select
           v-model="newRole"
+          name="role"
           data-test-id="auth-users-new-role"
           :style="{ padding: '8px 10px', border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--surface)', color: 'var(--fg1)', fontSize: '13px' }"
         >
@@ -298,12 +307,12 @@ async function reseedFromEnv(): Promise<void> {
           <option value="admin">admin</option>
         </select>
         <button
+          type="submit"
           class="btn btn--primary"
           :disabled="adding || !addUserReady"
           data-test-id="auth-users-add"
-          @click="addUser"
         >{{ adding ? 'Adding…' : 'Add user' }}</button>
-      </div>
+      </form>
       <div
         :style="{
           fontSize: '11px',
@@ -421,30 +430,44 @@ async function reseedFromEnv(): Promise<void> {
       :style="{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }"
       @click.self="closeReset"
     >
-      <div :style="{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', padding: '24px', width: '420px', maxWidth: '90vw' }">
+      <form
+        autocomplete="off"
+        :style="{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '8px', padding: '24px', width: '420px', maxWidth: '90vw' }"
+        @submit.prevent="submitReset"
+      >
         <h3 :style="{ margin: '0 0 6px', fontSize: '16px', fontWeight: 700 }">Reset password</h3>
         <p :style="{ fontSize: '13px', color: 'var(--fg2)', margin: '0 0 16px' }">
           New password for <code>{{ resetTargetEmail }}</code>. Share it out-of-band — it won't be shown again.
         </p>
+        <!-- Hidden username field so password managers can pair the new
+             password with the target account. -->
+        <input
+          type="email"
+          name="username"
+          :value="resetTargetEmail"
+          autocomplete="username"
+          readonly
+          :style="{ display: 'none' }"
+        />
         <input
           v-model="resetPassword"
           type="password"
+          name="new-password"
           placeholder="new password (min 10 chars)"
           autocomplete="new-password"
           data-test-id="auth-users-reset-password"
           :style="{ width: '100%', padding: '8px 10px', border: '1px solid var(--border)', borderRadius: '6px', background: 'var(--bg)', color: 'var(--fg1)', fontSize: '13px', fontFamily: 'var(--font-mono)' }"
-          @keydown.enter="submitReset"
         />
         <div :style="{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '16px' }">
-          <button class="btn btn--ghost" :disabled="resetSaving" @click="closeReset">Cancel</button>
+          <button type="button" class="btn btn--ghost" :disabled="resetSaving" @click="closeReset">Cancel</button>
           <button
+            type="submit"
             class="btn btn--primary"
             :disabled="resetSaving || resetPassword.length < 10"
             data-test-id="auth-users-reset-submit"
-            @click="submitReset"
           >{{ resetSaving ? 'Resetting…' : 'Reset password' }}</button>
         </div>
-      </div>
+      </form>
     </div>
   </template>
 </template>
