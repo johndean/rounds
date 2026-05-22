@@ -18,7 +18,13 @@ import { toast } from '@/composables/useToast';
 import { confirm } from '@/composables/useConfirm';
 import { ApiError } from '@/services/http';
 
-interface UiPerson { id: string; name: string; email: string }
+interface UiPerson {
+  id:           string;
+  name:         string;
+  email:        string;
+  role:         string;        // '' when unset; never null in the UI
+  avatar_color: string;        // hex with '#' prefix; '' when unset
+}
 interface UiGroup  { id: string; name: string; members: UiPerson[] }
 
 const people     = ref<UiPerson[]>([]);
@@ -28,7 +34,7 @@ const loading    = ref(true);
 
 // Track in-progress edits so the row swaps to an input inline (no modal).
 const editingPersonId = ref<string | null>(null);
-const editingPersonDraft = ref({ name: '', email: '' });
+const editingPersonDraft = ref({ name: '', email: '', role: '', avatar_color: '#3b82f6' });
 const editingGroupId = ref<string | null>(null);
 const editingGroupDraft = ref('');
 
@@ -43,6 +49,23 @@ const ADD_COLORS: readonly string[] = Object.freeze([
   '#3b82f6', '#10b981', '#f59e0b', '#ef4444',
   '#8b5cf6', '#ec4899', '#14b8a6', '#64748b',
 ]);
+
+// Baseline role suggestions. Merged at render time with whatever distinct
+// role values already exist on the people list, so the dropdown reflects
+// the actual system state and grows as the operator adds new ones.
+const BASELINE_ROLES: readonly string[] = Object.freeze([
+  'Admin', 'Editor', 'Reviewer', 'Coordinator', 'External', 'Producer',
+]);
+
+const roleSuggestions = computed<string[]>(() => {
+  const seen = new Set<string>();
+  for (const p of people.value) {
+    const r = (p.role || '').trim();
+    if (r) seen.add(r);
+  }
+  for (const r of BASELINE_ROLES) seen.add(r);
+  return Array.from(seen).sort((a, b) => a.localeCompare(b));
+});
 
 function isEmailish(v: string): boolean {
   return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.trim());
@@ -60,8 +83,18 @@ const addPersonHint = computed(() => {
   if (!n) return 'Name is required.';
   if (!e) return 'Email is required.';
   if (!isEmailish(e)) return `"${e}" doesn't look like a valid email.`;
-  return 'Visible in stage-assignment chips. Role is free-form (e.g. "V@V", "Main Contact").';
+  return 'Pick a role from the dropdown (or type a new one) and a chip color.';
 });
+
+function toUiPerson(p: SettingsPerson): UiPerson {
+  return {
+    id:           p.id,
+    name:         p.name,
+    email:        p.email,
+    role:         (p.role ?? '') as string,
+    avatar_color: (p.avatar_color ?? '') as string,
+  };
+}
 
 async function hydrate(): Promise<void> {
   loading.value = true;
@@ -70,7 +103,7 @@ async function hydrate(): Promise<void> {
       settingsApi.people().catch(() => [] as SettingsPerson[]),
       settingsApi.groups().catch(() => [] as SettingsGroup[]),
     ]);
-    people.value = pp.map((p) => ({ id: p.id, name: p.name, email: p.email }));
+    people.value = pp.map(toUiPerson);
 
     // Fan-out per-group member fetches in parallel so each group's chips
     // come from the real /groups/{id}/members JOIN instead of the empty
@@ -81,7 +114,7 @@ async function hydrate(): Promise<void> {
     groups.value = gg.map((g, i) => ({
       id: g.id,
       name: g.name,
-      members: memberLists[i]!.map((m) => ({ id: m.id, name: m.name, email: m.email })),
+      members: memberLists[i]!.map(toUiPerson),
     }));
   } finally {
     loading.value = false;
@@ -118,7 +151,7 @@ async function addPerson(): Promise<void> {
       role:         newPersonRole.value.trim() || undefined,
       avatar_color: newPersonColor.value,
     });
-    people.value = [...people.value, { id: created.id, name: created.name, email: created.email }];
+    people.value = [...people.value, toUiPerson(created)];
     newPersonName.value  = '';
     newPersonEmail.value = '';
     newPersonRole.value  = '';
@@ -133,7 +166,12 @@ async function addPerson(): Promise<void> {
 
 function startEditPerson(p: UiPerson): void {
   editingPersonId.value = p.id;
-  editingPersonDraft.value = { name: p.name, email: p.email };
+  editingPersonDraft.value = {
+    name:         p.name,
+    email:        p.email,
+    role:         p.role || '',
+    avatar_color: p.avatar_color || '#3b82f6',
+  };
 }
 
 function cancelEditPerson(): void {
@@ -143,23 +181,25 @@ function cancelEditPerson(): void {
 async function saveEditPerson(p: UiPerson): Promise<void> {
   const draft = editingPersonDraft.value;
   const diff: Record<string, string> = {};
-  if (draft.name.trim() && draft.name !== p.name)   diff.name  = draft.name.trim();
-  if (draft.email.trim() && draft.email !== p.email) diff.email = draft.email.trim();
+  if (draft.name.trim()  && draft.name  !== p.name)   diff.name         = draft.name.trim();
+  if (draft.email.trim() && draft.email !== p.email)  diff.email        = draft.email.trim().toLowerCase();
+  // Role: include even when blank so the operator can CLEAR a stale role.
+  if (draft.role.trim() !== (p.role || ''))           diff.role         = draft.role.trim();
+  if (draft.avatar_color && draft.avatar_color !== p.avatar_color) {
+    diff.avatar_color = draft.avatar_color;
+  }
   if (Object.keys(diff).length === 0) {
     editingPersonId.value = null;
     return;
   }
   try {
     const updated = await settingsApi.peopleUpdate(p.id, diff);
-    people.value = people.value.map((x) =>
-      x.id === p.id ? { id: updated.id, name: updated.name, email: updated.email } : x,
-    );
+    const ui = toUiPerson(updated);
+    people.value = people.value.map((x) => (x.id === p.id ? ui : x));
     // Member chips elsewhere reference these names — refresh the lookup.
     groups.value = groups.value.map((g) => ({
       ...g,
-      members: g.members.map((m) =>
-        m.id === p.id ? { ...m, name: updated.name, email: updated.email } : m,
-      ),
+      members: g.members.map((m) => (m.id === p.id ? ui : m)),
     }));
     toast.push(`${updated.name} updated`, { tone: 'success' });
     editingPersonId.value = null;
@@ -321,7 +361,8 @@ function availableForGroup(g: UiGroup): UiPerson[] {
             v-model="newPersonRole"
             class="set-input set-input--sm"
             type="text"
-            placeholder="Role (e.g. V@V)"
+            list="person-role-options"
+            placeholder="Role (pick or type)"
             data-test-id="add-person-role"
             @keyup.enter="addPerson"
           />
@@ -359,21 +400,95 @@ function availableForGroup(g: UiGroup): UiPerson[] {
         >{{ addPersonHint }}</div>
       </div>
 
-      <div v-for="p in people" :key="p.id" class="set-row">
+      <!-- Shared role suggestions for both add + edit inputs. Populated
+           from distinct roles already in the people list, merged with a
+           baseline set so a fresh install still has something to pick. -->
+      <datalist id="person-role-options">
+        <option v-for="r in roleSuggestions" :key="r" :value="r" />
+      </datalist>
+
+      <div v-for="p in people" :key="p.id" class="set-row set-row--col">
         <template v-if="editingPersonId === p.id">
-          <div :style="{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }">
-            <input v-model="editingPersonDraft.name" class="set-input set-input--sm" placeholder="Name" />
-            <input v-model="editingPersonDraft.email" class="set-input set-input--sm" placeholder="Email" />
-          </div>
-          <div class="set-row__actions">
-            <button class="set-link" @click="saveEditPerson(p)">Save</button>
-            <button class="set-link" @click="cancelEditPerson">Cancel</button>
+          <!-- Edit row mirrors the add form: name / email / role / color / save+cancel.
+               Same 5-column grid + same control types so editing feels identical
+               to adding. -->
+          <div :style="{ display: 'grid', gridTemplateColumns: '1.2fr 1.6fr 0.8fr auto auto', gap: '8px', alignItems: 'center', width: '100%' }">
+            <input
+              v-model="editingPersonDraft.name"
+              class="set-input set-input--sm"
+              placeholder="Full name"
+              data-test-id="edit-person-name"
+              @keyup.enter="saveEditPerson(p)"
+              @keyup.escape="cancelEditPerson"
+            />
+            <input
+              v-model="editingPersonDraft.email"
+              class="set-input set-input--sm"
+              type="email"
+              placeholder="email@vin.com"
+              autocomplete="off"
+              data-test-id="edit-person-email"
+              @keyup.enter="saveEditPerson(p)"
+              @keyup.escape="cancelEditPerson"
+            />
+            <input
+              v-model="editingPersonDraft.role"
+              class="set-input set-input--sm"
+              type="text"
+              list="person-role-options"
+              placeholder="Role (pick or type)"
+              data-test-id="edit-person-role"
+              @keyup.enter="saveEditPerson(p)"
+              @keyup.escape="cancelEditPerson"
+            />
+            <div
+              :style="{ display: 'flex', gap: '4px', alignItems: 'center' }"
+              data-test-id="edit-person-color-picker"
+            >
+              <button
+                v-for="c in ADD_COLORS"
+                :key="c"
+                type="button"
+                :title="c"
+                :style="{
+                  background: c,
+                  width: '16px', height: '16px', borderRadius: '50%',
+                  border: editingPersonDraft.avatar_color === c ? '2px solid var(--fg1)' : '1px solid var(--border)',
+                  padding: 0, cursor: 'pointer',
+                }"
+                @click="editingPersonDraft.avatar_color = c"
+              />
+            </div>
+            <div :style="{ display: 'inline-flex', gap: '6px', justifyContent: 'flex-end' }">
+              <button class="set-link" data-test-id="edit-person-save" @click="saveEditPerson(p)">Save</button>
+              <button class="set-link" data-test-id="edit-person-cancel" @click="cancelEditPerson">Cancel</button>
+            </div>
           </div>
         </template>
         <template v-else>
-          <div>
-            <div class="set-row__name">{{ p.name }}</div>
-            <div class="set-row__sub">{{ p.email }}</div>
+          <!-- Read-only row shows the avatar dot + name + role + email so the
+               operator can see every field they can edit, before deciding to. -->
+          <div :style="{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1 }">
+            <span
+              :title="p.avatar_color || 'no color'"
+              :style="{
+                width: '12px', height: '12px', borderRadius: '50%',
+                background: p.avatar_color || 'var(--surface-muted, #ddd)',
+                border: '1px solid var(--border)',
+                flexShrink: 0,
+              }"
+            />
+            <div :style="{ flex: 1 }">
+              <div class="set-row__name">
+                {{ p.name }}
+                <span
+                  v-if="p.role"
+                  class="chip chip--ghost"
+                  :style="{ marginLeft: '8px', fontSize: '10px', verticalAlign: 'middle' }"
+                >{{ p.role }}</span>
+              </div>
+              <div class="set-row__sub">{{ p.email }}</div>
+            </div>
           </div>
           <div class="set-row__actions">
             <button class="set-link" @click="startEditPerson(p)">Edit</button>
