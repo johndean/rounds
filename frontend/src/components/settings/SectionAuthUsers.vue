@@ -17,6 +17,7 @@
 import { computed, onMounted, ref } from 'vue';
 import SettingsHeader from './SettingsHeader.vue';
 import {
+  diag,
   settingsApi,
   type AuthUser,
 } from '@/services/api';
@@ -32,6 +33,29 @@ const newEmail    = ref('');
 const newPassword = ref('');
 const newRole     = ref<'admin' | 'user'>('user');
 const adding      = ref(false);
+
+// Live helper text under the Add form. Tells the operator EXACTLY why
+// the button is disabled (or that it's ready) so a no-op click never
+// looks like "the button doesn't work".
+const addUserHint = computed(() => {
+  if (!newEmail.value) return 'Enter an email to begin.';
+  if (!newPassword.value) return 'Enter an initial password (min 12 chars).';
+  if (newPassword.value.length < 12) {
+    return `Password is ${newPassword.value.length} chars — need at least 12.`;
+  }
+  return 'Ready. Share the password out-of-band (1Password, Slack DM, etc.) — the user can\'t see it later.';
+});
+const addUserReady = computed(() =>
+  newEmail.value.length > 0 &&
+  newPassword.value.length >= 12,
+);
+
+// ── Empty-state recovery (re-seed from AUTH_USERS env) ─────────────────
+// Surfaced inline when the user list is empty so the operator has a
+// one-click path out of the "0 logins · 0 active admins" dead-end the
+// cutover left behind on 2026-05-21.
+const reseeding  = ref(false);
+const lastReseed = ref<{ seeded: number; total: number; skipped_count: number } | null>(null);
 
 // ── Reset-password modal state ──────────────────────────────────────────
 const resetTargetId    = ref<string | null>(null);
@@ -209,6 +233,29 @@ function fmtTs(iso: string | null): string {
 const activeAdminCount = computed(
   () => users.value.filter((u) => u.role === 'admin' && u.is_active).length,
 );
+
+// ── Reseed from AUTH_USERS env (admin-only, idempotent) ────────────────
+async function reseedFromEnv(): Promise<void> {
+  if (reseeding.value) return;
+  reseeding.value = true;
+  try {
+    const r = await diag.reseedAuthUsers();
+    lastReseed.value = r;
+    if (r.seeded > 0) {
+      toast.push(`Seeded ${r.seeded} login${r.seeded === 1 ? '' : 's'} from AUTH_USERS env.`, { tone: 'success' });
+      await hydrate();
+    } else if (r.total === 0) {
+      toast.push('Seed produced 0 rows — AUTH_USERS env may be empty or all rows tripped bcrypt.', { tone: 'warn' });
+    } else {
+      toast.push(`Table already has ${r.total} row${r.total === 1 ? '' : 's'}; seed was a no-op.`, { tone: 'info' });
+      await hydrate();
+    }
+  } catch (e) {
+    surfaceError(e, 'Reseed failed');
+  } finally {
+    reseeding.value = false;
+  }
+}
 </script>
 
 <template>
@@ -252,24 +299,60 @@ const activeAdminCount = computed(
         </select>
         <button
           class="btn btn--primary"
-          :disabled="adding || !newEmail || !newPassword"
+          :disabled="adding || !addUserReady"
           data-test-id="auth-users-add"
           @click="addUser"
         >{{ adding ? 'Adding…' : 'Add user' }}</button>
       </div>
-      <div :style="{ fontSize: '11px', color: 'var(--fg2)', marginTop: '6px' }">
-        Min 12 chars; share the password out-of-band (1Password, Slack DM, etc.). The user can't see it later — only you can reset it.
+      <div
+        :style="{
+          fontSize: '11px',
+          marginTop: '6px',
+          color: addUserReady ? 'var(--fg2)' : 'var(--color-warn, #b45309)',
+        }"
+        data-test-id="auth-users-hint"
+      >{{ addUserHint }}</div>
+    </div>
+
+    <!-- Empty-state recovery panel: only when the table is truly empty.
+         Gives the operator a one-click path out of the cutover dead-end
+         where the boot-time seed failed and left auth_users with 0 rows. -->
+    <div
+      v-if="users.length === 0"
+      class="set-card-block"
+      :style="{
+        border: '1px dashed var(--color-warn, #b45309)',
+        background: 'rgba(245,158,11,0.04)',
+      }"
+    >
+      <div :style="{ fontSize: '14px', fontWeight: 700, color: 'var(--fg1)', marginBottom: '4px' }">
+        No logins in the database
       </div>
+      <p :style="{ fontSize: '13px', color: 'var(--fg2)', margin: '0 0 12px', lineHeight: 1.5 }">
+        The <code>auth_users</code> table is empty. Either this is a fresh install (add a login above),
+        or the boot-time seed from <code>AUTH_USERS</code> didn't complete (e.g. a long password
+        tripped bcrypt's 72-byte limit). You can re-run the seed now without redeploying — it's
+        idempotent, so it's safe to click more than once.
+      </p>
+      <button
+        class="btn btn--tertiary"
+        :disabled="reseeding"
+        data-test-id="auth-users-reseed"
+        @click="reseedFromEnv"
+      >{{ reseeding ? 'Reseeding…' : 'Seed from AUTH_USERS env' }}</button>
+      <span
+        v-if="lastReseed"
+        :style="{ fontSize: '11px', color: 'var(--fg2)', marginLeft: '10px', fontFamily: 'var(--font-mono)' }"
+      >
+        last: seeded={{ lastReseed.seeded }} · total={{ lastReseed.total }} · skipped={{ lastReseed.skipped_count }}
+      </span>
     </div>
 
     <!-- User list -->
     <div class="set-card-block">
       <div class="set-eyebrow">{{ users.length }} LOGIN{{ users.length === 1 ? '' : 'S' }} · {{ activeAdminCount }} ACTIVE ADMIN{{ activeAdminCount === 1 ? '' : 'S' }}</div>
-      <div v-if="users.length === 0" :style="{ padding: '20px', textAlign: 'center', color: 'var(--fg2)', fontSize: '13px' }">
-        No users yet. Add one above to enable sign-in.
-      </div>
       <table
-        v-else
+        v-if="users.length > 0"
         :style="{ width: '100%', borderCollapse: 'collapse', fontSize: '13px', marginTop: '8px' }"
       >
         <thead>

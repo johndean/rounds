@@ -466,3 +466,65 @@ async def abort_session(
     return AbortSessionResult(
         session_id=session_id, status_before=status_before, status_after="failed",
     )
+
+
+class ReseedAuthUsersResult(BaseModel):
+    seeded:        int    # rows inserted by THIS call (0 if table already had rows)
+    total:         int    # row count in auth_users AFTER the call
+    skipped_count: int    # AUTH_USERS env entries that didn't make it (bcrypt errors, etc.)
+
+
+@router.post("/reseed-auth-users", response_model=ReseedAuthUsersResult)
+async def reseed_auth_users(db: DbSession, user: CurrentUser) -> ReseedAuthUsersResult:
+    """
+    Admin-only escape hatch — re-run the boot-time AUTH_USERS env seed
+    against the live DB. Idempotent via the existing count-short-circuit
+    inside seed_from_env_if_empty: if auth_users already has rows, the
+    call returns 0 seeded with no writes.
+
+    Use after a seed failure left the table empty (e.g. a long password
+    tripped bcrypt 4.x's hard 72-byte limit before the per-row try/except
+    was in place). Calling this avoids needing a redeploy to trigger the
+    lifespan hook again.
+    """
+    if not hasattr(user, "email") or user.email != "johndean@vin.com":
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "ADMIN_ONLY", "message": "admin only"},
+        )
+
+    from sqlalchemy import create_engine
+
+    from app.auth import _parse_auth_users
+    from app.config import settings as _s
+    from app.services.auth_users import seed_from_env_if_empty
+
+    sync_url = _s.DATABASE_URL.replace("+asyncpg", "")
+    engine = create_engine(sync_url)
+    try:
+        before_row = await db.execute(text("SELECT count(*) FROM auth_users"))
+        before = int(before_row.scalar() or 0)
+
+        seeded = seed_from_env_if_empty(engine, _s.AUTH_USERS)
+
+        after_row = await db.execute(text("SELECT count(*) FROM auth_users"))
+        after = int(after_row.scalar() or 0)
+
+        # Audit so the ledger has a record of every manual reseed.
+        await db.execute(
+            text(
+                "INSERT INTO audit_events (actor_email, kind, summary) "
+                "VALUES (:a, 'diag.reseed_auth_users', :s)"
+            ),
+            {"a": user.email, "s": f"before={before} seeded={seeded} after={after}"},
+        )
+        await db.commit()
+
+        env_entries = len(_parse_auth_users(_s.AUTH_USERS or ""))
+        # If env had N parseable rows and we only end up with M total, the
+        # delta is what bcrypt or constraints rejected. Non-negative clamp
+        # covers the case where the table had pre-existing rows.
+        skipped = max(0, env_entries - after)
+        return ReseedAuthUsersResult(seeded=seeded, total=after, skipped_count=skipped)
+    finally:
+        engine.dispose()

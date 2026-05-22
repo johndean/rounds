@@ -723,6 +723,14 @@ export const diag = {
   health: () => http<{ status: string; version: string; env: string }>('/v1/health'),
   clearRateLimitSlots: () =>
     http<ClearSlotsResult>('/v1/diag/clear-rate-limit-slots', { method: 'POST' }),
+  // Admin-only escape hatch for the auth-users boot seed. Idempotent — if
+  // the table already has rows the call returns {seeded:0}. Surfaced from
+  // Settings → Auth & Logins empty-state recovery panel.
+  reseedAuthUsers: () =>
+    http<{ seeded: number; total: number; skipped_count: number }>(
+      '/v1/diag/reseed-auth-users',
+      { method: 'POST' },
+    ),
 };
 
 export type Api = typeof auth & typeof sessions; // ergonomic export

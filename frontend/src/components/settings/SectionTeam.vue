@@ -7,7 +7,7 @@
  * member-chip add/remove). Every action persists; toasts surface 409
  * duplicate-email / duplicate-name errors cleanly.
  */
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import SettingsHeader from './SettingsHeader.vue';
 import {
   settingsApi,
@@ -31,6 +31,37 @@ const editingPersonId = ref<string | null>(null);
 const editingPersonDraft = ref({ name: '', email: '' });
 const editingGroupId = ref<string | null>(null);
 const editingGroupDraft = ref('');
+
+// ── Inline add-person form (replaces the legacy window.prompt() flow) ──
+const newPersonName  = ref('');
+const newPersonEmail = ref('');
+const newPersonRole  = ref('');
+const newPersonColor = ref<string>('#3b82f6');
+const addingPerson   = ref(false);
+
+const ADD_COLORS: readonly string[] = Object.freeze([
+  '#3b82f6', '#10b981', '#f59e0b', '#ef4444',
+  '#8b5cf6', '#ec4899', '#14b8a6', '#64748b',
+]);
+
+function isEmailish(v: string): boolean {
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.trim());
+}
+
+const canAddPerson = computed(() =>
+  newPersonName.value.trim().length > 0 &&
+  isEmailish(newPersonEmail.value),
+);
+
+const addPersonHint = computed(() => {
+  const n = newPersonName.value.trim();
+  const e = newPersonEmail.value.trim();
+  if (!n && !e) return 'Enter a name and a valid email to enable Add person.';
+  if (!n) return 'Name is required.';
+  if (!e) return 'Email is required.';
+  if (!isEmailish(e)) return `"${e}" doesn't look like a valid email.`;
+  return 'Visible in stage-assignment chips. Role is free-form (e.g. "V@V", "Main Contact").';
+});
 
 async function hydrate(): Promise<void> {
   loading.value = true;
@@ -78,19 +109,25 @@ function err(e: unknown): string {
 // ─── People ─────────────────────────────────────────────────────────────
 
 async function addPerson(): Promise<void> {
-  const name = window.prompt('Name?');
-  if (!name) return;
-  const email = window.prompt('Email?') || '';
-  if (!email) {
-    toast.push('Email required to add a person', { tone: 'warn' });
-    return;
-  }
+  if (!canAddPerson.value || addingPerson.value) return;
+  addingPerson.value = true;
   try {
-    const created = await settingsApi.peopleAdd({ name, email });
+    const created = await settingsApi.peopleAdd({
+      name:         newPersonName.value.trim(),
+      email:        newPersonEmail.value.trim().toLowerCase(),
+      role:         newPersonRole.value.trim() || undefined,
+      avatar_color: newPersonColor.value,
+    });
     people.value = [...people.value, { id: created.id, name: created.name, email: created.email }];
+    newPersonName.value  = '';
+    newPersonEmail.value = '';
+    newPersonRole.value  = '';
+    newPersonColor.value = '#3b82f6';
     toast.push(`${created.name} added`, { tone: 'success' });
   } catch (e) {
     toast.push(err(e), { tone: 'error' });
+  } finally {
+    addingPerson.value = false;
   }
 }
 
@@ -252,8 +289,76 @@ function availableForGroup(g: UiGroup): UiPerson[] {
     <div class="set-pane">
       <div class="set-pane__head">
         <span class="set-eyebrow">PEOPLE · {{ people.length }}</span>
-        <button class="btn btn--tertiary" @click="addPerson">+ Add person</button>
       </div>
+
+      <!-- Inline add-person form (replaces window.prompt). Always visible
+           so there's no "where do I click" mystery. Button is disabled
+           until name + valid email are present; helper text below explains
+           the current state. -->
+      <div
+        class="set-row set-row--col"
+        :style="{ background: 'var(--surface-muted, rgba(0,0,0,0.02))', borderRadius: '6px', padding: '10px', marginBottom: '10px' }"
+      >
+        <div :style="{ display: 'grid', gridTemplateColumns: '1.2fr 1.6fr 0.8fr auto auto', gap: '8px', alignItems: 'center' }">
+          <input
+            v-model="newPersonName"
+            class="set-input set-input--sm"
+            type="text"
+            placeholder="Full name"
+            data-test-id="add-person-name"
+            @keyup.enter="addPerson"
+          />
+          <input
+            v-model="newPersonEmail"
+            class="set-input set-input--sm"
+            type="email"
+            placeholder="email@vin.com"
+            autocomplete="off"
+            data-test-id="add-person-email"
+            @keyup.enter="addPerson"
+          />
+          <input
+            v-model="newPersonRole"
+            class="set-input set-input--sm"
+            type="text"
+            placeholder="Role (e.g. V@V)"
+            data-test-id="add-person-role"
+            @keyup.enter="addPerson"
+          />
+          <div
+            :style="{ display: 'flex', gap: '4px', alignItems: 'center' }"
+            data-test-id="add-person-color-picker"
+          >
+            <button
+              v-for="c in ADD_COLORS"
+              :key="c"
+              type="button"
+              :title="c"
+              :style="{
+                background: c,
+                width: '18px', height: '18px', borderRadius: '50%',
+                border: newPersonColor === c ? '2px solid var(--fg1)' : '1px solid var(--border)',
+                padding: 0, cursor: 'pointer',
+              }"
+              @click="newPersonColor = c"
+            />
+          </div>
+          <button
+            class="btn btn--primary btn--sm"
+            :disabled="!canAddPerson || addingPerson"
+            data-test-id="add-person-submit"
+            @click="addPerson"
+          >{{ addingPerson ? 'Adding…' : 'Add person' }}</button>
+        </div>
+        <div
+          :style="{
+            fontSize: '11px',
+            marginTop: '6px',
+            color: canAddPerson ? 'var(--fg2)' : 'var(--color-warn, #b45309)',
+          }"
+        >{{ addPersonHint }}</div>
+      </div>
+
       <div v-for="p in people" :key="p.id" class="set-row">
         <template v-if="editingPersonId === p.id">
           <div :style="{ flex: 1, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }">
