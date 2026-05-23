@@ -99,22 +99,19 @@ function toUiPerson(p: SettingsPerson): UiPerson {
 async function hydrate(): Promise<void> {
   loading.value = true;
   try {
-    const [pp, gg] = await Promise.all([
+    const [pp, gg, membersByGroup] = await Promise.all([
       settingsApi.people().catch(() => [] as SettingsPerson[]),
       settingsApi.groups().catch(() => [] as SettingsGroup[]),
+      // Phase 7 of the 2026-05-23 perf plan: one bulk roundtrip replaces
+      // the N-per-group fan-out. Falls back to {} so per-group hydrate
+      // still works if the bulk endpoint is unavailable (older API SHA).
+      settingsApi.groupMembersBulk().catch(() => ({} as Record<string, SettingsPerson[]>)),
     ]);
     people.value = pp.map(toUiPerson);
-
-    // Fan-out per-group member fetches in parallel so each group's chips
-    // come from the real /groups/{id}/members JOIN instead of the empty
-    // placeholder array used before Unit 1.
-    const memberLists = await Promise.all(
-      gg.map((g) => settingsApi.groupMembers(g.id).catch(() => [] as SettingsPerson[])),
-    );
-    groups.value = gg.map((g, i) => ({
+    groups.value = gg.map((g) => ({
       id: g.id,
       name: g.name,
-      members: memberLists[i]!.map(toUiPerson),
+      members: (membersByGroup[g.id] ?? []).map(toUiPerson),
     }));
   } finally {
     loading.value = false;

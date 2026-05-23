@@ -585,6 +585,8 @@ export const settingsApi = {
     http(`/v1/settings/groups/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   groupMembers: (id: string) =>
     http<SettingsPerson[]>(`/v1/settings/groups/${encodeURIComponent(id)}/members`),
+  groupMembersBulk: () =>
+    http<Record<string, SettingsPerson[]>>('/v1/settings/groups-members'),
   groupMemberAdd: (groupId: string, personId: string) =>
     http<{ added: boolean }>(
       `/v1/settings/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(personId)}`,

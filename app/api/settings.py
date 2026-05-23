@@ -248,6 +248,31 @@ async def list_group_members(group_id: UUID, db: DbSession, _u: CurrentUser) -> 
     return [dict(r) for r in rows]
 
 
+@router.get("/groups-members")
+async def list_all_group_members(db: DbSession, _u: CurrentUser) -> dict[str, list[dict]]:
+    """Bulk fan-out of /groups/{id}/members across every group, returned as
+    `{ group_id: [person, ...] }`. Replaces the N-RPC pattern in SectionTeam
+    (one call per group on hydrate). Phase 7 of the 2026-05-23 perf plan.
+
+    Same row shape as the per-group endpoint, same is_active filter, same
+    ORDER BY name within a group. Groups with zero members are omitted
+    (the caller already has the group ids from /groups and can default
+    missing entries to []).
+    """
+    rows = (await db.execute(text(
+        "SELECT gm.group_id, p.id, p.email, p.name, p.role, p.avatar_color, p.is_active "
+        "FROM group_members gm JOIN people p ON p.id = gm.person_id "
+        "WHERE p.is_active = TRUE "
+        "ORDER BY gm.group_id, p.name"
+    ))).mappings().all()
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        gid = str(r["group_id"])
+        person = {k: r[k] for k in ("id", "email", "name", "role", "avatar_color", "is_active")}
+        out.setdefault(gid, []).append(person)
+    return out
+
+
 @router.post("/groups/{group_id}/members/{person_id}", status_code=201)
 async def add_group_member(
     group_id: UUID, person_id: UUID, db: DbSession, user: CurrentUser,
