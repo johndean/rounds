@@ -33,35 +33,58 @@ interface SlideRow {
   style: Record<string, string>;
 }
 
-const rows = computed<SlideRow[]>(() =>
+interface SlideBase {
+  slide: Slide;
+  segs: Segment[];
+  accent: string;
+  isEmpty: boolean;
+  inactiveStyle: Record<string, string>;
+  activeStyle: Record<string, string>;
+}
+
+// Per-slide static data — accent, empty/non-empty style snapshots — depends
+// only on slides + segmentsBySlide. Stable across active/focused clicks.
+const slideBase = computed<SlideBase[]>(() =>
   props.slides.map((sl) => {
     const segs = props.segmentsBySlide.get(sl.id) || [];
     const accent = slideAccent(sl.id);
-    const isActive = sl.id === props.activeSlideId;
-    const isFocused = sl.id === props.focusedSlideId;
     const isEmpty = segs.length === 0;
+    const activeStyle: Record<string, string> = {
+      background: withAlpha(accent, '22'),
+      borderColor: accent,
+      boxShadow: `inset 3px 0 0 ${accent}`,
+    };
+    const inactiveStyle: Record<string, string> = isEmpty
+      ? { opacity: '0.55', boxShadow: `inset 3px 0 0 ${withAlpha(accent, '33')}` }
+      : {
+          background: withAlpha(accent, '12'),
+          borderColor: withAlpha(accent, '44'),
+          boxShadow: `inset 3px 0 0 ${accent}`,
+        };
+    return { slide: sl, segs, accent, isEmpty, inactiveStyle, activeStyle };
+  })
+);
+
+// Shallow overlay — only recomputes the active/focused classes + which
+// style snapshot to use. The per-slide objects above don't reallocate.
+const rows = computed<SlideRow[]>(() =>
+  slideBase.value.map((b) => {
+    const isActive = b.slide.id === props.activeSlideId;
+    const isFocused = b.slide.id === props.focusedSlideId;
     const cls = ['slide-card'];
     if (isActive) cls.push('is-active');
     if (isFocused && props.mode === 'focus') cls.push('is-focused-target');
-    if (isEmpty) cls.push('is-empty');
-
-    let style: Record<string, string>;
-    if (isActive) {
-      style = {
-        background: withAlpha(accent, '22'),
-        borderColor: accent,
-        boxShadow: `inset 3px 0 0 ${accent}`,
-      };
-    } else if (isEmpty) {
-      style = { opacity: '0.55', boxShadow: `inset 3px 0 0 ${withAlpha(accent, '33')}` };
-    } else {
-      style = {
-        background: withAlpha(accent, '12'),
-        borderColor: withAlpha(accent, '44'),
-        boxShadow: `inset 3px 0 0 ${accent}`,
-      };
-    }
-    return { slide: sl, segs, accent, isActive, isFocused, isEmpty, cls: cls.join(' '), style };
+    if (b.isEmpty) cls.push('is-empty');
+    return {
+      slide:     b.slide,
+      segs:      b.segs,
+      accent:    b.accent,
+      isActive,
+      isFocused,
+      isEmpty:   b.isEmpty,
+      cls:       cls.join(' '),
+      style:     isActive ? b.activeStyle : b.inactiveStyle,
+    };
   })
 );
 

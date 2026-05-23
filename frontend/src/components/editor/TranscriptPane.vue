@@ -97,11 +97,11 @@ const inline = ref<InlineEdit | null>(null);
 const scrollRef = useTemplateRef<HTMLElement>('scrollRef');
 const textareaRef = useTemplateRef<HTMLTextAreaElement>('textareaRef');
 
-const visible = computed<Segment[]>(() => {
+const visible = computed<readonly Segment[]>(() => {
   if (props.slideRailMode === 'filter' && props.focusedSlideId) {
     return props.segments.filter((s) => s.slide_id === props.focusedSlideId);
   }
-  return [...props.segments];
+  return props.segments;
 });
 
 watch(
