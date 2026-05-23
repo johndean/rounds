@@ -41,6 +41,10 @@ const allAssignees: string[] = [
 const matrix = ref<Record<string, string>>({});      // stage_id → display name
 const emails = ref<Record<string, boolean>>({});
 
+// Per-Type cache so flipping back to a previously-loaded Type is instant.
+// Invalidated by saveMatrix (overwrite) and removeType (delete).
+const typeRowsCache = new Map<string, StageAssigneeRow[]>();
+
 // Reverse lookup: display name → email (for serializing back to server).
 function _emailForName(name: string): string {
   if (!name || name === '(unassigned)') return '';
@@ -60,16 +64,23 @@ function _resetMatrix(): void {
   emails.value = Object.fromEntries(SOP_STAGE_KEYS.map((s) => [s.id, false]));
 }
 
+function _applyRows(rows: StageAssigneeRow[]): void {
+  for (const r of rows) {
+    matrix.value[r.stage] = _nameForEmail(r.assignee_email);
+    emails.value[r.stage] = r.notify_email;
+  }
+}
+
 async function _loadMatrixFor(typeRow: TypeRow): Promise<void> {
   _resetMatrix();
   if (!typeRow.id) return;     // fixture-only row (not persisted yet)
+  const cached = typeRowsCache.get(typeRow.id);
+  if (cached) { _applyRows(cached); return; }
   loadingMatrix.value = true;
   try {
     const rows = await settingsApi.typeAssignees(typeRow.id);
-    for (const r of rows) {
-      matrix.value[r.stage] = _nameForEmail(r.assignee_email);
-      emails.value[r.stage] = r.notify_email;
-    }
+    typeRowsCache.set(typeRow.id, rows);
+    _applyRows(rows);
   } catch (e) {
     const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Load matrix failed';
     toast.push(msg, { tone: 'error' });
@@ -123,6 +134,7 @@ async function removeType(t: TypeRow): Promise<void> {
   }
   try {
     await settingsApi.typesRemove(t.id);
+    typeRowsCache.delete(t.id);
     types.value = types.value.filter((x) => x.id !== t.id);
     if (active.value.id === t.id) active.value = types.value[0]!;
     toast.push(`Removed type ${t.code}`, { tone: 'success' });
@@ -146,6 +158,7 @@ async function saveMatrix(): Promise<void> {
       notify_email:   !!emails.value[s.id],
     })).filter((r) => r.assignee_email);
     await settingsApi.setTypeAssignees(active.value.id, rows);
+    typeRowsCache.set(active.value.id, rows);
     toast.push(`Matrix saved for ${active.value.code}`, { tone: 'success' });
   } catch (e) {
     const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Save failed';
