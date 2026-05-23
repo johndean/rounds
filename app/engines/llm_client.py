@@ -44,6 +44,29 @@ TERMINAL_LLM_CATEGORIES = frozenset({
 })
 
 
+# Public input-token caps per Gemini model. Used by the pre-flight count_tokens
+# probe to fail-fast on overflow instead of paying the 30-60 s upload + first
+# generate_content cost. Numbers from Google's published model docs; flash-lite
+# / flash share the 1M ceiling and 2.5-pro is the 2M tier.
+MODEL_CONTEXT_LIMITS: dict[str, int] = {
+    "gemini-2.5-flash-lite": 1_048_576,
+    "gemini-2.5-flash":      1_048_576,
+    "gemini-2.5-pro":        2_097_152,
+}
+
+
+def _estimate_input_tokens(client, model_id: str, contents) -> Optional[int]:
+    """Best-effort token-count probe. Returns None on any error so the caller
+    falls through to the existing generate_content path with zero behavior
+    change. Never raises."""
+    try:
+        result = client.models.count_tokens(model=model_id, contents=contents)
+        return int(getattr(result, "total_tokens", 0)) or None
+    except Exception as e:
+        logger.warning(f"count_tokens probe failed (non-fatal): {e}")
+        return None
+
+
 def _categorize_gemini_error(exc_text: str) -> str:
     t = (exc_text or "").lower()
     # Model deprecated / removed: 404 NOT_FOUND with "no longer available".
@@ -122,6 +145,29 @@ def call_gemini_multimodal(
 
     content = [types.Part.from_uri(file_uri=uf.uri, mime_type=uf.mime_type) for uf in uploaded]
     content.append(system_prompt)
+
+    # Pre-flight token check (Phase 5 of the 2026-05-23 perf plan). Catches
+    # the overflow case BEFORE the 30-60s generate_content round-trip, saving
+    # quota and worker time on already-doomed inputs. Best-effort: if the
+    # probe itself errors, fall through silently to the existing path.
+    tokens = _estimate_input_tokens(client, model_id, content)
+    limit = MODEL_CONTEXT_LIMITS.get(model_id)
+    if tokens is not None and limit is not None and tokens > limit:
+        logger.warning(
+            f"gemini pre-flight: {tokens} tokens > {model_id} limit {limit}; "
+            f"aborting before generate_content"
+        )
+        for uf in uploaded:
+            try:
+                client.files.delete(name=uf.name)
+            except Exception as cleanup_err:
+                logger.debug(f"gemini cleanup ignored: {cleanup_err}")
+        raise LLMError(
+            f"input is {tokens} tokens; {model_id} limit is {limit}",
+            category="gemini_context_overflow",
+        )
+    if tokens is not None and limit is not None:
+        logger.info(f"gemini pre-flight: {tokens}/{limit} tokens for {model_id}")
 
     last_err: Optional[Exception] = None
     for attempt in range(max_retries + 1):
