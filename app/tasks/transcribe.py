@@ -216,6 +216,19 @@ def transcribe_task(self, session_id: str) -> dict:  # noqa: ARG001  (bind=True 
         return {"session_id": session_id, "segment_count": len(raw_segments), "word_count": word_count}
 
     except Exception as exc:  # noqa: BLE001
+        # Phase 6 of the 2026-05-23 perf plan: mirror ai_process_task's
+        # terminal-category guard so any future LLM call from this task
+        # (e.g. Gemini-side speaker diarization) inherits the same
+        # fail-fast behavior as ai_process. Same constants, no new
+        # categories — current STT-only path is unaffected.
+        from app.engines.llm_client import LLMError, TERMINAL_LLM_CATEGORIES
+
+        if isinstance(exc, LLMError) and exc.category in TERMINAL_LLM_CATEGORIES:
+            logger.warning(
+                f"transcribe: permanent error ({exc.category}) — skipping retries: {exc}"
+            )
+            raise
+
         attempt = self.request.retries
         if attempt < self.max_retries:
             logger.warning(f"transcribe failed (attempt {attempt + 1}): {exc} — retrying")
