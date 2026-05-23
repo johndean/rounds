@@ -4,7 +4,7 @@
  * Typed thin wrappers around http(). Endpoint shapes mirror the backend
  * routers in app/api/*.
  */
-import { http } from './http';
+import { http, getToken, ApiError } from './http';
 
 // ─── Auth ────────────────────────────────────────────────────────────────
 export interface TokenResponse {
@@ -587,6 +587,32 @@ export const settingsApi = {
     http<SettingsPerson[]>(`/v1/settings/groups/${encodeURIComponent(id)}/members`),
   groupMembersBulk: () =>
     http<Record<string, SettingsPerson[]>>('/v1/settings/groups-members'),
+  // Phase 3 of the 2026-05-23 Settings BUILD plan. Streams the macro zip
+  // bundle from /v1/settings/export/macro and triggers a browser download.
+  // Uses fetch + blob (not window.location.href) so the JWT auth header is
+  // present. Throws ApiError on 4xx/5xx so the caller can surface a clean
+  // toast (e.g. 404 MACRO_NOT_FOUND when the bundle isn't deployed yet).
+  downloadMacro: async (): Promise<void> => {
+    const token = getToken();
+    const resp = await fetch('/v1/settings/export/macro', {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!resp.ok) {
+      const isJson = resp.headers.get('content-type')?.includes('application/json');
+      const body = isJson ? await resp.json().catch(() => undefined) : await resp.text().catch(() => '');
+      throw new ApiError(resp.status, body);
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'rounds-macros.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    // Give the browser a tick to start the download before revoking the URL.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  },
   groupMemberAdd: (groupId: string, personId: string) =>
     http<{ added: boolean }>(
       `/v1/settings/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(personId)}`,

@@ -678,3 +678,81 @@ async def remove_auth_user(user_id: UUID, db: DbSession, user: CurrentUser):
     ), {"a": user.email, "s": f"deleted {current['email']}"})
     await db.commit()
     return Response(status_code=204)
+
+
+# ── /v1/settings/export/macro ───────────────────────────────────────────────
+# Phase 3 of the 2026-05-23 Settings BUILD remediation plan.
+#
+# Streams a zip generated on-the-fly from `docs/macros/` in the repo. If the
+# directory is empty or absent, returns a clean 404 with code=MACRO_NOT_FOUND
+# so the frontend can surface "not available in this deploy" instead of
+# silently failing. When the macro source files are committed under
+# docs/macros/, the next deploy serves the bundle with zero code change.
+
+@router.get("/export/macro")
+async def download_macro(db: DbSession, user: CurrentUser):
+    """Serve the Word + CMS export macro bundle as a zip. Files live in
+    `docs/macros/` in the repo so the bundle ships with each deploy and the
+    history is in git. No admin gate — every authenticated user can download
+    the macros (they're publishable docs, not secrets). Logs to audit_events."""
+    import io
+    import os
+    import zipfile
+
+    from fastapi.responses import StreamingResponse
+
+    # __file__ = /<repo>/app/api/settings.py → repo root is three levels up.
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    macro_dir = os.path.join(repo_root, "docs", "macros")
+
+    if not os.path.isdir(macro_dir):
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code":    "MACRO_NOT_FOUND",
+                "message": "Macro bundle not deployed. Commit files under docs/macros/ to enable downloads.",
+            },
+        )
+
+    # Walk the directory; reject empty (so an accidental empty dir doesn't
+    # serve a 22-byte empty zip that looks healthy to the browser).
+    file_paths: list[tuple[str, str]] = []
+    for root, _, files in os.walk(macro_dir):
+        for f in files:
+            full = os.path.join(root, f)
+            arc  = os.path.relpath(full, macro_dir)
+            file_paths.append((full, arc))
+    if not file_paths:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code":    "MACRO_NOT_FOUND",
+                "message": "Macro directory is present but empty.",
+            },
+        )
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for full, arc in file_paths:
+            zf.write(full, arc)
+    buf.seek(0)
+
+    # Audit trail — log who downloaded when, plus how many files were in
+    # the bundle so we can see the macro source set evolve over time.
+    try:
+        await db.execute(
+            text(
+                "INSERT INTO audit_events (actor_email, kind, summary) "
+                "VALUES (:a, 'settings.export.macro_download', :s)"
+            ),
+            {"a": getattr(user, "email", None), "s": f"files={len(file_paths)} bytes={buf.getbuffer().nbytes}"},
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        pass
+
+    return StreamingResponse(
+        buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="rounds-macros.zip"'},
+    )

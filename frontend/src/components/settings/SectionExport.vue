@@ -8,9 +8,11 @@ import FormRow from './FormRow.vue';
 import TogglePill from './TogglePill.vue';
 import { settingsApi } from '@/services/api';
 import { toast } from '@/composables/useToast';
+import { ApiError } from '@/services/http';
 
 const keyPoints = ref(false);
 const loading = ref(true);
+const downloading = ref(false);
 
 onMounted(async () => {
   try {
@@ -35,15 +37,31 @@ async function onToggleKeyPoints(v: boolean): Promise<void> {
   }
 }
 
-function downloadMacro(): void {
-  // Phase 2 audit remediation: was previously claiming "Macro downloaded"
-  // success while delivering a placeholder zip with `' VBA macro placeholder`
-  // inside. Demoted to warn — real macro distribution ships with Phase 10
-  // coverage closure (or via static asset hosted alongside the docs).
-  toast.push(
-    'Macro zip not yet bundled — Word macro distribution ships with Phase 10.',
-    { tone: 'warn' },
-  );
+async function downloadMacro(): Promise<void> {
+  // Phase 3 of the 2026-05-23 Settings BUILD remediation plan. Calls the
+  // real /v1/settings/export/macro endpoint via fetch+blob so the browser
+  // download dialog opens. 404 MACRO_NOT_FOUND surfaces a clean message
+  // when the bundle isn't deployed under docs/macros/.
+  if (downloading.value) return;
+  downloading.value = true;
+  try {
+    await settingsApi.downloadMacro();
+    toast.push('Macro bundle downloaded', { tone: 'success' });
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) {
+      const body = e.body as { detail?: { code?: string; message?: string } | string } | undefined;
+      const detail = body?.detail;
+      const msg = (detail && typeof detail === 'object' && detail.message)
+        ? detail.message
+        : 'Macro bundle not deployed yet.';
+      toast.push(msg, { tone: 'warn' });
+    } else {
+      const status = e instanceof ApiError ? `${e.status} — ` : '';
+      toast.push(`${status}Failed to download macro bundle`, { tone: 'error' });
+    }
+  } finally {
+    downloading.value = false;
+  }
 }
 </script>
 
@@ -66,7 +84,12 @@ function downloadMacro(): void {
             VBA macros <code>SRT_Transcript</code> and <code>CMS_Transcript</code> that clean the downloaded <code>.docx</code> for Wistia SRT and CMS publishing. Unzip once, then open in Word → Developer → Visual Basic → Import.
           </div>
         </div>
-        <button class="btn btn--tertiary" @click="downloadMacro">↓ Download (.zip)</button>
+        <button
+          class="btn btn--tertiary"
+          :disabled="downloading"
+          data-test-id="export-macro-download"
+          @click="downloadMacro"
+        >{{ downloading ? 'Downloading…' : '↓ Download (.zip)' }}</button>
       </div>
     </div>
   </div>
