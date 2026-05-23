@@ -12,8 +12,13 @@
  */
 import { onMounted, ref, watch } from 'vue';
 import SettingsHeader from './SettingsHeader.vue';
-import { TEAM_PEOPLE, SESSION_TYPES, SOP_STAGE_KEYS } from '@/fixtures/settings';
-import { settingsApi, type StageAssigneeRow } from '@/services/api';
+import { SESSION_TYPES, SOP_STAGE_KEYS } from '@/fixtures/settings';
+import {
+  settingsApi,
+  type StageAssigneeRow,
+  type SettingsPerson,
+  type SettingsGroup,
+} from '@/services/api';
 import { toast } from '@/composables/useToast';
 import { confirm } from '@/composables/useConfirm';
 import { ApiError } from '@/services/http';
@@ -31,11 +36,12 @@ const newType = ref('');
 const saving = ref(false);
 const loadingMatrix = ref(false);
 
-const allAssignees: string[] = [
-  '(unassigned)',
-  ...TEAM_PEOPLE.map((p) => p.name),
-  'Group: Content Team', 'Group: External', 'Group: V@V', 'Group: Main Contact',
-];
+// Phase 1 of the 2026-05-23 Settings BUILD plan: hydrate the dropdown choices
+// from real /v1/settings/people + /v1/settings/groups (the same calls
+// SectionTeam already makes) so adding a person in Team is reflected here
+// without a page reload. Fixture-backed TEAM_PEOPLE was stale on every reload.
+const allAssignees = ref<string[]>(['(unassigned)']);
+const livePeople = ref<SettingsPerson[]>([]);
 
 // Per-stage assignee email + notify flag for the CURRENT active Type.
 const matrix = ref<Record<string, string>>({});      // stage_id → display name
@@ -46,16 +52,19 @@ const emails = ref<Record<string, boolean>>({});
 const typeRowsCache = new Map<string, StageAssigneeRow[]>();
 
 // Reverse lookup: display name → email (for serializing back to server).
+// Looks up against livePeople (hydrated from /v1/settings/people on mount)
+// instead of the deleted TEAM_PEOPLE fixture, so newly-added people resolve
+// correctly without a reload.
 function _emailForName(name: string): string {
   if (!name || name === '(unassigned)') return '';
   if (name.startsWith('Group: ')) return name;        // groups stored as "Group: X"
-  const person = TEAM_PEOPLE.find((p) => p.name === name);
+  const person = livePeople.value.find((p) => p.name === name);
   return person ? person.email : name;
 }
 function _nameForEmail(email: string): string {
   if (!email) return '(unassigned)';
   if (email.startsWith('Group: ')) return email;
-  const person = TEAM_PEOPLE.find((p) => p.email === email);
+  const person = livePeople.value.find((p) => p.email === email);
   return person ? person.name : email;
 }
 
@@ -90,18 +99,28 @@ async function _loadMatrixFor(typeRow: TypeRow): Promise<void> {
 }
 
 onMounted(async () => {
-  try {
-    const rows = await settingsApi.types();
-    if (rows && rows.length) {
-      types.value = rows.map((r) => ({ id: r.id, code: r.code, label: r.label, is_default: r.is_default }));
-      // Preserve current active selection by code if possible; default to first.
-      const found = types.value.find((t) => t.code === active.value.code) ?? types.value[0]!;
-      active.value = found;
-      await _loadMatrixFor(active.value);
-    } else {
-      _resetMatrix();
-    }
-  } catch {
+  // Load people + groups in parallel with types so the assignee dropdown is
+  // ready by the time the matrix tries to render. Each call falls back to []
+  // so a broken /people endpoint doesn't break the entire page.
+  const [rows, people, groups] = await Promise.all([
+    settingsApi.types().catch(() => [] as Awaited<ReturnType<typeof settingsApi.types>>),
+    settingsApi.people().catch(() => [] as SettingsPerson[]),
+    settingsApi.groups().catch(() => [] as SettingsGroup[]),
+  ]);
+  livePeople.value = people;
+  allAssignees.value = [
+    '(unassigned)',
+    ...people.map((p) => p.name),
+    ...groups.map((g) => `Group: ${g.name}`),
+  ];
+
+  if (rows && rows.length) {
+    types.value = rows.map((r) => ({ id: r.id, code: r.code, label: r.label, is_default: r.is_default }));
+    // Preserve current active selection by code if possible; default to first.
+    const found = types.value.find((t) => t.code === active.value.code) ?? types.value[0]!;
+    active.value = found;
+    await _loadMatrixFor(active.value);
+  } else {
     _resetMatrix();
   }
 });
