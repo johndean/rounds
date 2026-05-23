@@ -719,12 +719,24 @@ export interface ClearSlotsResult {
   remaining: number;
 }
 
+export interface GcsCheckRow {
+  id:   string;          // "G1".."G14"
+  name: string;
+  ok:   boolean | null;  // null = deferred stub (not implemented yet)
+  ms:   number;
+  note: string | null;
+}
+
 export const diag = {
   gcs: () => http('/v1/diag/gcs'),
   classifyRoute: () => http('/v1/diag/classify-route'),
   health: () => http<{ status: string; version: string; env: string }>('/v1/health'),
   clearRateLimitSlots: () =>
     http<ClearSlotsResult>('/v1/diag/clear-rate-limit-slots', { method: 'POST' }),
+  // Phase 2 of the 2026-05-23 Settings BUILD plan. Returns 14 rows: G1-G6 are
+  // real probes, G7-G14 are deferred stubs (ok=null) so the UI is honest about
+  // what's covered.
+  gcsChecks: () => http<GcsCheckRow[]>('/v1/diag/gcs-checks'),
   // Admin-only escape hatch for the auth-users boot seed. Idempotent — if
   // the table already has rows the call returns {seeded:0}. Surfaced from
   // Settings → Auth & Logins empty-state recovery panel.

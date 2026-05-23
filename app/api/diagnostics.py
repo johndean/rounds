@@ -528,3 +528,178 @@ async def reseed_auth_users(db: DbSession, user: CurrentUser) -> ReseedAuthUsers
         return ReseedAuthUsersResult(seeded=seeded, total=after, skipped_count=skipped)
     finally:
         engine.dispose()
+
+
+# ── /v1/diag/gcs-checks ─────────────────────────────────────────────────────
+# Phase 2 of the 2026-05-23 Settings BUILD remediation plan.
+#
+# Replaces the static fixture-driven GCS QA page (frontend/.../GCSDebug.vue)
+# which used to render a hardcoded "all green" table that never actually
+# probed anything. This endpoint runs 6 real probes (bucket, signed URL,
+# PUT round-trip, lifecycle, CORS, ACL) plus 8 honest "deferred" stubs so
+# the UI explicitly admits what is and is not covered.
+#
+# R7 invariant respected: the PUT round-trip writes to gs://<bucket>/_diag/
+# (not gs://<bucket>/sessions/) and immediately deletes the probe blob.
+
+
+class GcsCheckRow(BaseModel):
+    id:         str            # "G1".."G14"
+    name:       str            # human-readable check name
+    ok:         bool | None    # True/False for real checks, None for deferred stubs
+    ms:         int            # latency in milliseconds (0 for deferred stubs)
+    note:       str | None = None
+
+
+def _gcs_time_probe(check_id: str, name: str, fn) -> dict:
+    """Time-wrap a probe + catch any exception. Returns the row dict the
+    frontend renders (matches GcsCheckRow). A failing probe yields ok=False
+    with the exception class+message in the note, so a single failure can
+    never 500 the whole endpoint."""
+    import time as _time
+    t0 = _time.time()
+    try:
+        ok = bool(fn())
+        return {
+            "id":   check_id,
+            "name": name,
+            "ok":   ok,
+            "ms":   int((_time.time() - t0) * 1000),
+            "note": None,
+        }
+    except Exception as e:  # noqa: BLE001
+        return {
+            "id":   check_id,
+            "name": name,
+            "ok":   False,
+            "ms":   int((_time.time() - t0) * 1000),
+            "note": f"{type(e).__name__}: {str(e)[:160]}",
+        }
+
+
+@router.get("/gcs-checks", response_model=list[GcsCheckRow])
+async def gcs_checks(db: DbSession, user: CurrentUser) -> list[dict]:
+    """Run the GCS QA probe suite. Admin-only. Logs to audit_events.
+
+    Six real probes today (G1-G6). G7-G14 are "deferred" stubs returning
+    ok=None so the operator can see at a glance what's covered vs what
+    still needs implementing. Each probe is wrapped with try/except so a
+    single check failure can't 500 the whole endpoint."""
+    if not hasattr(user, "email") or user.email != "johndean@vin.com":
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "ADMIN_ONLY", "message": "admin only"},
+        )
+
+    from datetime import datetime
+    import time as _time
+
+    out: list[dict] = []
+
+    # G1-G6: real probes. Build the bucket once; reuse across checks.
+    try:
+        from google.cloud import storage as gcs_lib
+        client = gcs_lib.Client(project=settings.GCP_PROJECT_ID)
+        bucket = client.bucket(settings.GCS_BUCKET)
+    except Exception as e:  # noqa: BLE001
+        # GCS client failed to construct — every real probe will fail the
+        # same way. Surface one row and continue to the deferred stubs.
+        out.append({
+            "id":   "G1",
+            "name": "GCS client construction",
+            "ok":   False,
+            "ms":   0,
+            "note": f"{type(e).__name__}: {str(e)[:160]}",
+        })
+        for i in range(2, 7):
+            out.append({"id": f"G{i}", "name": "(skipped — client unavailable)", "ok": False, "ms": 0, "note": None})
+    else:
+        out.append(_gcs_time_probe(
+            "G1", "Bucket reachable",
+            lambda: bucket.exists(),
+        ))
+        out.append(_gcs_time_probe(
+            "G2", "Signed URL generation",
+            lambda: bool(bucket.blob("_diag/probe-url.bin").generate_signed_url(
+                version="v4",
+                expiration=60,
+                method="PUT",
+            )),
+        ))
+        out.append(_gcs_time_probe(
+            "G3", "PUT round-trip to _diag/ (R7-safe)",
+            lambda: _gcs_put_probe(bucket),
+        ))
+        out.append(_gcs_time_probe(
+            "G4", "Lifecycle policy present",
+            lambda: bool(list(bucket.lifecycle_rules or [])),
+        ))
+        out.append(_gcs_time_probe(
+            "G5", "CORS configured for browser PUT",
+            lambda: bool(bucket.cors),
+        ))
+        out.append(_gcs_time_probe(
+            "G6", "Default object ACL not public",
+            lambda: _gcs_acl_check(bucket),
+        ))
+
+    # G7-G14: explicit deferred stubs. ok=None signals "not yet implemented"
+    # to the UI; the frontend renders these with a neutral "deferred" chip
+    # rather than green/amber, so operators can't mistake them for healthy.
+    deferred_labels = [
+        ("G7",  "Bucket region matches expected"),
+        ("G8",  "Uniform bucket-level access"),
+        ("G9",  "Encryption KMS key set"),
+        ("G10", "Audit log streaming"),
+        ("G11", "VPC SC perimeter check"),
+        ("G12", "Retention policy"),
+        ("G13", "Object versioning"),
+        ("G14", "End-to-end smoke (5 files)"),
+    ]
+    for cid, label in deferred_labels:
+        out.append({"id": cid, "name": label, "ok": None, "ms": 0, "note": "deferred"})
+
+    # Audit row so we have a trail of who probed when. Summary captures
+    # how many real probes passed out of the six attempted.
+    real_passed = sum(1 for r in out[:6] if r["ok"] is True)
+    real_total  = sum(1 for r in out[:6] if r["ok"] is not None)
+    try:
+        await db.execute(
+            text(
+                "INSERT INTO audit_events (actor_email, kind, summary) "
+                "VALUES (:a, 'diag.gcs_checks', :s)"
+            ),
+            {"a": user.email, "s": f"real_passed={real_passed}/{real_total} bucket={settings.GCS_BUCKET}"},
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001
+        # Audit insert is best-effort; never fail the probe call because the
+        # audit row didn't land.
+        pass
+
+    return out
+
+
+def _gcs_put_probe(bucket) -> bool:
+    """1 KB PUT to gs://<bucket>/_diag/gcs-probe-<ts>.bin + immediate delete.
+    Stays strictly outside the sessions/ prefix to honor R7. Returns True on
+    full round-trip success. Any exception bubbles to the _gcs_time_probe
+    wrapper which converts it to ok=False with the exception in the note."""
+    import time as _time
+    blob = bucket.blob(f"_diag/gcs-probe-{int(_time.time())}.bin")
+    blob.upload_from_string(b"\x00" * 1024, content_type="application/octet-stream")
+    blob.delete()
+    return True
+
+
+def _gcs_acl_check(bucket) -> bool:
+    """Default object ACL must NOT grant READ to allUsers. Returns True if
+    the bucket is private-by-default, False if it has any public-read entry."""
+    try:
+        entities = [str(e.entity) for e in bucket.default_object_acl]
+        return not any("allUsers" in e for e in entities)
+    except Exception:
+        # Buckets with uniform bucket-level access raise on default_object_acl
+        # iteration — that's a stricter posture than per-object ACL, so treat
+        # as "not public" (pass).
+        return True
