@@ -296,8 +296,24 @@ function rows(): number {
 // segment's <span class="dw" data-ws data-we> nodes looking for one whose
 // [ws,we] window contains the current playback time, then toggles
 // .dw-active. The early-out check (prev-still-in-window) makes the common
-// case O(1); only crossing a word boundary triggers a full querySelectorAll.
+// case O(1); only crossing a word boundary triggers a span scan.
+//
+// Word-span cache (Phase 4 of the 2026-05-23 perf plan). Boundary crossings
+// were doing a fresh document.querySelector + root.querySelectorAll every
+// time. Cache the spans per segment-id; verify the cached entry is still
+// connected on lookup (drops it on segment re-render or unmount).
 let prevActiveWordEl: HTMLElement | null = null;
+const spanCache = new Map<string, HTMLElement[]>();
+
+function _getSpansForSegment(segId: string): HTMLElement[] | null {
+  const cached = spanCache.get(segId);
+  if (cached && cached.length > 0 && cached[0]!.isConnected) return cached;
+  const root = document.querySelector(`[data-segid="${segId}"]`);
+  if (!root) { spanCache.delete(segId); return null; }
+  const spans = Array.from(root.querySelectorAll<HTMLElement>('.dw[data-ws]'));
+  spanCache.set(segId, spans);
+  return spans;
+}
 
 watch(() => props.time, (t) => {
   if (t == null || !props.activeSegmentId) return;
@@ -308,9 +324,8 @@ watch(() => props.time, (t) => {
     prevActiveWordEl.classList.remove('dw-active');
     prevActiveWordEl = null;
   }
-  const root = document.querySelector(`[data-segid="${props.activeSegmentId}"]`);
-  if (!root) return;
-  const spans = root.querySelectorAll<HTMLElement>('.dw[data-ws]');
+  const spans = _getSpansForSegment(props.activeSegmentId);
+  if (!spans) return;
   for (const el of spans) {
     const ws = parseFloat(el.dataset.ws ?? '');
     const we = parseFloat(el.dataset.we ?? '');
@@ -321,6 +336,12 @@ watch(() => props.time, (t) => {
     }
   }
 }, { flush: 'post' });
+
+// Drop the cache entry when the active segment changes so a previously-
+// cached but now-edited segment doesn't return stale spans on next visit.
+watch(() => props.activeSegmentId, (id, prev) => {
+  if (prev && prev !== id) spanCache.delete(prev);
+});
 </script>
 
 <template>
