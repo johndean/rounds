@@ -469,14 +469,10 @@ async def set_type_assignees(
     return [dict(r) for r in rows]
 
 
-# ─── Email templates ────────────────────────────────────────────────────
-@router.get("/email-templates")
-async def list_email_templates(db: DbSession, _u: CurrentUser) -> list[dict]:
-    rows = (await db.execute(text(
-        "SELECT id, type_id, stage, subject, enabled, updated_at "
-        "FROM email_templates ORDER BY stage"
-    ))).mappings().all()
-    return [dict(r) for r in rows]
+# Email templates moved to /v1/email-templates (its own router) in Phase 5
+# of the 2026-05-23 Settings BUILD plan. The placeholder GET that used to
+# live here referenced an outdated column schema (type_id / stage / enabled)
+# that doesn't match migration 048's table; it had zero frontend callers.
 
 
 # ─── Auth users (Settings → Auth & Logins) ──────────────────────────────

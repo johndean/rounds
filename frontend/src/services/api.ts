@@ -669,7 +669,9 @@ export const settingsApi = {
       `/v1/settings/types/${encodeURIComponent(id)}/assignees`,
       { body: { rows }, method: 'PUT' },
     ),
-  emailTemplates: () => http<unknown[]>('/v1/settings/email-templates'),
+  // (The old settingsApi.emailTemplates() wrapper was removed in Phase 6 of
+  // the 2026-05-23 Settings BUILD plan. The canonical endpoint moved to
+  // /v1/email-templates - see emailTemplatesApi above.)
 
   // ─── Prompt templates (Settings → Prompt templates) ─────────────────
   // Phase 4 of the 2026-05-23 Settings BUILD plan. Backed by migration 047.
