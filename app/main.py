@@ -21,6 +21,7 @@ from app.api import auth as auth_router
 from app.api import corrections as corrections_router
 from app.api import diagnostics as diag_router
 from app.api import email_debug as email_debug_router
+from app.api import email_templates as email_templates_router
 from app.api import discrepancies as disc_router
 from app.api import exports as exports_router
 from app.api import gcs_upload as gcs_router
@@ -196,6 +197,7 @@ app.include_router(improvements_router.router)
 app.include_router(settings_router.router)
 app.include_router(diag_router.router)
 app.include_router(email_debug_router.router)
+app.include_router(email_templates_router.router)
 app.include_router(exports_router.router)
 
 

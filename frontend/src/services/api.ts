@@ -704,6 +704,60 @@ export const settingsApi = {
     http(`/v1/settings/auth-users/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 };
 
+// ─── Email templates (Settings → Email → Builder) ──────────────────────
+// Phase 5 of the 2026-05-23 Settings BUILD plan. Backed by migration 048.
+// Templates are scoped (session_type_id, stage_id, locale). NULL type_id
+// means "default for all Types"; a per-Type row overrides the default for
+// that specific Type.
+export interface EmailTemplate {
+  id:              string;
+  session_type_id: string | null;   // null = default-for-all-types
+  stage_id:        string;
+  locale:          string;
+  subject:         string;
+  body:            string;
+  created_by:      string | null;
+  created_at:      string | null;
+  updated_at:      string | null;
+  // Only present on the resolve endpoint response.
+  resolved_from?:  'per_type' | 'default';
+}
+export interface EmailTemplateCreate {
+  session_type_id?: string | null;
+  stage_id:         string;
+  locale?:          string;
+  subject:          string;
+  body:             string;
+}
+export interface EmailTemplatePatch {
+  subject?: string;
+  body?:    string;
+  locale?:  string;
+}
+export const emailTemplatesApi = {
+  list: (params: { session_type_id?: string; stage_id?: string; include_defaults?: boolean } = {}) => {
+    const q = new URLSearchParams();
+    if (params.session_type_id) q.set('session_type_id', params.session_type_id);
+    if (params.stage_id)        q.set('stage_id', params.stage_id);
+    if (params.include_defaults !== undefined) q.set('include_defaults', String(params.include_defaults));
+    const qs = q.toString();
+    return http<EmailTemplate[]>(`/v1/email-templates${qs ? `?${qs}` : ''}`);
+  },
+  get: (id: string) =>
+    http<EmailTemplate>(`/v1/email-templates/${encodeURIComponent(id)}`),
+  add: (payload: EmailTemplateCreate) =>
+    http<EmailTemplate>('/v1/email-templates', { body: payload, method: 'POST' }),
+  update: (id: string, patch: EmailTemplatePatch) =>
+    http<EmailTemplate>(`/v1/email-templates/${encodeURIComponent(id)}`, { body: patch, method: 'PUT' }),
+  remove: (id: string) =>
+    http(`/v1/email-templates/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  resolve: (payload: { session_type_id?: string | null; stage_id: string; locale?: string }) =>
+    http<EmailTemplate>('/v1/email-templates/resolve', { body: payload, method: 'POST' }),
+};
+
+// (EmailBuilder's "Send test" button calls the existing emailDebug.send()
+// further down in this file — no separate sendTest wrapper needed.)
+
 // ─── Audit ───────────────────────────────────────────────────────────────
 export const audit = {
   list: (params: { session_id?: string; actor?: string; kind?: string; limit?: number } = {}) =>
