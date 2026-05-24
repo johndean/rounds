@@ -762,40 +762,81 @@ async def download_macro(db: DbSession, user: CurrentUser):
 # templates so the page is non-empty on day-one without any user action.
 
 
+# Valid ai_mode strings a template can be marked default for. Mirrors the
+# CHECK constraint in migration 049. 'custom-prompt' is intentionally NOT
+# bindable here — it comes from the upload form's free-text field, not the
+# catalog.
+_DEFAULT_FOR_MODE_VALUES = {"transcript", "summary", "key-moments", "structured-notes"}
+
+
 class TemplateCreate(BaseModel):
     """Body for POST /v1/settings/templates."""
-    kind:        str                                    # 'processing' | 'ai_prompt'
-    name:        str = Field(..., min_length=1, max_length=120)
-    icon:        str | None = '📝'
-    description: str | None = None
-    category:    str | None = 'Custom'
-    config:      dict[str, Any] = Field(default_factory=dict)
+    kind:             str                                    # 'processing' | 'ai_prompt'
+    name:             str = Field(..., min_length=1, max_length=120)
+    icon:             str | None = '📝'
+    description:      str | None = None
+    category:         str | None = 'Custom'
+    config:           dict[str, Any] = Field(default_factory=dict)
+    default_for_mode: str | None = None                      # ai_prompt rows only; one default per mode
 
 
 class TemplatePatch(BaseModel):
-    """Body for PUT /v1/settings/templates/{id}. None = leave unchanged."""
-    name:        str | None = None
-    icon:        str | None = None
-    description: str | None = None
-    category:    str | None = None
-    config:      dict[str, Any] | None = None
+    """Body for PUT /v1/settings/templates/{id}.
+
+    Field-absent vs explicit-null: standard fields use 'None means leave
+    unchanged' semantics. default_for_mode is special — clients need a way
+    to *clear* it (unbind) as well as set it, so the handler checks
+    model_fields_set: present-and-null → SET NULL, absent → leave alone.
+    """
+    name:             str | None = None
+    icon:             str | None = None
+    description:      str | None = None
+    category:         str | None = None
+    config:           dict[str, Any] | None = None
+    default_for_mode: str | None = None
 
 
 def _row_to_template(r) -> dict:
     return {
-        "id":          str(r["id"]),
-        "kind":        r["kind"],
-        "name":        r["name"],
-        "icon":        r["icon"],
-        "description": r["description"],
-        "category":    r["category"],
-        "config":      r["config"] or {},
-        "is_system":   bool(r["is_system"]),
-        "version":     int(r["version"] or 1),
-        "created_by":  r["created_by"],
-        "created_at":  r["created_at"].isoformat() if r["created_at"] else None,
-        "updated_at":  r["updated_at"].isoformat() if r["updated_at"] else None,
+        "id":               str(r["id"]),
+        "kind":             r["kind"],
+        "name":             r["name"],
+        "icon":             r["icon"],
+        "description":      r["description"],
+        "category":         r["category"],
+        "config":           r["config"] or {},
+        "is_system":        bool(r["is_system"]),
+        "default_for_mode": r["default_for_mode"],
+        "version":          int(r["version"] or 1),
+        "created_by":       r["created_by"],
+        "created_at":       r["created_at"].isoformat() if r["created_at"] else None,
+        "updated_at":       r["updated_at"].isoformat() if r["updated_at"] else None,
     }
+
+
+def _validate_default_for_mode(value: str | None) -> None:
+    """Raise 400 if value is set but not a known ai_mode."""
+    if value is not None and value not in _DEFAULT_FOR_MODE_VALUES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code":    "INVALID_DEFAULT_FOR_MODE",
+                "message": f"default_for_mode must be one of "
+                           f"{sorted(_DEFAULT_FOR_MODE_VALUES)} or null.",
+            },
+        )
+
+
+async def _resolve_default_mode_conflict(db, mode: str) -> dict:
+    """When the partial unique index fires, look up the row currently
+    holding that slot so the 409 body can name it for the operator."""
+    row = (await db.execute(text(
+        "SELECT id, name FROM prompt_templates "
+        " WHERE default_for_mode = :m AND is_active = TRUE LIMIT 1"
+    ), {"m": mode})).mappings().first()
+    if row:
+        return {"other_template_id": str(row["id"]), "other_template_name": row["name"]}
+    return {}
 
 
 @router.get("/templates")
@@ -811,7 +852,7 @@ async def list_templates(
         params["k"] = kind
     rows = (await db.execute(text(
         "SELECT id, kind, name, icon, description, category, config, is_system, "
-        "       version, created_by, created_at, updated_at "
+        "       default_for_mode, version, created_by, created_at, updated_at "
         "FROM prompt_templates "
         f"WHERE {' AND '.join(where)} "
         "ORDER BY is_system DESC, category, name"
@@ -823,7 +864,7 @@ async def list_templates(
 async def get_template(template_id: UUID, db: DbSession, _u: CurrentUser) -> dict:
     row = (await db.execute(text(
         "SELECT id, kind, name, icon, description, category, config, is_system, "
-        "       version, created_by, created_at, updated_at "
+        "       default_for_mode, version, created_by, created_at, updated_at "
         "FROM prompt_templates WHERE id = :id AND is_active = TRUE"
     ), {"id": str(template_id)})).mappings().first()
     if not row:
@@ -842,12 +883,19 @@ async def create_template(
             status_code=400,
             detail={"code": "INVALID_KIND", "message": "kind must be 'processing' or 'ai_prompt'"},
         )
+    _validate_default_for_mode(payload.default_for_mode)
+    if payload.default_for_mode is not None and payload.kind != "ai_prompt":
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "DEFAULT_REQUIRES_AI_PROMPT",
+                    "message": "Only ai_prompt templates can be marked default_for_mode."},
+        )
     import json
     try:
         row = (await db.execute(text(
-            "INSERT INTO prompt_templates (kind, name, icon, description, category, config, is_system, created_by) "
-            "VALUES (:k, :n, :ic, :d, :c, CAST(:cfg AS jsonb), FALSE, :u) "
-            "RETURNING id, kind, name, icon, description, category, config, is_system, version, created_by, created_at, updated_at"
+            "INSERT INTO prompt_templates (kind, name, icon, description, category, config, is_system, default_for_mode, created_by) "
+            "VALUES (:k, :n, :ic, :d, :c, CAST(:cfg AS jsonb), FALSE, :dfm, :u) "
+            "RETURNING id, kind, name, icon, description, category, config, is_system, default_for_mode, version, created_by, created_at, updated_at"
         ), {
             "k": payload.kind,
             "n": payload.name.strip(),
@@ -855,10 +903,25 @@ async def create_template(
             "d": payload.description,
             "c": payload.category or "Custom",
             "cfg": json.dumps(payload.config or {}),
+            "dfm": payload.default_for_mode,
             "u": user.email,
         })).mappings().one()
     except Exception as exc:  # noqa: BLE001
         msg = str(exc).lower()
+        # Default-for-mode unique-index collision must be diagnosed BEFORE the
+        # generic duplicate-name branch (both are unique_violation, but only the
+        # default_for_mode index name matches here).
+        if "prompt_templates_default_for_mode_uq" in msg:
+            conflict = await _resolve_default_mode_conflict(db, payload.default_for_mode or "")
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code":    "DEFAULT_MODE_TAKEN",
+                    "message": f"Mode '{payload.default_for_mode}' is already the default for another template. "
+                               f"Unassign it from '{conflict.get('other_template_name', '?')}' first.",
+                    **conflict,
+                },
+            )
         if "duplicate key" in msg or "unique constraint" in msg or "unique_violation" in msg:
             raise HTTPException(
                 status_code=409,
@@ -868,7 +931,8 @@ async def create_template(
     await db.execute(text(
         "INSERT INTO audit_events (actor_email, kind, summary) "
         "VALUES (:a, 'settings.templates.add', :s)"
-    ), {"a": user.email, "s": f"added template {payload.kind}:{payload.name}"})
+    ), {"a": user.email, "s": f"added template {payload.kind}:{payload.name}"
+                              + (f" (default for {payload.default_for_mode})" if payload.default_for_mode else "")})
     await db.commit()
     return _row_to_template(row)
 
@@ -883,6 +947,8 @@ async def update_template(
     import json
 
     # Build a SET clause from non-None fields only.
+    # default_for_mode uses model_fields_set to distinguish absent (leave
+    # alone) from explicit-null (unbind the default).
     sets: list[str] = []
     params: dict[str, Any] = {"id": str(template_id)}
     if payload.name is not None:
@@ -895,6 +961,9 @@ async def update_template(
         sets.append("category = :c"); params["c"] = payload.category
     if payload.config is not None:
         sets.append("config = CAST(:cfg AS jsonb)"); params["cfg"] = json.dumps(payload.config)
+    if "default_for_mode" in payload.model_fields_set:
+        _validate_default_for_mode(payload.default_for_mode)
+        sets.append("default_for_mode = :dfm"); params["dfm"] = payload.default_for_mode
     if not sets:
         raise HTTPException(status_code=400, detail={"code": "NO_CHANGES", "message": "No fields to update."})
     sets.append("version = version + 1")
@@ -904,10 +973,25 @@ async def update_template(
         row = (await db.execute(text(
             f"UPDATE prompt_templates SET {', '.join(sets)} "
             f"WHERE id = :id AND is_active = TRUE "
-            f"RETURNING id, kind, name, icon, description, category, config, is_system, version, created_by, created_at, updated_at"
+            f"RETURNING id, kind, name, icon, description, category, config, is_system, default_for_mode, version, created_by, created_at, updated_at"
         ), params)).mappings().first()
     except Exception as exc:  # noqa: BLE001
         msg = str(exc).lower()
+        # Default-for-mode unique-index collision: diagnose BEFORE the generic
+        # duplicate-name branch (both are unique_violation but the index names
+        # differ — the dfm one we can specifically describe).
+        if "prompt_templates_default_for_mode_uq" in msg:
+            target_mode = payload.default_for_mode or ""
+            conflict = await _resolve_default_mode_conflict(db, target_mode)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code":    "DEFAULT_MODE_TAKEN",
+                    "message": f"Mode '{target_mode}' is already the default for another template. "
+                               f"Unassign it from '{conflict.get('other_template_name', '?')}' first.",
+                    **conflict,
+                },
+            )
         if "duplicate key" in msg or "unique constraint" in msg:
             raise HTTPException(
                 status_code=409,
@@ -916,10 +1000,18 @@ async def update_template(
         raise
     if not row:
         raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "Template not found"})
+    # Audit summary mentions default_for_mode flips explicitly so the audit
+    # trail captures SSOT-affecting changes distinctly from cosmetic edits.
+    summary = f"updated template {row['name']}"
+    if "default_for_mode" in payload.model_fields_set:
+        if payload.default_for_mode:
+            summary += f" (set default for {payload.default_for_mode})"
+        else:
+            summary += " (cleared default_for_mode)"
     await db.execute(text(
         "INSERT INTO audit_events (actor_email, kind, summary) "
         "VALUES (:a, 'settings.templates.update', :s)"
-    ), {"a": user.email, "s": f"updated template {row['name']}"})
+    ), {"a": user.email, "s": summary})
     await db.commit()
     return _row_to_template(row)
 

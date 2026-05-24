@@ -17,10 +17,21 @@ import FormRow from './FormRow.vue';
 import TogglePill from './TogglePill.vue';
 import {
   settingsApi,
+  type AiModeDefault,
   type PromptTemplate,
   type TemplateCreate,
   type TemplatePatch,
 } from '@/services/api';
+
+// Mirrors _DEFAULT_FOR_MODE_VALUES in app/api/settings.py + the CHECK
+// constraint in migration 049. 'custom-prompt' is intentionally not
+// bindable here — it comes from the upload form's free-text field.
+const DEFAULT_FOR_MODE_OPTIONS: ReadonlyArray<AiModeDefault> = [
+  'transcript',
+  'summary',
+  'key-moments',
+  'structured-notes',
+];
 import { ApiError } from '@/services/http';
 import { toast } from '@/composables/useToast';
 import { confirm } from '@/composables/useConfirm';
@@ -102,6 +113,11 @@ const nrewrite = ref('Minimal');
 const nstructure = ref(true);
 const nkeypoints = ref(true);
 const nprompt = ref('');
+// Empty string = "(unbound)" in the dropdown; converted to null on save.
+const ndfm = ref<'' | AiModeDefault>('');
+// Snapshot of the loaded default_for_mode so we can detect a real change
+// when editing and only send the field when the operator actually flipped it.
+const ndfmOriginal = ref<'' | AiModeDefault>('');
 
 function resetForm(): void {
   ntype.value = 'processing';
@@ -116,6 +132,8 @@ function resetForm(): void {
   nstructure.value = true;
   nkeypoints.value = true;
   nprompt.value = '';
+  ndfm.value = '';
+  ndfmOriginal.value = '';
 }
 
 function loadIntoForm(t: PromptTemplate): void {
@@ -132,6 +150,8 @@ function loadIntoForm(t: PromptTemplate): void {
   nstructure.value = c.structure !== false;
   nkeypoints.value = c.keypoints !== false;
   nprompt.value = (c.system_prompt as string) ?? '';
+  ndfm.value = t.default_for_mode ?? '';
+  ndfmOriginal.value = t.default_for_mode ?? '';
 }
 
 function buildConfig(): Record<string, unknown> {
@@ -173,6 +193,9 @@ async function saveNew(): Promise<void> {
       category:    ncat.value,
       config:      buildConfig(),
     };
+    if (ntype.value === 'ai_prompt' && ndfm.value) {
+      payload.default_for_mode = ndfm.value;
+    }
     const created = await settingsApi.templatesAdd(payload);
     templates.value = [created, ...templates.value];
     toast.push(`Created ${created.name}`, { tone: 'success' });
@@ -201,6 +224,11 @@ async function saveEdit(): Promise<void> {
       category:    ncat.value,
       config:      buildConfig(),
     };
+    // Only send default_for_mode if the operator actually changed it; backend
+    // uses field-absent vs explicit-null to decide leave-alone vs clear.
+    if (ntype.value === 'ai_prompt' && ndfm.value !== ndfmOriginal.value) {
+      patch.default_for_mode = ndfm.value === '' ? null : ndfm.value;
+    }
     const updated = await settingsApi.templatesUpdate(editingId.value, patch);
     templates.value = templates.value.map((t) => (t.id === updated.id ? updated : t));
     toast.push(`Saved ${updated.name}`, { tone: 'success' });
@@ -344,6 +372,11 @@ function surfaceError(e: unknown, fallback: string): void {
         <pre v-if="systemPromptFor(t)" class="set-tpl-card__code">{{ systemPromptFor(t) }}</pre>
       </div>
       <span class="set-tpl-card__tag set-tpl-card__tag--iil">Prompt</span>
+      <span
+        v-if="t.default_for_mode"
+        class="set-tpl-card__tag set-tpl-card__tag--default"
+        :title="`This template is the default Gemini prompt for ai_mode='${t.default_for_mode}'`"
+      >Default · {{ t.default_for_mode }}</span>
       <span v-if="t.is_system" class="set-tpl-card__tag">System</span>
       <button class="set-link" @click="editTemplate(t)">Edit</button>
       <button class="set-link" @click="duplicateTemplate(t)">Duplicate</button>
@@ -433,6 +466,18 @@ function surfaceError(e: unknown, fallback: string): void {
         <div :style="{ textAlign: 'right', fontSize: '11px', color: 'var(--fg2)', marginTop: '4px' }">
           {{ nprompt.length }} characters
         </div>
+
+        <div class="set-eyebrow" :style="{ marginTop: '24px', marginBottom: '6px' }">DEFAULT FOR AI MODE</div>
+        <div :style="{ fontSize: '12px', color: 'var(--fg2)', marginBottom: '8px' }">
+          When set, this template's prompt is the one Gemini receives on every upload using that ai_mode.
+          Only one template can be default for a given mode at a time.
+        </div>
+        <FormRow label="Default for">
+          <select v-model="ndfm" class="set-input" data-test-id="template-default-for-mode">
+            <option value="">(unbound — not a default)</option>
+            <option v-for="m in DEFAULT_FOR_MODE_OPTIONS" :key="m" :value="m">{{ m }}</option>
+          </select>
+        </FormRow>
       </template>
     </div>
   </template>

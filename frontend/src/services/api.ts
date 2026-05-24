@@ -540,34 +540,43 @@ export interface StageAssigneeRow {
 // kind='processing' templates encode STT preset configs in config.
 // kind='ai_prompt' templates carry the Gemini system prompt in
 // config.system_prompt.
+// ai_mode strings a template can be marked default for. Mirrors the CHECK
+// constraint in migration 049 and _DEFAULT_FOR_MODE_VALUES in settings.py.
+export type AiModeDefault = 'transcript' | 'summary' | 'key-moments' | 'structured-notes';
+
 export interface PromptTemplate {
-  id:          string;
-  kind:        'processing' | 'ai_prompt';
-  name:        string;
-  icon:        string;
-  description: string | null;
-  category:    string;
-  config:      Record<string, unknown>;
-  is_system:   boolean;
-  version:     number;
-  created_by:  string | null;
-  created_at:  string | null;
-  updated_at:  string | null;
+  id:               string;
+  kind:             'processing' | 'ai_prompt';
+  name:             string;
+  icon:             string;
+  description:      string | null;
+  category:         string;
+  config:           Record<string, unknown>;
+  is_system:        boolean;
+  default_for_mode: AiModeDefault | null;
+  version:          number;
+  created_by:       string | null;
+  created_at:       string | null;
+  updated_at:       string | null;
 }
 export interface TemplateCreate {
-  kind:        'processing' | 'ai_prompt';
-  name:        string;
-  icon?:       string;
-  description?: string;
-  category?:   string;
-  config?:     Record<string, unknown>;
+  kind:              'processing' | 'ai_prompt';
+  name:              string;
+  icon?:             string;
+  description?:      string;
+  category?:         string;
+  config?:           Record<string, unknown>;
+  default_for_mode?: AiModeDefault | null;
 }
 export interface TemplatePatch {
-  name?:        string;
-  icon?:        string;
-  description?: string;
-  category?:    string;
-  config?:      Record<string, unknown>;
+  name?:             string;
+  icon?:             string;
+  description?:      string;
+  category?:         string;
+  config?:           Record<string, unknown>;
+  // Explicit-null sets default_for_mode to NULL (unbinds). Field-absent
+  // leaves it unchanged. Backend distinguishes via Pydantic model_fields_set.
+  default_for_mode?: AiModeDefault | null;
 }
 
 export interface SettingsPersonPatch {
