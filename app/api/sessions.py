@@ -332,6 +332,7 @@ async def get_session_stage_assignees(
     `source` distinguishes 'default' (auto-populated at ingest) from
     'manual' (operator override via future PATCH endpoint).
     """
+    from sqlalchemy import text
     rows = (await db.execute(text(
         """
         SELECT ssa.stage, ssa.notify_email, ssa.source, ssa.assigned_at,
