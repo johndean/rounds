@@ -9,12 +9,21 @@
 -- session_type_id row is the "default for all types" fallback. The
 -- resolver returns the per-type row if present, otherwise the default.
 --
+-- IMPORTANT: migration 006 (line 64-76) creates a legacy `email_templates`
+-- table with a different schema (type_id, stage, subject, body_html,
+-- body_text, variables_used, enabled, updated_by, updated_at — no
+-- session_type_id, no stage_id, no locale, no body, no is_active).
+-- On prod, that legacy table exists but is empty (the frontend's
+-- EmailBuilder.vue always warn-toasted; no real save path ever wrote
+-- to this table). Without the DROP below, CREATE TABLE IF NOT EXISTS
+-- no-ops and downstream column references would fail just like
+-- migration 047 did with prompt_templates.
+DROP TABLE IF EXISTS email_templates CASCADE;
+
 -- This migration ONLY ships the table + 8 default rows (one per SOP
 -- stage). Stage-transition triggers that actually fire emails on
 -- sop_state.stage advance are explicitly out of scope - that's a
 -- separate Celery hook in app/tasks/* that requires its own plan.
---
--- Idempotent (every CREATE uses IF NOT EXISTS), additive, reversible.
 
 CREATE TABLE IF NOT EXISTS email_templates (
     id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),

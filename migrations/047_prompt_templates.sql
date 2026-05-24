@@ -9,8 +9,23 @@
 -- rewrite_level, structure, keypoints, chips }. For 'ai_prompt' kind,
 -- config holds { system_prompt }.
 --
--- Idempotent (every CREATE uses IF NOT EXISTS), additive, reversible via
--- DROP TABLE. The 8 seed rows below match the previously-hardcoded UI.
+-- IMPORTANT: migration 006 (line 82-93) creates a legacy `prompt_templates`
+-- table with a different schema (name, category, icon, description,
+-- system_prompt, iil_config, type, updated_at — no is_active, no kind,
+-- no config JSONB). On prod, that legacy table exists but is empty
+-- (the frontend always rendered fixtures, never queried this table).
+--
+-- Without the DROP TABLE below, CREATE TABLE IF NOT EXISTS no-ops because
+-- the legacy table exists, then the very next CREATE INDEX references
+-- `is_active` which doesn't exist on the legacy schema and the deploy
+-- dies with `column "is_active" does not exist`.
+--
+-- Safe to drop because the legacy table has never held real data — the
+-- frontend's only consumer of prompt templates was the fixture-driven
+-- catalog (SectionPromptTemplates.vue:9 imported PROMPT_TEMPLATES from
+-- @/fixtures/settings). The legacy 006 table was a placeholder for a
+-- never-shipped backend wiring.
+DROP TABLE IF EXISTS prompt_templates CASCADE;
 
 CREATE TABLE IF NOT EXISTS prompt_templates (
     id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
