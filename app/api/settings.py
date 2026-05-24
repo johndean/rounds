@@ -756,3 +756,201 @@ async def download_macro(db: DbSession, user: CurrentUser):
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="rounds-macros.zip"'},
     )
+
+
+# ── /v1/settings/templates — Prompt template CRUD ───────────────────────────
+# Phase 4 of the 2026-05-23 Settings BUILD remediation plan. Backs the
+# Settings → Prompt templates surface (SectionPromptTemplates.vue) that
+# previously rendered the @/fixtures/settings PROMPT_TEMPLATES array with
+# warn-toast no-op buttons. Migration 047 creates the table + seeds 8 system
+# templates so the page is non-empty on day-one without any user action.
+
+
+class TemplateCreate(BaseModel):
+    """Body for POST /v1/settings/templates."""
+    kind:        str                                    # 'processing' | 'ai_prompt'
+    name:        str = Field(..., min_length=1, max_length=120)
+    icon:        str | None = '📝'
+    description: str | None = None
+    category:    str | None = 'Custom'
+    config:      dict[str, Any] = Field(default_factory=dict)
+
+
+class TemplatePatch(BaseModel):
+    """Body for PUT /v1/settings/templates/{id}. None = leave unchanged."""
+    name:        str | None = None
+    icon:        str | None = None
+    description: str | None = None
+    category:    str | None = None
+    config:      dict[str, Any] | None = None
+
+
+def _row_to_template(r) -> dict:
+    return {
+        "id":          str(r["id"]),
+        "kind":        r["kind"],
+        "name":        r["name"],
+        "icon":        r["icon"],
+        "description": r["description"],
+        "category":    r["category"],
+        "config":      r["config"] or {},
+        "is_system":   bool(r["is_system"]),
+        "version":     int(r["version"] or 1),
+        "created_by":  r["created_by"],
+        "created_at":  r["created_at"].isoformat() if r["created_at"] else None,
+        "updated_at":  r["updated_at"].isoformat() if r["updated_at"] else None,
+    }
+
+
+@router.get("/templates")
+async def list_templates(
+    db: DbSession, _u: CurrentUser,
+    kind: str | None = None,
+) -> list[dict]:
+    """List active templates. Optional ?kind=processing|ai_prompt filter."""
+    where = ["is_active = TRUE"]
+    params: dict[str, Any] = {}
+    if kind:
+        where.append("kind = :k")
+        params["k"] = kind
+    rows = (await db.execute(text(
+        "SELECT id, kind, name, icon, description, category, config, is_system, "
+        "       version, created_by, created_at, updated_at "
+        "FROM prompt_templates "
+        f"WHERE {' AND '.join(where)} "
+        "ORDER BY is_system DESC, category, name"
+    ), params)).mappings().all()
+    return [_row_to_template(r) for r in rows]
+
+
+@router.get("/templates/{template_id}")
+async def get_template(template_id: UUID, db: DbSession, _u: CurrentUser) -> dict:
+    row = (await db.execute(text(
+        "SELECT id, kind, name, icon, description, category, config, is_system, "
+        "       version, created_by, created_at, updated_at "
+        "FROM prompt_templates WHERE id = :id AND is_active = TRUE"
+    ), {"id": str(template_id)})).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "Template not found"})
+    return _row_to_template(row)
+
+
+@router.post("/templates", status_code=201)
+async def create_template(
+    payload: TemplateCreate, db: DbSession, user: CurrentUser,
+) -> dict:
+    """Create a new template. Admin-only. Returns the inserted row."""
+    _require_admin(user)
+    if payload.kind not in ("processing", "ai_prompt"):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "INVALID_KIND", "message": "kind must be 'processing' or 'ai_prompt'"},
+        )
+    import json
+    try:
+        row = (await db.execute(text(
+            "INSERT INTO prompt_templates (kind, name, icon, description, category, config, is_system, created_by) "
+            "VALUES (:k, :n, :ic, :d, :c, CAST(:cfg AS jsonb), FALSE, :u) "
+            "RETURNING id, kind, name, icon, description, category, config, is_system, version, created_by, created_at, updated_at"
+        ), {
+            "k": payload.kind,
+            "n": payload.name.strip(),
+            "ic": payload.icon or "📝",
+            "d": payload.description,
+            "c": payload.category or "Custom",
+            "cfg": json.dumps(payload.config or {}),
+            "u": user.email,
+        })).mappings().one()
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc).lower()
+        if "duplicate key" in msg or "unique constraint" in msg or "unique_violation" in msg:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "DUPLICATE_NAME", "message": f"A template named '{payload.name}' already exists."},
+            )
+        raise
+    await db.execute(text(
+        "INSERT INTO audit_events (actor_email, kind, summary) "
+        "VALUES (:a, 'settings.templates.add', :s)"
+    ), {"a": user.email, "s": f"added template {payload.kind}:{payload.name}"})
+    await db.commit()
+    return _row_to_template(row)
+
+
+@router.put("/templates/{template_id}")
+async def update_template(
+    template_id: UUID, payload: TemplatePatch, db: DbSession, user: CurrentUser,
+) -> dict:
+    """Partial update. Admin-only. System templates can be edited (so admins
+    can adjust org-wide presets) but cannot be deleted."""
+    _require_admin(user)
+    import json
+
+    # Build a SET clause from non-None fields only.
+    sets: list[str] = []
+    params: dict[str, Any] = {"id": str(template_id)}
+    if payload.name is not None:
+        sets.append("name = :n"); params["n"] = payload.name.strip()
+    if payload.icon is not None:
+        sets.append("icon = :ic"); params["ic"] = payload.icon
+    if payload.description is not None:
+        sets.append("description = :d"); params["d"] = payload.description
+    if payload.category is not None:
+        sets.append("category = :c"); params["c"] = payload.category
+    if payload.config is not None:
+        sets.append("config = CAST(:cfg AS jsonb)"); params["cfg"] = json.dumps(payload.config)
+    if not sets:
+        raise HTTPException(status_code=400, detail={"code": "NO_CHANGES", "message": "No fields to update."})
+    sets.append("version = version + 1")
+    sets.append("updated_at = now()")
+
+    try:
+        row = (await db.execute(text(
+            f"UPDATE prompt_templates SET {', '.join(sets)} "
+            f"WHERE id = :id AND is_active = TRUE "
+            f"RETURNING id, kind, name, icon, description, category, config, is_system, version, created_by, created_at, updated_at"
+        ), params)).mappings().first()
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc).lower()
+        if "duplicate key" in msg or "unique constraint" in msg:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "DUPLICATE_NAME", "message": "Another template already uses that name."},
+            )
+        raise
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "Template not found"})
+    await db.execute(text(
+        "INSERT INTO audit_events (actor_email, kind, summary) "
+        "VALUES (:a, 'settings.templates.update', :s)"
+    ), {"a": user.email, "s": f"updated template {row['name']}"})
+    await db.commit()
+    return _row_to_template(row)
+
+
+@router.delete("/templates/{template_id}", status_code=204, response_class=Response)
+async def remove_template(template_id: UUID, db: DbSession, user: CurrentUser):
+    """Soft-delete (is_active = FALSE) so versions + audit history stay
+    queryable. Refuses to delete a system template — those can only be
+    duplicated. Admin-only."""
+    _require_admin(user)
+    row = (await db.execute(text(
+        "SELECT name, is_system FROM prompt_templates WHERE id = :id AND is_active = TRUE"
+    ), {"id": str(template_id)})).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "Template not found"})
+    if row["is_system"]:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "SYSTEM_TEMPLATE_LOCKED",
+                    "message": "System templates cannot be deleted. Duplicate it to make an editable copy."},
+        )
+    await db.execute(text(
+        "UPDATE prompt_templates SET is_active = FALSE, updated_at = now() WHERE id = :id"
+    ), {"id": str(template_id)})
+    await db.execute(text(
+        "INSERT INTO audit_events (actor_email, kind, summary) "
+        "VALUES (:a, 'settings.templates.remove', :s)"
+    ), {"a": user.email, "s": f"removed template {row['name']}"})
+    await db.commit()
+    return Response(status_code=204)

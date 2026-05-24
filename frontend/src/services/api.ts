@@ -536,6 +536,40 @@ export interface StageAssigneeRow {
   notify_email: boolean;
 }
 
+// Prompt template row from /v1/settings/templates (migration 047).
+// kind='processing' templates encode STT preset configs in config.
+// kind='ai_prompt' templates carry the Gemini system prompt in
+// config.system_prompt.
+export interface PromptTemplate {
+  id:          string;
+  kind:        'processing' | 'ai_prompt';
+  name:        string;
+  icon:        string;
+  description: string | null;
+  category:    string;
+  config:      Record<string, unknown>;
+  is_system:   boolean;
+  version:     number;
+  created_by:  string | null;
+  created_at:  string | null;
+  updated_at:  string | null;
+}
+export interface TemplateCreate {
+  kind:        'processing' | 'ai_prompt';
+  name:        string;
+  icon?:       string;
+  description?: string;
+  category?:   string;
+  config?:     Record<string, unknown>;
+}
+export interface TemplatePatch {
+  name?:        string;
+  icon?:        string;
+  description?: string;
+  category?:    string;
+  config?:      Record<string, unknown>;
+}
+
 export interface SettingsPersonPatch {
   email?:        string;
   name?:         string;
@@ -636,6 +670,21 @@ export const settingsApi = {
       { body: { rows }, method: 'PUT' },
     ),
   emailTemplates: () => http<unknown[]>('/v1/settings/email-templates'),
+
+  // ─── Prompt templates (Settings → Prompt templates) ─────────────────
+  // Phase 4 of the 2026-05-23 Settings BUILD plan. Backed by migration 047.
+  // Two kinds share one table: 'processing' (STT preset configs) and
+  // 'ai_prompt' (Gemini system prompts). kind-specific data lives in config.
+  templatesList: (kind?: 'processing' | 'ai_prompt') =>
+    http<PromptTemplate[]>(`/v1/settings/templates${kind ? `?kind=${kind}` : ''}`),
+  templatesGet: (id: string) =>
+    http<PromptTemplate>(`/v1/settings/templates/${encodeURIComponent(id)}`),
+  templatesAdd: (payload: TemplateCreate) =>
+    http<PromptTemplate>('/v1/settings/templates', { body: payload, method: 'POST' }),
+  templatesUpdate: (id: string, patch: TemplatePatch) =>
+    http<PromptTemplate>(`/v1/settings/templates/${encodeURIComponent(id)}`, { body: patch, method: 'PUT' }),
+  templatesRemove: (id: string) =>
+    http(`/v1/settings/templates/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   // ─── Auth users (Settings → Auth & Logins) ──────────────────────────
   // Reset-only: passwords are never returned by any GET. The reset endpoint
