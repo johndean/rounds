@@ -41,16 +41,40 @@ def main() -> int:
     conn.set_session(autocommit=True)
     try:
         with conn.cursor() as cur:
-            for path in files:
-                name = Path(path).name
-                print(f"  → {name}")
-                with open(path, encoding="utf-8") as fh:
-                    sql = fh.read()
-                try:
-                    cur.execute(sql)
-                except Exception as exc:
-                    print(f"    FAILED: {exc}", file=sys.stderr)
-                    return 1
+            # Serialize concurrent migration runs via a Postgres session-level
+            # advisory lock. Railway's pre-deploy command runs once per
+            # service (api + worker share one railway.json), so every deploy
+            # triggers TWO concurrent migrate.py processes against the same
+            # database. Destructive DDL (DROP TABLE CASCADE in 047/048)
+            # races between them and one side fails with no log output
+            # (Railway-diagnosed root cause of deploy 2c0151eb).
+            #
+            # pg_advisory_lock blocks until the lock is free; the second
+            # runner waits behind the first and then runs migrations
+            # against the post-migrated schema (every statement is
+            # IF EXISTS / IF NOT EXISTS / ON CONFLICT, so re-running is
+            # a no-op for already-applied state).
+            #
+            # Lock key 0x524F554E = ASCII 'ROUN' (Rounds) — arbitrary but
+            # collision-free with any other advisory locks in the app.
+            _LOCK_KEY = 0x524F554E
+            print(f"Acquiring advisory lock 0x{_LOCK_KEY:X} (serializes concurrent migration runs)...")
+            cur.execute("SELECT pg_advisory_lock(%s)", (_LOCK_KEY,))
+            print("Lock acquired.")
+            try:
+                for path in files:
+                    name = Path(path).name
+                    print(f"  → {name}")
+                    with open(path, encoding="utf-8") as fh:
+                        sql = fh.read()
+                    try:
+                        cur.execute(sql)
+                    except Exception as exc:
+                        print(f"    FAILED: {exc}", file=sys.stderr)
+                        return 1
+            finally:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (_LOCK_KEY,))
+                print("Lock released.")
     finally:
         conn.close()
 
