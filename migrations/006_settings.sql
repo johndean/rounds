@@ -75,8 +75,27 @@ CREATE TABLE IF NOT EXISTS email_templates (
     UNIQUE (type_id, stage)                                        -- NULL type_id allowed multiple times
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS email_templates_default_uq
-    ON email_templates (stage) WHERE type_id IS NULL;
+-- Legacy partial unique index for the original 006 email_templates schema
+-- (columns: stage, type_id). Migration 048 reshapes the table to the new
+-- schema (columns: stage_id, session_type_id) and adds its own unique
+-- indexes. On re-runs after 048 has applied, this CREATE INDEX would
+-- fail with `column "type_id" does not exist`. Wrap in a DO block so
+-- the index is only created when BOTH legacy columns exist - which is
+-- true on the FIRST run (right after this CREATE TABLE) and false on
+-- every re-run after 048 has reshaped the table.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'email_templates' AND column_name = 'type_id'
+    ) AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'email_templates' AND column_name = 'stage'
+    ) THEN
+        EXECUTE 'CREATE UNIQUE INDEX IF NOT EXISTS email_templates_default_uq '
+             || 'ON email_templates (stage) WHERE type_id IS NULL';
+    END IF;
+END $$;
 
 -- ─── Prompt templates catalog (IMPLEMENTATION.md §10) ───────────────────
 CREATE TABLE IF NOT EXISTS prompt_templates (
