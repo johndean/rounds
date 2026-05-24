@@ -279,7 +279,13 @@ def _process_direct(
         _emit(20, f"Files downloaded ({len(downloaded)})")
 
         # ── 3. Gemini call ────────────────────────────────────────────────
-        system_prompt = get_prompt_for_mode(prompt_mode or ai_mode, custom_prompt)
+        # Pass a short-lived DB conn so get_prompt_for_mode can read the
+        # Settings catalog (prompt_templates.default_for_mode = mode); falls
+        # back to the hardcoded constant in app/prompts.py on any DB error.
+        with engine.connect() as conn:
+            system_prompt = get_prompt_for_mode(
+                prompt_mode or ai_mode, custom_prompt, db_conn=conn
+            )
         _emit(30, f"Uploading to Gemini ({ai_model})…")
         _emit(40, "AI analyzing audio + slides…")
         raw = call_gemini_multimodal(downloaded, system_prompt, model_id=ai_model)
@@ -607,7 +613,13 @@ def _process_enhanced(
 
     # Build the full transcript blob (for single-pass refinement) and call Gemini once.
     full_text = "\n\n".join(s[2] or "" for s in segs)
-    system_prompt = get_prompt_for_mode(prompt_mode or ai_mode, custom_prompt)
+    # Pass a short-lived DB conn so get_prompt_for_mode can read the
+    # Settings catalog (prompt_templates.default_for_mode = mode); falls
+    # back to the hardcoded constant in app/prompts.py on any DB error.
+    with engine.connect() as conn:
+        system_prompt = get_prompt_for_mode(
+            prompt_mode or ai_mode, custom_prompt, db_conn=conn
+        )
     user_prompt = "Refine the following transcript:\n\n" + full_text
 
     try:

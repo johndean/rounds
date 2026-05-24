@@ -18,7 +18,7 @@ or noise (filler / punctuation / style).
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 
 DISCREPANCY_FILTER_PROMPT = """\
@@ -120,22 +120,62 @@ sections the speaker did not introduce.
 """
 
 
-def get_prompt_for_mode(mode: str, custom_prompt: Optional[str] = None) -> str:
+_HARDCODED_FALLBACKS = {
+    "transcript":       _TRANSCRIPT_PROMPT,
+    "summary":          _SUMMARY_PROMPT,
+    "key-moments":      _KEY_MOMENTS_PROMPT,
+    "structured-notes": _STRUCTURED_NOTES_PROMPT,
+}
+
+
+def get_prompt_for_mode(
+    mode: str,
+    custom_prompt: Optional[str] = None,
+    db_conn: Any = None,
+) -> str:
     """
     Return the system prompt for a given ai_mode.
+
+    Resolution order (first hit wins):
+      1. mode == 'custom-prompt' AND custom_prompt provided
+            → custom_prompt + _BASE_FORMAT
+      2. db_conn provided AND prompt_templates has an active row whose
+         default_for_mode = mode
+            → row.config->>'system_prompt'
+      3. hardcoded fallback constants in this module
+            → _TRANSCRIPT_PROMPT / _SUMMARY_PROMPT / _KEY_MOMENTS_PROMPT /
+              _STRUCTURED_NOTES_PROMPT
+
+    The DB lookup is best-effort: any exception or empty result falls through
+    to (3). A DB outage cannot break a Gemini call.
 
     `mode` is one of: transcript | summary | key-moments | structured-notes
                      | custom-prompt
     `custom_prompt` is only used when mode == 'custom-prompt'.
+    `db_conn` is an optional SQLAlchemy sync Connection. Callers in
+    app/tasks/ai_process.py already hold one open before this call, so
+    passing it here adds a single sub-millisecond SELECT to the upload path
+    and unlocks the Settings → Prompt Templates SSOT wiring (migration 049).
     """
     if mode == "custom-prompt" and custom_prompt:
         return custom_prompt + "\n\n" + _BASE_FORMAT
-    return {
-        "transcript":       _TRANSCRIPT_PROMPT,
-        "summary":          _SUMMARY_PROMPT,
-        "key-moments":      _KEY_MOMENTS_PROMPT,
-        "structured-notes": _STRUCTURED_NOTES_PROMPT,
-    }.get(mode, _TRANSCRIPT_PROMPT)
+
+    if db_conn is not None and mode in _HARDCODED_FALLBACKS:
+        try:
+            from sqlalchemy import text
+            row = db_conn.execute(text(
+                "SELECT config->>'system_prompt' AS body "
+                "  FROM prompt_templates "
+                " WHERE default_for_mode = :m "
+                "   AND is_active = TRUE "
+                " LIMIT 1"
+            ), {"m": mode}).first()
+            if row and row[0]:
+                return row[0]
+        except Exception:
+            pass  # fall through to hardcoded fallback — never break Gemini
+
+    return _HARDCODED_FALLBACKS.get(mode, _TRANSCRIPT_PROMPT)
 
 
 def parse_transcript_response(raw: str) -> list[dict]:
