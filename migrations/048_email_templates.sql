@@ -29,13 +29,19 @@ CREATE TABLE IF NOT EXISTS email_templates (
     updated_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
--- One active template per (type, stage, locale). NULL type_id collapses to
--- the literal '_default_' string so partial-unique-on-NULL works
+-- One template per (type, stage, locale). NULL type_id collapses to the
+-- literal '_default_' string so the unique constraint on NULL works
 -- deterministically (Postgres treats NULL as distinct in unique indexes
 -- without this trick, which would let multiple defaults coexist).
+--
+-- Non-partial (per migration 034's documented fix): PostgreSQL ON CONFLICT
+-- can't infer a partial unique index when the predicate is in the
+-- conflict-target clause. Non-partial means soft-deleted (is_active=FALSE)
+-- rows still occupy the unique slot; the runtime CRUD compensates by
+-- hard-deleting rather than soft-deleting if a reuse is needed.
+DROP INDEX IF EXISTS email_templates_type_stage_locale_uq;
 CREATE UNIQUE INDEX IF NOT EXISTS email_templates_type_stage_locale_uq
-    ON email_templates (COALESCE(session_type_id::text, '_default_'), stage_id, locale)
-    WHERE is_active = TRUE;
+    ON email_templates (COALESCE(session_type_id::text, '_default_'), stage_id, locale);
 CREATE INDEX IF NOT EXISTS email_templates_stage_active_idx
     ON email_templates (stage_id) WHERE is_active = TRUE;
 CREATE INDEX IF NOT EXISTS email_templates_type_active_idx
@@ -72,4 +78,4 @@ VALUES
     (NULL, 'complete',   'en-US',
      '[VIN] Session published · {{ session_code }}',
      '<html><body style="font-family:''ProximaNova'',sans-serif;background:#F7F7F7;margin:0;"><div style="max-width:640px;margin:0 auto;background:#FFFFFF;"><div style="background:#002855;color:#FFFFFF;padding:20px 28px;"><div style="font-size:18px;font-weight:800;">Published — {{ session_code }}</div></div><div style="padding:24px 28px;font-size:14px;color:#002855;"><p>Hi {{ prior_actor_full_name }},</p><p>{{ session_code }} is now live in the VIN library. Presenter notified, audit ledger archived.</p></div></div></body></html>')
-ON CONFLICT ((COALESCE(session_type_id::text, '_default_')), stage_id, locale) WHERE is_active = TRUE DO NOTHING;
+ON CONFLICT ((COALESCE(session_type_id::text, '_default_')), stage_id, locale) DO NOTHING;

@@ -30,8 +30,14 @@ CREATE TABLE IF NOT EXISTS prompt_templates (
 
 CREATE INDEX IF NOT EXISTS prompt_templates_kind_active_idx
     ON prompt_templates (kind) WHERE is_active = TRUE;
+-- Non-partial unique index (per migration 034's documented fix): PostgreSQL
+-- ON CONFLICT can't infer a partial unique index when the predicate is in
+-- the conflict-target clause. A non-partial index lets the seed INSERT below
+-- use a clean `ON CONFLICT ((lower(name))) DO NOTHING`. Drop any prior
+-- partial index from a half-applied deploy so the recreate succeeds.
+DROP INDEX IF EXISTS prompt_templates_name_uq;
 CREATE UNIQUE INDEX IF NOT EXISTS prompt_templates_name_uq
-    ON prompt_templates (lower(name)) WHERE is_active = TRUE;
+    ON prompt_templates (lower(name));
 CREATE INDEX IF NOT EXISTS prompt_templates_system_idx
     ON prompt_templates (is_system) WHERE is_active = TRUE;
 
@@ -66,4 +72,4 @@ VALUES
     ('ai_prompt', 'Transcript (Paragraph v1)', '📝', 'Clean, enhanced transcript with corrected speech errors', 'Custom',
      '{"system_prompt":"You are generating a VIN transcript in paragraph form. Preserve speaker turns, correct disfluencies, and emit one paragraph per topic shift."}'::jsonb,
      TRUE)
-ON CONFLICT ((lower(name))) WHERE is_active = TRUE DO NOTHING;
+ON CONFLICT ((lower(name))) DO NOTHING;
