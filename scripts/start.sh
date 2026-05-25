@@ -45,7 +45,12 @@ case "$role" in
     # would mark the worker UNHEALTHY → endless restart loop. We run
     # Celery as a background process and a tiny stdlib HTTP server in
     # the foreground to satisfy the healthcheck.
-    celery -A app.tasks.celery_app.celery_app worker \
+    # -B = embedded beat scheduler (Phase H' 2026-05-25). Runs the
+    # upload_watchdog_task on a 60s tick within the same process. Single
+    # worker replica per railway.json keeps beat correctness trivial.
+    # If upload_watchdog_task is disabled via UPLOAD_WATCHDOG_ENABLED=false
+    # (the default), each tick is a ~1ms no-op.
+    celery -A app.tasks.celery_app.celery_app worker -B \
       --loglevel=info \
       --concurrency="${CELERY_CONCURRENCY:-2}" \
       --queues=celery &

@@ -81,6 +81,19 @@ class Settings(BaseSettings):
     # ── Misc ──────────────────────────────────────────────────────────
     ENVIRONMENT: str = "production"
 
+    # ── Upload watchdog (Phase H' 2026-05-25) ─────────────────────────
+    # Background Celery Beat task that recovers sessions stuck on
+    # status='uploading' when the silent enqueue_ingest failure path in
+    # /v1/gcs/upload-complete fires. Default-OFF so the deploy itself is
+    # zero behavioural change; flip UPLOAD_WATCHDOG_ENABLED=true in
+    # Railway worker env vars to activate. Disable instantly by setting
+    # it back to false + worker restart (no code revert needed). See the
+    # plan in C:\Users\JohnDean\.claude\plans\lets-start-a-new-streamed-creek.md.
+    UPLOAD_WATCHDOG_ENABLED: bool = False
+    UPLOAD_STUCK_THRESHOLD_SEC: int = 300       # 5min — minimum age before considering 'stuck'
+    UPLOAD_WATCHDOG_INTERVAL_SEC: int = 60      # beat tick cadence
+    UPLOAD_WATCHDOG_COOLDOWN_SEC: int = 600     # 10min — minimum gap between watchdog retries on same session
+
     # ── Validators ─────────────────────────────────────────────────────
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

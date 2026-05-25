@@ -43,6 +43,7 @@ celery_app = Celery(
         "app.tasks.burn_captions",
         "app.tasks.kp_task",
         "app.tasks.sop_tasks",
+        "app.tasks.upload_watchdog",
     ],
 )
 
@@ -60,6 +61,19 @@ celery_app.conf.update(
     worker_prefetch_multiplier=1,
     task_default_queue="celery",
 )
+
+# ── Beat schedule (Phase H' 2026-05-25) ───────────────────────────────────
+# Embedded into the worker process via `-B` flag in scripts/start.sh. Single
+# worker replica per railway.json keeps beat correctness simple (no leader
+# election needed). The upload_watchdog_task is feature-flagged off by
+# default — see settings.UPLOAD_WATCHDOG_ENABLED.
+celery_app.conf.beat_schedule = {
+    "upload-watchdog": {
+        "task":     "rounds.tasks.upload_watchdog",
+        "schedule": float(settings.UPLOAD_WATCHDOG_INTERVAL_SEC),
+        "options":  {"queue": "celery"},
+    },
+}
 
 
 _CATEGORY_MESSAGES: dict[str, str] = {
