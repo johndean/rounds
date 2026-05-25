@@ -53,8 +53,22 @@ case "$role" in
     echo "[start.sh] celery pid=$CELERY_PID" >&2
     # Background watchdog — if Celery dies, kill the container so Railway
     # restarts cleanly (instead of healthcheck staying green on a zombie).
+    #
+    # 2026-05-25 fix: was previously `wait $CELERY_PID` inside the subshell,
+    # but `wait` only works on children of THIS shell. The subshell isn't
+    # Celery's parent — the outer script shell is — so `wait` returned
+    # immediately with "pid N is not a child of this shell", and `set -e`
+    # then aborted the subshell BEFORE the kill line ever ran. Net effect:
+    # watchdog was a no-op; SIGTERM to Celery (e.g. via /v1/diag/revoke-task
+    # mid-task termination) left the container "healthy" on the worker-health
+    # server while the Celery process was dead and the broker queue stalled.
+    # Polling with `kill -0` is the POSIX idiom for "is this PID alive" from
+    # a shell that isn't the parent; 2s poll is cheap and well below Railway
+    # restart latency.
     (
-      wait $CELERY_PID
+      while kill -0 "$CELERY_PID" 2>/dev/null; do
+        sleep 2
+      done
       echo "[start.sh] celery exited — terminating healthcheck server" >&2
       kill -TERM 1 2>/dev/null || true
     ) &
