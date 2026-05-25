@@ -38,6 +38,7 @@ export const AI_MODELS: readonly AiModelOption[] = Object.freeze([
   { v: 'gemini-2.5-pro',          label: 'Gemini 2.5 Pro (recommended)' },
   { v: 'gemini-2.5-pro-preview',  label: 'Gemini 2.5 Pro Preview (June)' },
   { v: 'gemini-2.5-flash',        label: 'Gemini 2.5 Flash' },
+  { v: 'gemini-2.5-flash-lite',   label: 'Gemini 2.5 Flash Lite (default)' },
   { v: 'gemini-2.5-flash-prev',   label: 'Gemini 2.5 Flash Preview (Apr)' },
   { v: 'gemini-2.0-flash',        label: 'Gemini 2.0 Flash' },
   { v: 'gemini-2.0-flash-lite',   label: 'Gemini 2.0 Flash Lite' },
