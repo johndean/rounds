@@ -379,6 +379,41 @@ async def flush_celery_queue(_u: CurrentUser) -> FlushQueueResult:
         return FlushQueueResult(purged=0, detail=f"{exc.__class__.__name__}: {exc}")
 
 
+class RevokeTaskResult(BaseModel):
+    task_id:   str
+    revoked:   bool
+    terminate: bool
+    detail:    str | None = None
+
+
+@router.post("/revoke-task/{task_id}", response_model=RevokeTaskResult)
+async def revoke_task(task_id: str, _u: CurrentUser, terminate: bool = True) -> RevokeTaskResult:
+    """
+    Revoke a running Celery task by task_id. Frees worker slots when a
+    long-running task is hoarding the pool (e.g. classify_discrepancies
+    stuck on a session you don't actually need processed right now).
+
+    Mechanics: celery_app.control.revoke(task_id, terminate=True, signal='SIGTERM')
+      • Adds task_id to every worker's in-memory 'revoked' set (TTL 1h).
+      • If terminate=True, sends SIGTERM to the worker process handling the task.
+      • Subsequent re-deliveries (acks_late+reject_on_worker_lost can re-queue)
+        get discarded on receipt because they're in the revoked set.
+
+    Pair with /v1/diag/reingest/{id} to re-enqueue any session whose work
+    was inadvertently cancelled by this revoke (e.g. an ingest_task queued
+    behind the revoked one).
+    """
+    try:
+        from app.tasks.celery_app import celery_app
+        celery_app.control.revoke(task_id, terminate=terminate, signal='SIGTERM')
+        return RevokeTaskResult(task_id=task_id, revoked=True, terminate=terminate)
+    except Exception as exc:  # noqa: BLE001
+        return RevokeTaskResult(
+            task_id=task_id, revoked=False, terminate=terminate,
+            detail=f"{exc.__class__.__name__}: {exc}",
+        )
+
+
 class AbortSessionResult(BaseModel):
     session_id:    str
     status_before: str
