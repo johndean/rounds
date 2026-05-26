@@ -67,3 +67,7 @@ ignore = ["E501"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Poetry package-mode=false means the project isn't installed as a package,
+# so `import app` fails unless the repo root is on sys.path. Pytest's
+# `pythonpath` setting adds entries to sys.path before test collection.
+pythonpath = ["."]

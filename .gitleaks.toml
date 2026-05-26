@@ -15,10 +15,15 @@ paths = [
   '''(?i)tests/fixtures/.*''',
   '''(?i)frontend/src/fixtures/.*''',
   '''(?i)docs/.*\.md$''',
+  # Root CLAUDE.md documents Railway service UUIDs + project infra IDs
+  # that gitleaks flags as high-entropy strings. They are not secrets.
+  '''(?i)^CLAUDE\.md$''',
 ]
 regexes = [
   '''dev_only_password''',
   '''dev_only_change_me_in_prod_[0]+''',
   '''change_me''',
   '''rounds_dev_pw''',
+  # localStorage key name used by frontend/src/services/http.ts — not a secret.
+  '''rounds_jwt_v1''',
 ]
