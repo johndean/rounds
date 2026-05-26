@@ -142,10 +142,6 @@ void ui;  // silence unused
       <span class="app-header__divider" />
       <button class="app-header__icon-btn app-header__icon-btn--mono" title="Decrease font size" aria-label="Decrease font size" data-test-id="topbar-font-decrease" @click="fontDelta(-1)">A−</button>
       <button class="app-header__icon-btn app-header__icon-btn--mono" title="Increase font size" aria-label="Increase font size" data-test-id="topbar-font-increase" @click="fontDelta(1)">A+</button>
-      <span class="app-header__divider" />
-      <span class="app-header__status" title="System status: nominal">
-        <span class="dot" /> nominal
-      </span>
     </div>
 
     <div class="app-header__user" :title="auth.email ? `Logged in as ${userName}` : 'Not signed in'">

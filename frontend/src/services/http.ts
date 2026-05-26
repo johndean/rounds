@@ -72,6 +72,13 @@ export async function http<T = unknown>(path: string, opts: RequestOpts = {}): P
     if (resp.status === 401 && !opts.anonymous) {
       // JWT expired or revoked. Clear it so the next request prompts login.
       setToken(null);
+      // Also redirect the CURRENT page to /login so the user doesn't sit on a
+      // broken view watching toasts pile up. Hash-routed app → navigate via
+      // location.hash. Guarded so the login form's own 401 (wrong password)
+      // doesn't trigger a redirect loop.
+      if (!window.location.hash.startsWith('#/login')) {
+        window.location.replace('/#/login');
+      }
     }
     throw new ApiError(resp.status, unwrapped);
   }
