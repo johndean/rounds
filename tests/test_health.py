@@ -11,8 +11,10 @@ def test_health_ok():
     response = client.get("/v1/health")
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "ok"
-    assert "version" in body
+    # Backend wraps every JSON response in the §9.1 envelope:
+    # {success, data, error, meta}. The actual health payload is under `data`.
+    assert body["data"]["status"] == "ok"
+    assert "version" in body["data"]
 
 
 def test_locked_weights_match_audit():
