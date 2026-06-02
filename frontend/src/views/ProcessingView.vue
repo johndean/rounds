@@ -25,6 +25,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { sessions as sessionsApi, type SessionFailureReason, type SessionSummary, type PipelineConfig } from '@/services/api';
 import { useSyncController } from '@/composables/useSyncController';
+import { useWsSubscriber } from '@/composables/useWsSubscriber';
 import { toast } from '@/composables/useToast';
 import { confirm } from '@/composables/useConfirm';
 import { ApiError } from '@/services/http';
@@ -87,6 +88,49 @@ const {
   metrics, failureCategory, failureUserMessage,
   connect, disconnect,
 } = useSyncController(props.id);
+
+// Per-view subscribers for pipeline-stage events that useSyncController does
+// not own. All share the same pooled WS connection as the call above so the
+// page keeps one socket per session regardless of how many subscribers run.
+useWsSubscriber(props.id, {
+  // Per-slide extraction progress — surface as substage on the active step.
+  // Coalesces naturally because every slide_progress event overwrites the
+  // last (no list state). A subsequent processing_update will replace it.
+  slide_progress: (msg) => {
+    const n = typeof msg.slide === 'number' ? msg.slide : null;
+    const t = typeof msg.total === 'number' ? msg.total : null;
+    if (n !== null && t !== null) {
+      processingSubstage.value = `Extracting slide ${n} of ${t}`;
+    }
+  },
+  // Gemini guessed a template — pre-fill the badge if user hasn't picked one.
+  template_autodetect: (msg) => {
+    const id = typeof msg.template_id === 'string' ? msg.template_id : '';
+    const conf = typeof msg.confidence === 'number' ? msg.confidence : 0;
+    if (id && conf >= 0.5 && !templateId.value) {
+      templateId.value = id;
+    }
+  },
+  // Polls auto-anchored to slides during the post-fusion sweep.
+  polls_autoplaced: (msg) => {
+    const count = typeof msg.count === 'number' ? msg.count : 0;
+    if (count > 0) toast.push(`${count} poll${count === 1 ? '' : 's'} auto-anchored`, { tone: 'info' });
+  },
+  // Soft alignment-gate warning. Hard pipeline failure still arrives via
+  // session_failed (handled in useSyncController).
+  align_gate_failed: (msg) => {
+    const gate = typeof msg.gate === 'string' ? msg.gate : 'unknown';
+    const reason = typeof msg.reason === 'string' ? msg.reason : '';
+    toast.push(`Alignment gate "${gate}" failed${reason ? ': ' + reason : ''}`, { tone: 'warn' });
+  },
+  // Hallucination-loop truncator clipped repeated content during ai_process.
+  gemini_loop_truncated: (msg) => {
+    const n = typeof msg.segments_truncated === 'number' ? msg.segments_truncated : 0;
+    if (n > 0) {
+      toast.push(`AI guard truncated ${n} segment${n === 1 ? '' : 's'} of repeated content`, { tone: 'warn' });
+    }
+  },
+});
 
 // ─── Derived ─────────────────────────────────────────────────────────────
 const STEPS = computed<Step[]>(() => {

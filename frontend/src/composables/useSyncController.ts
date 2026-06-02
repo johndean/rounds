@@ -67,7 +67,9 @@ export function useSyncController(sessionId: string) {
         sttFailed.value = false;
         break;
 
-      case 'stt_failed':
+      // Backend dispatches 'stt_background_failed' only — the legacy
+      // 'stt_failed' case was a dead consumer (no producer) and has been
+      // removed. If a producer ever resurfaces, add the case back here.
       case 'stt_background_failed':
         sttFailed.value = true;
         break;
