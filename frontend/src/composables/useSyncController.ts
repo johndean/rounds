@@ -1,18 +1,19 @@
 /**
- * useSyncController — WebSocket sync for /v1/ws/sessions/{id}.
+ * useSyncController — ProcessingView's WS-driven refs.
  *
- * Port of MIC `frontend/src/composables/useSyncController.js` (MIC §29 +
- * §12b — processing_update field is `stage`, events emit cross-process via
- * Redis bridge). Strips MIC's store-binding (sessionStore.loadTimeline,
- * uiStore.sttReady, aiTranscriptCache, etc.) — Rounds wires those at the
- * call site if/when needed. The minimum surface ProcessingView needs:
+ * Originally owned its own WebSocket; now subscribes via wsConnectionPool so
+ * multiple views (ProcessingView + EditorView + ViewerView + ...) on the same
+ * sessionId share one underlying socket. The dispatched message types and the
+ * exposed ref surface are unchanged — ProcessingView and EditorView consume
+ * this composable directly.
  *
- *   processingStage, processingProgress, processingSubstage
- *   metrics (segments / markers / slides_aligned / slides_total)
- *   failureCategory, failureUserMessage
- *   connect(), disconnect()
+ * Per-view subscribers (useWsSubscriber) handle the wider set of backend
+ * events (correction_applied, timeline_ready, captioned_video_*, etc.) that
+ * this composable intentionally does not — see the per-view wiring in
+ * EditorView.vue / ViewerView.vue / etc.
  */
 import { onUnmounted, ref } from 'vue';
+import { subscribe, type WsMessage, type WsMessageHandler, type WsPoolSubscription, type WsStatus } from './wsConnectionPool';
 
 export interface ProcessingMetrics {
   segments?: number;
@@ -24,7 +25,7 @@ export interface ProcessingMetrics {
 }
 
 export function useSyncController(sessionId: string) {
-  const wsStatus            = ref<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
+  const wsStatus            = ref<WsStatus>('disconnected');
   const processingStage     = ref<string | null>(null);
   const processingProgress  = ref<number>(0);
   const processingSubstage  = ref<string>('');
@@ -34,32 +35,9 @@ export function useSyncController(sessionId: string) {
   const sttReady            = ref<boolean>(false);
   const sttFailed           = ref<boolean>(false);
 
-  let ws: WebSocket | null = null;
-  let disposed = false;
+  let sub: WsPoolSubscription | null = null;
 
-  function connect(): void {
-    if (!sessionId || ws) return;
-    wsStatus.value = 'connecting';
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${window.location.host}/v1/ws/sessions/${encodeURIComponent(sessionId)}`;
-    try {
-      ws = new WebSocket(url);
-    } catch {
-      wsStatus.value = 'error';
-      return;
-    }
-
-    ws.onopen = () => { wsStatus.value = 'connected'; };
-    ws.onerror = () => { wsStatus.value = 'error'; };
-    ws.onclose = () => { if (!disposed) wsStatus.value = 'disconnected'; };
-    ws.onmessage = (event) => {
-      let msg: Record<string, unknown>;
-      try { msg = JSON.parse(event.data); } catch { return; }
-      dispatch(msg);
-    };
-  }
-
-  function dispatch(msg: Record<string, unknown>): void {
+  const dispatch: WsMessageHandler = (msg) => {
     switch (msg.type) {
       case 'processing_update':
         if (typeof msg.stage === 'string') processingStage.value = msg.stage;
@@ -70,7 +48,7 @@ export function useSyncController(sessionId: string) {
       case 'metrics_update': {
         const next: ProcessingMetrics = { ...metrics.value };
         for (const k of ['segments', 'markers', 'slides_total', 'slides_aligned', 'speakers', 'duration_sec'] as const) {
-          if (typeof msg[k] === 'number') (next as Record<string, number>)[k] = msg[k] as number;
+          if (typeof (msg as WsMessage)[k] === 'number') (next as Record<string, number>)[k] = (msg as WsMessage)[k] as number;
         }
         metrics.value = next;
         break;
@@ -94,16 +72,25 @@ export function useSyncController(sessionId: string) {
         sttFailed.value = true;
         break;
 
-      // discrepancies_ready, timeline_ready, template_autodetect, alignment_update,
-      // correction_applied — handled by their respective views/stores at call site
-      // when needed. ProcessingView doesn't need them.
+      // Other backend types (correction_applied, discrepancy_resolved,
+      // timeline_ready, captioned_video_*, classification_*, polls_autoplaced,
+      // align_gate_failed, template_autodetect, slide_progress,
+      // gemini_loop_truncated, sop.*) are handled by per-view subscribers
+      // via useWsSubscriber against the same pooled connection.
     }
+  };
+
+  function connect(): void {
+    if (!sessionId || sub) return;
+    sub = subscribe(sessionId, {
+      onMessage: dispatch,
+      onStatus: (s) => { wsStatus.value = s; },
+    });
   }
 
   function disconnect(): void {
-    disposed = true;
-    try { ws?.close(); } catch { /* ignore */ }
-    ws = null;
+    sub?.unsubscribe();
+    sub = null;
     wsStatus.value = 'disconnected';
   }
 

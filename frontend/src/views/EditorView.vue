@@ -42,6 +42,7 @@ import { SOP_STAGES } from '@/fixtures/sop_stages';
 import { modal } from '@/composables/useModal';
 import FindReplaceModal from '@/components/overlays/FindReplaceModal.vue';
 import { useSyncController } from '@/composables/useSyncController';
+import { useWsSubscriber } from '@/composables/useWsSubscriber';
 
 const bundleSha = ((import.meta as unknown as { env: { VITE_BUILD_SHA?: string } }).env.VITE_BUILD_SHA || 'dev');
 const bundleShort = bundleSha === 'dev' ? 'dev' : bundleSha.slice(0, 7);
@@ -85,8 +86,8 @@ const mediaKind = ref<'video' | 'audio' | null>(null);
 const sessionCode = computed(() => session.value?.code || props.id);
 const sessionStage = computed(() => 'prep'); // until /sop wiring lands per-editor
 
-async function load(): Promise<void> {
-  loading.value = true;
+async function load(opts: { silent?: boolean } = {}): Promise<void> {
+  if (!opts.silent) loading.value = true;
   try {
     const [s, sg, sl, sp, ch, po, di, co, wd, pc, al] = await Promise.all([
       sessionsApi.get(props.id).catch(() => null),
@@ -240,7 +241,7 @@ async function load(): Promise<void> {
     });
     ALIGNMENT_BY_SEGMENT.value = alignmentMap;
   } finally {
-    loading.value = false;
+    if (!opts.silent) loading.value = false;
   }
 }
 // WS sync — listens for stt_ready / stt_failed / discrepancies_ready while
@@ -252,8 +253,30 @@ const {
   connect: wsConnect, disconnect: wsDisconnect,
 } = useSyncController(props.id);
 
+// Live remote-change subscribers — share the same pooled connection as
+// useSyncController above. Refresh segments + audit + discrepancies when
+// another tab (or our own backend echo) reports a change. Coalesces bursts
+// (e.g. find/replace fans out many correction_applied events) into a single
+// quiet refetch via debounce.
+let _wsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleQuietRefresh(): void {
+  if (_wsRefreshTimer) clearTimeout(_wsRefreshTimer);
+  _wsRefreshTimer = setTimeout(() => {
+    _wsRefreshTimer = null;
+    void load({ silent: true });
+  }, 250);
+}
+useWsSubscriber(props.id, {
+  correction_applied:   scheduleQuietRefresh,
+  discrepancy_resolved: scheduleQuietRefresh,
+  timeline_ready:       () => { void load(); },
+});
+
 onMounted(() => { void load(); wsConnect(); });
-onUnmounted(() => { wsDisconnect(); });
+onUnmounted(() => {
+  if (_wsRefreshTimer) { clearTimeout(_wsRefreshTimer); _wsRefreshTimer = null; }
+  wsDisconnect();
+});
 
 // Promote sttReady true as soon as we have any segments. The segments
 // endpoint doesn't return per-word arrays (those live in the words table),
