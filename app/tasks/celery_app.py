@@ -159,7 +159,7 @@ class RoundsTask(Task):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"_fail_session: release_slot failed for {session_id}: {e}")
 
-        # Emit WS event (no-op until 6n).
+        # Emit session_failed WS event.
         try:
             from app.engines.ws_bridge import publish_ws_event_sync  # type: ignore
 

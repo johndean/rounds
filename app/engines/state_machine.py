@@ -5,7 +5,7 @@ Ports MIC's `app/engines/state_machine.py` invariant:
   • ALLOWED_TRANSITIONS map — no other moves are permitted
   • `failed` is terminal — no transitions out
   • Every transition appends a row to session_audit.processing_log
-  • Every transition emits a WS event via the bridge (no-op until 6n lands)
+  • Every transition emits a WS event via the bridge
 
 Two entry points:
   • `transition_session()`        async, used by FastAPI handlers
@@ -102,7 +102,7 @@ def _emit_ws(session_id: str, prev: str, new: str) -> None:
             {"type": "processing_update", "stage": new, "progress": 0},
         )
     except ImportError:
-        # 6n not yet shipped — silent no-op.
+        # Defensive: ws_bridge import should always succeed in shipped builds.
         pass
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"ws emit failed for {session_id}: {exc}")
