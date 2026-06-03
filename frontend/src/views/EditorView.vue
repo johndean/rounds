@@ -270,6 +270,20 @@ useWsSubscriber(props.id, {
   correction_applied:   scheduleQuietRefresh,
   discrepancy_resolved: scheduleQuietRefresh,
   timeline_ready:       () => { void load(); },
+  // classify_discrepancies_task runs in the background after a session goes
+  // ready. Each step refreshes discrepancies so DiscrepanciesPane's
+  // "Meaningful" count updates without a manual reload.
+  classification_complete: scheduleQuietRefresh,
+  classification_partial:  scheduleQuietRefresh,
+  // Late events can arrive minutes after the editor closes and resurface
+  // on the next visit, so `info` + "Background:" prefix signals this is
+  // not actionable from this view. Truncate reason — backend payload is
+  // raw str(exc) which can be long Celery wrappers.
+  classification_failed: (msg) => {
+    const raw = typeof msg.reason === 'string' ? msg.reason : 'unknown';
+    const reason = raw.length > 80 ? raw.slice(0, 77) + '…' : raw;
+    toast.push(`Background: discrepancy classification failed — ${reason}`, { tone: 'info' });
+  },
 });
 
 onMounted(() => { void load(); wsConnect(); });
