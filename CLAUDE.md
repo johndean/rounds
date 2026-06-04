@@ -91,3 +91,71 @@ railway logs --service api --deployment --lines 100
 - worker: `22ecca2b-5b8f-4757-ba94-ec1f2cd90e39`
 - Postgres: `3eab9a85-562f-4c8a-86a6-fb4ccb027578`
 - Redis: `639d68f5-35d4-4479-b0d1-1b16c95e3108`
+
+## Emergency operator commands (`/v1/diag/*`)
+
+The backend exposes 13 operator-only diagnostic + manual-rescue endpoints under `/v1/diag/`. All require a logged-in user (`CurrentUser` dep). None have a UI surface — they exist for curl / Postman use by operators when something has gone sideways. Source: [`app/api/diagnostics.py`](./app/api/diagnostics.py).
+
+Auth pattern (run once to capture a token):
+```bash
+TOKEN=$(curl -s -X POST https://rounds.vin/v1/auth/login \
+  -d "username=johndean@vin.com&password=<PW>" | python -c "import sys,json;print(json.load(sys.stdin)['data']['access_token'])")
+```
+
+### Read-only probes
+
+```bash
+# GCS credentials/project/bucket alignment check
+curl -s -H "Authorization: Bearer $TOKEN" https://rounds.vin/v1/diag/gcs
+
+# Which classification backend is currently routed (gemini_dev vs vertex_ai)
+curl -s -H "Authorization: Bearer $TOKEN" https://rounds.vin/v1/diag/classify-route
+
+# Full 14-item GCS health check ledger
+curl -s -H "Authorization: Bearer $TOKEN" https://rounds.vin/v1/diag/gcs-checks
+```
+
+### Per-session manual rescue
+
+```bash
+# Re-run the entire ingest pipeline for a session (resets status to 'uploading')
+curl -s -X POST -H "Authorization: Bearer $TOKEN" https://rounds.vin/v1/diag/reingest/<SESSION_ID>
+
+# Re-trigger lcs_discrepancies_task (populates word_alignment for legacy sessions)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" https://rounds.vin/v1/diag/realign/<SESSION_ID>
+
+# Fire session_stage_assignees init (for sessions ingested before auto-init hook)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" https://rounds.vin/v1/diag/init-session-stages/<SESSION_ID>
+
+# Fire poll auto-placement (backfill polls that landed before autoplace was wired)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" https://rounds.vin/v1/diag/autoplace-polls/<SESSION_ID>
+
+# Force-abort a session that's stuck (sets status to 'failed', kills any in-flight task)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" https://rounds.vin/v1/diag/abort-session/<SESSION_ID>
+```
+
+### Queue + task surgery
+
+```bash
+# Drain ALL pending Celery messages (use sparingly; after a misfired batch)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" https://rounds.vin/v1/diag/flush-celery-queue
+
+# Revoke a specific in-flight Celery task by task_id (from Celery logs / Flower)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" https://rounds.vin/v1/diag/revoke-task/<TASK_ID>
+
+# Run sop_check_deadlines_task synchronously (skips the Celery Beat cadence)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" https://rounds.vin/v1/diag/sop-check
+```
+
+### Rate-limit + auth recovery
+
+```bash
+# Sweep Redis active-sessions slots for the calling user (unblocks 429 RATE_LIMIT_USER
+# after a create+delete cycle leaves orphan slots)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" https://rounds.vin/v1/diag/clear-rate-limit-slots
+
+# Reseed auth_users table from the AUTH_USERS env CSV (use after Railway env update)
+curl -s -X POST -H "Authorization: Bearer $TOKEN" https://rounds.vin/v1/diag/reseed-auth-users
+```
+
+These routes are stable. They are not test endpoints; they are production operator tools. If a route here ever becomes destructive (data loss potential), add a confirmation token requirement before relying on it in scripts.
