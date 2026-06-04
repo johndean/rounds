@@ -41,21 +41,6 @@ async function signIn(e?: Event): Promise<void> {
   router.replace(target);
 }
 
-// Phase 2 audit remediation: forgot used to claim "email sent" with no
-// backend call. Demoted to warn — password reset endpoint not yet implemented.
-// Status / Privacy links removed from real routing until those pages exist.
-function forgot(e: Event): void {
-  e.preventDefault();
-  toast.push('Password reset is not yet available. Contact your admin.', { tone: 'warn' });
-}
-function statusLink(e: Event): void {
-  e.preventDefault();
-  toast.push('Status page not yet available.', { tone: 'info' });
-}
-function privacyLink(e: Event): void {
-  e.preventDefault();
-  toast.push('Privacy policy not yet available.', { tone: 'info' });
-}
 </script>
 
 <template>
@@ -103,7 +88,6 @@ function privacyLink(e: Event): void {
         <label class="login__remember">
           <input type="checkbox" checked /> Keep me signed in for 8 hours
         </label>
-        <a href="#/login" class="login__forgot" @click="forgot">Forgot password?</a>
       </div>
 
       <button type="submit" class="login__submit" :disabled="busy" data-test-id="login-submit">
@@ -112,10 +96,6 @@ function privacyLink(e: Event): void {
 
       <div class="login__foot">
         <span :title="`Bundle: ${bundleSha}`">Build <code>{{ bundleShort }}</code></span>
-        <span>·</span>
-        <span><a href="#/" @click="statusLink">System status: nominal</a></span>
-        <span>·</span>
-        <span><a href="#/" @click="privacyLink">Privacy</a></span>
       </div>
     </form>
   </main>

@@ -16,7 +16,6 @@ import Sparkline from '@/components/dashboard/Sparkline.vue';
 import { SOP_STAGES } from '@/fixtures/sop_stages';
 import { sessions as sessionsApi, type SessionSummary } from '@/services/api';
 import { useAuthStore } from '@/stores/auth';
-import { toast } from '@/composables/useToast';
 
 const router = useRouter();
 const auth = useAuthStore();
@@ -94,10 +93,6 @@ const userFirstName = computed(() => {
   return handle.split(/[._-]/)[0]!.charAt(0).toUpperCase() + handle.split(/[._-]/)[0]!.slice(1);
 });
 
-function openClaim(e: Event): void {
-  e.preventDefault();
-  toast.push('Claim flow lands when ingest produces an unassigned queue', { tone: 'info' });
-}
 </script>
 
 <template>
@@ -112,13 +107,6 @@ function openClaim(e: Event): void {
         </p>
       </div>
       <div class="page-actions">
-        <button
-          class="btn btn--secondary"
-          data-test-id="dash-filters"
-          @click="toast.push('Dashboard filter panel ships with Phase 10.4 stats endpoint.', { tone: 'warn' })"
-        >
-          <Icon name="filter" /> Filters
-        </button>
         <button class="btn btn--primary" @click="router.push('/upload')">
           <Icon name="circle-dot" /> New upload
         </button>
@@ -349,13 +337,6 @@ function openClaim(e: Event): void {
               <div class="dash-coverage-row__role">pool</div>
             </div>
             <div class="dash-coverage-row__load">{{ aiCount }}</div>
-            <a
-              class="dash-section__action"
-              href="#/sessions"
-              :style="{ fontSize: '11px' }"
-              data-test-id="dash-claim"
-              @click="openClaim"
-            >claim →</a>
           </div>
         </div>
       </div>
