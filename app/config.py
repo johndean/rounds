@@ -91,6 +91,14 @@ class Settings(BaseSettings):
     UPLOAD_WATCHDOG_ENABLED: bool = False
     UPLOAD_STUCK_THRESHOLD_SEC: int = 300       # 5min — minimum age before considering 'stuck'
     UPLOAD_WATCHDOG_INTERVAL_SEC: int = 60      # beat tick cadence
+
+    # ── SOP deadline notifications ────────────────────────────────────
+    # When True, the hourly sop_check_deadlines_task sends an SMTP email
+    # to the stage assignee for each overdue stage (deduped per
+    # session+stage on a 23h window via audit_events). Default OFF so
+    # enabling it is an intentional production action: real assignees
+    # will get real emails the next time the Beat tick fires.
+    SOP_DEADLINE_EMAIL_ENABLED: bool = False
     UPLOAD_WATCHDOG_COOLDOWN_SEC: int = 600     # 10min — minimum gap between watchdog retries on same session
 
     # ── Validators ─────────────────────────────────────────────────────
