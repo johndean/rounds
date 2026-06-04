@@ -73,6 +73,18 @@ celery_app.conf.beat_schedule = {
         "schedule": float(settings.UPLOAD_WATCHDOG_INTERVAL_SEC),
         "options":  {"queue": "celery"},
     },
+    # Hourly scan of sop_state for stages past their SLA. Emits a
+    # sop.deadline_warning WS event + audit_events row per overdue stage.
+    # The task is purely additive (writes to audit_events only, never
+    # mutates sop_state or sessions), so the worst case if the WS event
+    # has no consumer is: silent audit rows accumulate. Pre-2026-06-04 the
+    # task existed but was never scheduled, so SOP deadline notifications
+    # only fired when an operator manually curled /v1/diag/sop-check.
+    "sop-check-deadlines": {
+        "task":     "rounds.tasks.sop.check_deadlines",
+        "schedule": 3600.0,  # every hour from worker start
+        "options":  {"queue": "celery"},
+    },
 }
 
 
