@@ -97,10 +97,6 @@ class ConflictError(MICException):
         super().__init__("CONFLICT", message, details)
 
 
-class TemplateLockedException(MICException):
-    def __init__(self, message: str = "Template cannot be changed after pipeline has started fusing"):
-        super().__init__("TEMPLATE_LOCKED", message)
-
 
 class RateLimitedError(MICException):
     def __init__(self, retry_after: int, message: str = "Concurrent session limit exceeded"):

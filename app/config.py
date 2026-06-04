@@ -70,7 +70,6 @@ class Settings(BaseSettings):
     # ── Transcription ─────────────────────────────────────────────────
     TRANSCRIPTION_BACKEND: str = "google_stt_chunked"
     TRANSCRIPTION_CHUNK_MINUTES: int = 5
-    WHISPER_MODEL_SIZE: str = "base"
 
     # ── AI ────────────────────────────────────────────────────────────
     GEMINI_API_KEY: Optional[str] = None
