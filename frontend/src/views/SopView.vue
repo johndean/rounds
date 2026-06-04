@@ -16,6 +16,7 @@ import { sessions as sessionsApi, sop as sopApi, type SessionSummary } from '@/s
 import { SOP_STAGES } from '@/fixtures/sop_stages';
 import { toast } from '@/composables/useToast';
 import { confirm } from '@/composables/useConfirm';
+import { useWsSubscriber } from '@/composables/useWsSubscriber';
 
 const props = defineProps<{ id: string }>();
 
@@ -25,7 +26,15 @@ interface SopState {
   blockers: unknown[];
   assignees: Record<string, unknown>;
   sla_target_hours: Record<string, unknown>;
+  entered_current_at: string | null;
 }
+
+// Default SLA hours per stage — mirrors app/tasks/sop_tasks.py:_DEFAULT_SLA_HOURS.
+// Used when sla_target_hours doesn't override a stage.
+const _DEFAULT_SLA_HOURS: Record<string, number> = {
+  prep: 8, copy_draft: 24, medical: 48, copy_final: 24,
+  cms: 12, captions: 12, qa: 8, complete: 0,
+};
 
 const session = ref<SessionSummary | null>(null);
 const sopState = ref<SopState | null>(null);
@@ -116,9 +125,55 @@ const transitions = computed<Transition[]>(() => {
   return out;
 });
 
-const currentSince = computed(() => transitions.value.length ? transitions.value[transitions.value.length - 1]!.at : new Date().toISOString());
+// Prefer the real `entered_current_at` from sop_state (backed by DB column).
+// Fall back to synthetic transition timestamps (still used by the audit-style
+// transitions list below) when sop_state is empty on first load.
+const currentSince = computed(() => {
+  if (sopState.value?.entered_current_at) return sopState.value.entered_current_at;
+  return transitions.value.length ? transitions.value[transitions.value.length - 1]!.at : new Date().toISOString();
+});
 const currentSinceDate = computed(() => new Date(currentSince.value));
-const dwellHours = computed(() => Math.max(1, Math.floor((Date.now() - currentSinceDate.value.getTime()) / (1000 * 60 * 60)) % 96));
+const dwellHours = computed(() => Math.max(0, Math.floor((Date.now() - currentSinceDate.value.getTime()) / (1000 * 60 * 60))));
+
+// Per-stage SLA in hours, with sop_state override taking precedence over the default.
+function _slaHoursFor(stage: string): number {
+  const override = sopState.value?.sla_target_hours?.[stage];
+  if (typeof override === 'number' && override > 0) return override;
+  return _DEFAULT_SLA_HOURS[stage] ?? 24;
+}
+
+// Overdue tracking — populated from two sources:
+//   1. Client-side computation from sop_state.entered_current_at + sla on load,
+//      so the indicator is correct immediately without waiting for the next
+//      hourly Celery Beat tick.
+//   2. The hourly `sop.deadline_warning` WS event (see useWsSubscriber below),
+//      which keeps the indicator fresh across long-open editor tabs.
+const overdueByStage = ref<Record<string, number>>({});
+
+const currentOverdueHours = computed<number>(() => {
+  const stage = currentStage.value;
+  if (!stage || stage === 'complete') return 0;
+  // WS-reported value wins (more recent than initial-load computation)
+  const ws = overdueByStage.value[stage];
+  if (typeof ws === 'number' && ws > 0) return ws;
+  // Fall back to client-side computation from sop_state
+  const entered = sopState.value?.entered_current_at;
+  if (!entered) return 0;
+  const sla = _slaHoursFor(stage);
+  if (sla <= 0) return 0;
+  const enteredMs = new Date(entered).getTime();
+  const deadlineMs = enteredMs + sla * 3600_000;
+  const overdueMs = Date.now() - deadlineMs;
+  return overdueMs > 0 ? Math.round(overdueMs / 3600_000 * 10) / 10 : 0;
+});
+
+useWsSubscriber(props.id, {
+  'sop.deadline_warning': (msg) => {
+    const stage = typeof msg.stage === 'string' ? msg.stage : '';
+    const hours = typeof msg.overdue_hours === 'number' ? msg.overdue_hours : 0;
+    if (stage) overdueByStage.value = { ...overdueByStage.value, [stage]: hours };
+  },
+});
 
 const approvers = computed(() =>
   stages.slice(0, currentIdx.value).map(s => ({
@@ -276,7 +331,12 @@ function fmtLocal(iso: string): string {
         </div>
         <div class="sop-kpi">
           <div class="sop-kpi__label">Dwell in stage</div>
-          <div class="sop-kpi__value" :style="{ color: dwellHours > 48 ? 'var(--color-amber)' : 'var(--fg1)' }">{{ dwellHours }}h</div>
+          <div class="sop-kpi__value" :style="{ color: currentOverdueHours > 0 ? 'var(--color-red)' : (dwellHours > 48 ? 'var(--color-amber)' : 'var(--fg1)') }">
+            {{ dwellHours }}h
+            <span v-if="currentOverdueHours > 0" :style="{ marginLeft: '8px', fontSize: '12px', padding: '2px 6px', borderRadius: '4px', background: 'var(--color-red)', color: '#fff', fontWeight: 700 }" data-test-id="sop-overdue-badge">
+              +{{ currentOverdueHours }}h OVERDUE
+            </span>
+          </div>
           <div class="sop-kpi__sub">since {{ fmtIso(currentSince) }}</div>
         </div>
         <div class="sop-kpi">

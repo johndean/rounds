@@ -28,6 +28,7 @@ class SopState(BaseModel):
     blockers: list[dict]
     assignees: dict
     sla_target_hours: dict
+    entered_current_at: Optional[str] = None  # ISO timestamp; null on first load
 
 
 class AdvancePayload(BaseModel):
@@ -76,7 +77,7 @@ def _validate_transition(from_stage: str, to_stage: str) -> None:
 @router.get("", response_model=SopState)
 async def get_state(session_id: UUID, db: DbSession, _u: CurrentUser) -> dict:
     row = (await db.execute(text(
-        "SELECT current_stage, is_blocked, blockers, assignees, sla_target_hours "
+        "SELECT current_stage, is_blocked, blockers, assignees, sla_target_hours, entered_current_at "
         "FROM sop_state WHERE session_id = :s"
     ), {"s": str(session_id)})).mappings().first()
     if not row:
@@ -86,8 +87,11 @@ async def get_state(session_id: UUID, db: DbSession, _u: CurrentUser) -> dict:
             "ON CONFLICT (session_id) DO NOTHING"
         ), {"s": str(session_id)})
         await db.commit()
-        return {"current_stage": "prep", "is_blocked": False, "blockers": [], "assignees": {}, "sla_target_hours": {}}
-    return dict(row)
+        return {"current_stage": "prep", "is_blocked": False, "blockers": [], "assignees": {}, "sla_target_hours": {}, "entered_current_at": None}
+    d = dict(row)
+    if d.get("entered_current_at") is not None:
+        d["entered_current_at"] = d["entered_current_at"].isoformat()
+    return d
 
 
 @router.post("/advance", response_model=SopState, status_code=status.HTTP_200_OK)
