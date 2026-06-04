@@ -14,19 +14,27 @@ import Icon from '@/components/shared/Icon.vue';
 import StageBadge from '@/components/shared/StageBadge.vue';
 import Sparkline from '@/components/dashboard/Sparkline.vue';
 import { SOP_STAGES } from '@/fixtures/sop_stages';
-import { sessions as sessionsApi, type SessionSummary } from '@/services/api';
+import { sessions as sessionsApi, sop as sopApi, type SessionSummary } from '@/services/api';
 import { useAuthStore } from '@/stores/auth';
 
 const router = useRouter();
 const auth = useAuthStore();
 
 const allSessions = ref<SessionSummary[]>([]);
+const sopSummary = ref<Array<{ stage: string; count: number; overdue_count: number }>>([]);
 const loading = ref(true);
 
 onMounted(async () => {
-  try { allSessions.value = await sessionsApi.list({}); }
-  catch { /* zeros if backend fails */ }
-  finally { loading.value = false; }
+  try {
+    const [sessions, sop] = await Promise.all([
+      sessionsApi.list({}).catch(() => [] as SessionSummary[]),
+      sopApi.dashboardSummary().catch(() => [] as Array<{ stage: string; count: number; overdue_count: number }>),
+    ]);
+    allSessions.value = sessions;
+    sopSummary.value = sop;
+  } finally {
+    loading.value = false;
+  }
 });
 
 const pipelineFilter = ref<string>('All types');
@@ -75,7 +83,18 @@ const aiPipeline = computed(() => [
 ]);
 
 interface SopPipelineEntry { id: string; count: number; attn?: boolean }
-const sopPipeline = computed<SopPipelineEntry[]>(() => SOP_STAGES.map((s) => ({ id: s.id, count: 0 })));
+// Per-stage counts + overdue indicators come from GET /v1/sop/dashboard-summary
+// (see app/api/sop.py::dashboard_summary). Overdue logic mirrors
+// sop_check_deadlines_task so the ATTN badge here matches what fires the
+// hourly WS warnings + audit_events rows.
+const sopPipeline = computed<SopPipelineEntry[]>(() => SOP_STAGES.map((s) => {
+  const row = sopSummary.value.find((r) => r.stage === s.id);
+  return {
+    id:    s.id,
+    count: row?.count ?? 0,
+    attn:  (row?.overdue_count ?? 0) > 0,
+  };
+}));
 
 const stageById = (id: string) => SOP_STAGES.find(s => s.id === id);
 

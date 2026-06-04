@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -17,9 +18,24 @@ from app.auth import CurrentUser
 from app.db import DbSession
 
 router = APIRouter(prefix="/v1/sessions/{session_id}/sop", tags=["sop"])
+# Non-session-scoped SOP routes (dashboard summary, etc).
+global_router = APIRouter(prefix="/v1/sop", tags=["sop"])
 
 STAGES = ["prep", "copy_draft", "medical", "copy_final", "cms", "captions", "qa", "complete"]
 _STAGE_INDEX = {s: i for i, s in enumerate(STAGES)}
+
+# Default SLA per stage in hours — mirrors app/tasks/sop_tasks.py:_DEFAULT_SLA_HOURS.
+# `complete` is terminal (0 = never overdue).
+_DEFAULT_SLA_HOURS: dict[str, int] = {
+    "prep":       8,
+    "copy_draft": 24,
+    "medical":    48,
+    "copy_final": 24,
+    "cms":        12,
+    "captions":   12,
+    "qa":         8,
+    "complete":   0,
+}
 
 
 class SopState(BaseModel):
@@ -250,3 +266,60 @@ async def resolve_check(session_id: UUID, payload: CheckResolvePayload, db: DbSe
     ), {"s": str(session_id), "a": user.email, "sum": f"resolved {payload.check_id}"})
     await db.commit()
     return {"resolved": True, "check_id": payload.check_id, "stage": cur["current_stage"]}
+
+
+# ─── Global (non-session) routes ─────────────────────────────────────────
+
+class StageSummaryRow(BaseModel):
+    stage: str
+    count: int
+    overdue_count: int
+
+
+@global_router.get("/dashboard-summary", response_model=list[StageSummaryRow])
+async def dashboard_summary(db: DbSession, _u: CurrentUser) -> list[dict]:
+    """
+    Per-stage counts for the dashboard's Pipeline 2 SOP row.
+
+    Returns one row per stage in the canonical order (prep → ... → complete)
+    with:
+      • count          — total sessions currently in that stage
+      • overdue_count  — sessions whose dwell time exceeds the per-stage SLA
+                         (sop_state.sla_target_hours override, else _DEFAULT_SLA_HOURS)
+
+    Overdue is computed in Python (not SQL) so the same logic stays in lock
+    with sop_check_deadlines_task and the SopView client-side fallback —
+    one source of truth for "what counts as overdue" across the three call
+    sites. Reads only; no audit_events row.
+    """
+    rows = (await db.execute(text(
+        "SELECT current_stage, entered_current_at, sla_target_hours "
+        "FROM sop_state"
+    ))).mappings().all()
+
+    summary: dict[str, dict[str, int]] = {
+        s: {"count": 0, "overdue_count": 0} for s in STAGES
+    }
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        stage = row["current_stage"]
+        if stage not in summary:
+            continue  # unknown stage — skip rather than poison the response
+        summary[stage]["count"] += 1
+        if stage == "complete":
+            continue
+        entered = row["entered_current_at"]
+        if not entered:
+            continue
+        sla_map = row["sla_target_hours"] if isinstance(row["sla_target_hours"], dict) else {}
+        sla_hours = sla_map.get(stage) if isinstance(sla_map.get(stage), int) else _DEFAULT_SLA_HOURS.get(stage, 24)
+        if sla_hours <= 0:
+            continue
+        deadline = entered + timedelta(hours=sla_hours)
+        if now > deadline:
+            summary[stage]["overdue_count"] += 1
+
+    return [
+        {"stage": s, "count": summary[s]["count"], "overdue_count": summary[s]["overdue_count"]}
+        for s in STAGES
+    ]

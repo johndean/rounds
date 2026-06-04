@@ -464,8 +464,13 @@ export const segments = {
 // ─── SOP ─────────────────────────────────────────────────────────────────
 export const sop = {
   state: (sessionId: string) =>
-    http<{ current_stage: string; is_blocked: boolean; blockers: unknown[]; assignees: unknown; sla_target_hours: unknown }>(
+    http<{ current_stage: string; is_blocked: boolean; blockers: unknown[]; assignees: unknown; sla_target_hours: unknown; entered_current_at: string | null }>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/sop`,
+    ),
+  // Non-session-scoped: per-stage counts + overdue counts for the dashboard.
+  dashboardSummary: () =>
+    http<Array<{ stage: string; count: number; overdue_count: number }>>(
+      '/v1/sop/dashboard-summary',
     ),
   advance: (sessionId: string, toStage: string, note?: string) =>
     http(`/v1/sessions/${sessionId}/sop/advance`, { body: { to_stage: toStage, note }, method: 'POST' }),
