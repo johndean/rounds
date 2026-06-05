@@ -39,6 +39,20 @@ class SegmentPatch(BaseModel):
     slide_id: Optional[UUID] = None
     speaker_id: Optional[UUID] = None
     flags: Optional[list[str]] = None
+    # Phase 4 (2026-06-05) — operator timestamp adjustment. Both fields
+    # in milliseconds offset from session start. When supplied:
+    #   * Validation: start_ms >= 0; if end_ms supplied, end_ms > start_ms
+    #   * Audit: a dedicated `segment.time_edit` kind is recorded so the
+    #     deadline-warning / SOP timeline doesn't conflate time fixes
+    #     with text/slide edits.
+    #   * The frontend's existing click->seek + time->highlight wiring
+    #     (EditorView::activeSegment) picks up the new values on next
+    #     segment fetch; no UI rebuild needed.
+    # The fields are independently optional so callers can update one
+    # bound (e.g. extend an end_ms while keeping start_ms) without
+    # specifying the other.
+    start_ms: Optional[int] = Field(default=None, ge=0)
+    end_ms:   Optional[int] = Field(default=None, ge=0)
 
 
 class ReassignPayload(BaseModel):
@@ -107,11 +121,29 @@ async def list_segments(session_id: UUID, db: DbSession, _u: CurrentUser) -> lis
 async def edit_segment(session_id: UUID, segment_id: UUID, payload: SegmentPatch, db: DbSession, user: CurrentUser) -> dict:
     import json
     prior = (await db.execute(text(
-        "SELECT text, flags, slide_id, speaker_id FROM segments "
+        "SELECT text, flags, slide_id, speaker_id, start_ms, end_ms FROM segments "
         "WHERE id = :id AND session_id = :s"
     ), {"id": str(segment_id), "s": str(session_id)})).mappings().first()
     if not prior:
         raise HTTPException(status_code=404, detail="Segment not found")
+
+    # Phase 4 — timestamp adjustment validation. Bounds must remain a
+    # valid open-ended interval (start < end). When only one bound is
+    # supplied, validate against the other from prior. Reject before
+    # any DB write so the caller gets a clean 400.
+    if payload.start_ms is not None or payload.end_ms is not None:
+        eff_start = payload.start_ms if payload.start_ms is not None else int(prior["start_ms"])
+        eff_end   = payload.end_ms   if payload.end_ms   is not None else int(prior["end_ms"])
+        if eff_start < 0 or eff_end < 0:
+            raise HTTPException(status_code=400, detail={
+                "code": "INVALID_TIMESTAMP",
+                "message": "start_ms and end_ms must be non-negative",
+            })
+        if eff_end <= eff_start:
+            raise HTTPException(status_code=400, detail={
+                "code": "INVALID_TIMESTAMP",
+                "message": f"end_ms ({eff_end}) must be greater than start_ms ({eff_start})",
+            })
 
     sets, params = [], {"id": str(segment_id), "s": str(session_id)}
     if payload.text is not None:
@@ -122,6 +154,10 @@ async def edit_segment(session_id: UUID, segment_id: UUID, payload: SegmentPatch
         sets.append("speaker_id = :speaker_id"); params["speaker_id"] = str(payload.speaker_id)
     if payload.flags is not None:
         sets.append("flags = CAST(:flags AS jsonb)"); params["flags"] = json.dumps(payload.flags)
+    if payload.start_ms is not None:
+        sets.append("start_ms = :start_ms"); params["start_ms"] = payload.start_ms
+    if payload.end_ms is not None:
+        sets.append("end_ms = :end_ms"); params["end_ms"] = payload.end_ms
     if not sets:
         raise HTTPException(status_code=400, detail="No fields to update")
     sets.append("updated_at = now()")
@@ -132,7 +168,25 @@ async def edit_segment(session_id: UUID, segment_id: UUID, payload: SegmentPatch
         "RETURNING id, seq, start_ms, end_ms, text, confidence, flags, is_anchor, anchor_kind, slide_id, speaker_id"
     ), params)).mappings().one()
 
-    # Correction ledger + audit event
+    # Correction ledger + audit event. Phase 4 (2026-06-05): when the
+    # only field that changed is start_ms / end_ms, emit a dedicated
+    # `segment.time_edit` audit kind so SOP analytics + timeline views
+    # can distinguish operator timestamp fixes from content edits.
+    # Otherwise stay on the existing `segment.edit` kind.
+    time_only = (
+        (payload.start_ms is not None or payload.end_ms is not None)
+        and payload.text is None
+        and payload.slide_id is None
+        and payload.speaker_id is None
+        and payload.flags is None
+    )
+    audit_kind = "segment.time_edit" if time_only else "segment.edit"
+    audit_summary = (
+        f"time-edited segment {segment_id}"
+        if time_only
+        else f"edited segment {segment_id}"
+    )
+
     await db.execute(text(
         "INSERT INTO corrections (session_id, segment_id, actor_email, kind, was, now_, note) "
         "VALUES (:s, :seg, :a, 'edited', CAST(:was AS jsonb), CAST(:now AS jsonb), :note)"
@@ -146,9 +200,10 @@ async def edit_segment(session_id: UUID, segment_id: UUID, payload: SegmentPatch
     })
     await db.execute(text(
         "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
-        "VALUES (:s, :a, 'segment.edit', :sum, CAST(:d AS jsonb))"
+        "VALUES (:s, :a, :k, :sum, CAST(:d AS jsonb))"
     ), {"s": str(session_id), "a": user.email,
-        "sum": f"edited segment {segment_id}",
+        "k": audit_kind,
+        "sum": audit_summary,
         "d": json.dumps(payload.model_dump(exclude_none=True, mode="json"))})
     await db.commit()
     return dict(row)
