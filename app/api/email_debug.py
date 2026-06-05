@@ -38,20 +38,19 @@ from sqlalchemy import text
 
 from app.auth import CurrentUser
 from app.db import DbSession
+from app.security.roles import require_admin
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/admin/email-debug", tags=["email-debug"])
 
 
-# Admin allowlist (matches sessions.py ADMIN_EMAIL).
-ADMIN_EMAIL = "johndean@vin.com"
-
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
-def _require_admin(user) -> None:
-    if not hasattr(user, "email") or user.email != ADMIN_EMAIL:
-        raise HTTPException(status_code=403, detail="Only admin can access email diagnostics")
+def _require_email_debug_admin(user) -> None:
+    """Thin wrapper that adds the email-diagnostics-specific message
+    while delegating the actual gate to app.security.roles.require_admin."""
+    require_admin(user, message="Only admin can access email diagnostics")
 
 
 class SendRequest(BaseModel):
@@ -66,7 +65,7 @@ class SendRequest(BaseModel):
 async def get_config(_user: CurrentUser) -> dict:
     """Presence-only check on SMTP_* env vars. Returns the literal HOST/PORT/
     FROM values (non-secret) but only booleans for USERNAME/PASSWORD."""
-    _require_admin(_user)
+    _require_email_debug_admin(_user)
     host = os.environ.get("SMTP_HOST") or ""
     port_raw = os.environ.get("SMTP_PORT") or ""
     frm = os.environ.get("SMTP_FROM") or ""
@@ -85,7 +84,7 @@ async def test_connectivity(_user: CurrentUser) -> dict:
     """Connect → STARTTLS → LOGIN → NOOP → QUIT smoke test. No email is sent.
     Returns per-step {ok, latency_ms, error}; ok=null means skipped because a
     prior step failed."""
-    _require_admin(_user)
+    _require_email_debug_admin(_user)
 
     host = os.environ.get("SMTP_HOST")
     if not host:
@@ -237,7 +236,7 @@ async def send_test(body: SendRequest, db: DbSession, _user: CurrentUser) -> dic
     """Admin-only test send. Captures full SMTP wire protocol into
     email_attempts.smtp_log so the entire transport exchange is auditable.
     No rate limit — admin needs to iterate templates."""
-    _require_admin(_user)
+    _require_email_debug_admin(_user)
     operator = (_user.email or "").strip().lower()
 
     to = (body.to or "").strip()
@@ -314,7 +313,7 @@ async def list_attempts(
     since_hours: Optional[int] = Query(None, ge=1, le=720),
 ) -> list[dict]:
     """Paginated audit trail for the Recent Attempts panel. Newest first."""
-    _require_admin(_user)
+    _require_email_debug_admin(_user)
 
     where = ["1=1"]
     params: dict[str, object] = {"lim": limit}

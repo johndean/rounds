@@ -12,17 +12,9 @@ from sqlalchemy import text
 
 from app.auth import CurrentUser
 from app.db import DbSession
+from app.security.roles import require_admin
 
 router = APIRouter(prefix="/v1/settings", tags=["settings"])
-
-
-# Admin allowlist (matches sessions.py / email_debug.py).
-ADMIN_EMAIL = "johndean@vin.com"
-
-
-def _require_admin(user) -> None:
-    if not hasattr(user, "email") or user.email != ADMIN_EMAIL:
-        raise HTTPException(status_code=403, detail="admin only")
 
 
 class SettingValue(BaseModel):
@@ -327,7 +319,7 @@ async def list_types(db: DbSession, _u: CurrentUser) -> list[dict]:
 
 @router.post("/types", status_code=201)
 async def add_type(payload: TypePayload, db: DbSession, user: CurrentUser) -> dict:
-    _require_admin(user)
+    require_admin(user)
     row = (await db.execute(text(
         "INSERT INTO session_types (code, label) VALUES (:c, :l) "
         "ON CONFLICT (code) DO UPDATE SET label = EXCLUDED.label "
@@ -342,7 +334,7 @@ async def add_type(payload: TypePayload, db: DbSession, user: CurrentUser) -> di
 
 @router.delete("/types/{type_id}", status_code=204, response_class=Response)
 async def remove_type(type_id: UUID, db: DbSession, user: CurrentUser):
-    _require_admin(user)
+    require_admin(user)
     # Refuse to delete the org default — every session needs a starting Type.
     # Frontend hides the Remove button on the default row but a malicious client
     # could still send DELETE; enforce server-side too. Port of MIC SettingsTypes.vue:91.
@@ -436,7 +428,7 @@ async def set_type_assignees(
     (Unit 5). assignee_email is also persisted for back-compat with any
     consumer that hasn't migrated yet.
     """
-    _require_admin(user)
+    require_admin(user)
     exists = (await db.execute(
         text("SELECT 1 FROM session_types WHERE id = :id"), {"id": str(type_id)},
     )).first()
@@ -536,14 +528,14 @@ async def _get_auth_user_or_404(db, user_id: UUID) -> dict:
 
 @router.get("/auth-users")
 async def list_auth_users(db: DbSession, user: CurrentUser) -> list[dict]:
-    _require_admin(user)
+    require_admin(user)
     rows = (await db.execute(text(_AUTH_USER_SELECT + "ORDER BY email"))).mappings().all()
     return [_row_to_auth_user(r) for r in rows]
 
 
 @router.post("/auth-users", status_code=201)
 async def add_auth_user(payload: AuthUserCreate, db: DbSession, user: CurrentUser) -> dict:
-    _require_admin(user)
+    require_admin(user)
     if payload.role not in ("admin", "user"):
         raise HTTPException(status_code=400, detail={"code": "BAD_ROLE", "message": "role must be 'admin' or 'user'"})
 
@@ -576,7 +568,7 @@ async def add_auth_user(payload: AuthUserCreate, db: DbSession, user: CurrentUse
 
 @router.put("/auth-users/{user_id}")
 async def update_auth_user(user_id: UUID, payload: AuthUserPatch, db: DbSession, user: CurrentUser) -> dict:
-    _require_admin(user)
+    require_admin(user)
 
     updates = payload.model_dump(exclude_unset=True)
     if not updates:
@@ -622,7 +614,7 @@ async def update_auth_user(user_id: UUID, payload: AuthUserPatch, db: DbSession,
 async def reset_auth_user_password(
     user_id: UUID, payload: AuthUserResetPassword, db: DbSession, user: CurrentUser,
 ) -> dict:
-    _require_admin(user)
+    require_admin(user)
     from app.services.auth_users import hash_password
 
     current = await _get_auth_user_or_404(db, user_id)
@@ -652,7 +644,7 @@ def datetime_now_iso() -> str:
 
 @router.delete("/auth-users/{user_id}", status_code=204, response_class=Response)
 async def remove_auth_user(user_id: UUID, db: DbSession, user: CurrentUser):
-    _require_admin(user)
+    require_admin(user)
 
     current = await _get_auth_user_or_404(db, user_id)
     # Last-admin guard.
@@ -877,7 +869,7 @@ async def create_template(
     payload: TemplateCreate, db: DbSession, user: CurrentUser,
 ) -> dict:
     """Create a new template. Admin-only. Returns the inserted row."""
-    _require_admin(user)
+    require_admin(user)
     if payload.kind not in ("processing", "ai_prompt"):
         raise HTTPException(
             status_code=400,
@@ -943,7 +935,7 @@ async def update_template(
 ) -> dict:
     """Partial update. Admin-only. System templates can be edited (so admins
     can adjust org-wide presets) but cannot be deleted."""
-    _require_admin(user)
+    require_admin(user)
     import json
 
     # Build a SET clause from non-None fields only.
@@ -1021,7 +1013,7 @@ async def remove_template(template_id: UUID, db: DbSession, user: CurrentUser):
     """Soft-delete (is_active = FALSE) so versions + audit history stay
     queryable. Refuses to delete a system template — those can only be
     duplicated. Admin-only."""
-    _require_admin(user)
+    require_admin(user)
     row = (await db.execute(text(
         "SELECT name, is_system FROM prompt_templates WHERE id = :id AND is_active = TRUE"
     ), {"id": str(template_id)})).mappings().first()

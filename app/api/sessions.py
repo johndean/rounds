@@ -16,14 +16,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CurrentUser
 from app.db import DbSession
+from app.security.roles import LEGACY_ADMIN_EMAIL as ADMIN_EMAIL
+from app.security.roles import require_admin
 
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
 
-# Admin allowlist for destructive session ops (port from MIC `app/api/sessions.py:51-52`).
-# `johndean@vin.com` is the seeded admin. SESSION_TRASH_ALLOWED gates soft-delete;
-# restore + permanent purge require strict `ADMIN_EMAIL` only (one-person blast radius).
-# Could move to `org_settings.session_trash_allowed_emails` in a follow-up phase.
-ADMIN_EMAIL = "johndean@vin.com"
+# Wider allowlist for destructive session ops (port from MIC
+# `app/api/sessions.py:51-52`).  `johndean@vin.com` (the legacy admin)
+# plus `carlab@vin.com` can soft-delete; restore + permanent purge
+# require strict admin via `require_admin` from `app.security.roles`.
+#
+# Phase 8 step-3 (2026-06-05) replaced the three local
+# `_user.email != ADMIN_EMAIL` admin gates in this module with
+# `require_admin(_user, message=...)` calls so the admin definition
+# lives in one place (`app.security.roles.LEGACY_ADMIN_EMAIL`,
+# re-exported above as ADMIN_EMAIL). The SESSION_TRASH_ALLOWED set
+# below is a SEPARATE wider-allowlist mechanism, NOT an admin gate;
+# it stays as a literal set so the carlab carve-out is explicit.
 SESSION_TRASH_ALLOWED = {ADMIN_EMAIL, "carlab@vin.com"}
 
 
@@ -248,8 +257,7 @@ async def list_deleted_sessions(db: DbSession, _user: CurrentUser) -> list[dict]
 
     Must be declared BEFORE `GET /{session_id}` so the literal path wins.
     """
-    if not hasattr(_user, "email") or _user.email != ADMIN_EMAIL:
-        raise HTTPException(status_code=403, detail="Only admin can view deleted sessions")
+    require_admin(_user, message="Only admin can view deleted sessions")
 
     from sqlalchemy import text
     rows = (
@@ -647,8 +655,7 @@ async def restore_session(session_id: UUID, db: DbSession, _user: CurrentUser) -
     Restore a soft-deleted session — clears `deleted_at`. Admin-only.
     Port of MIC `app/api/sessions.py:1570-1606`.
     """
-    if not hasattr(_user, "email") or _user.email != ADMIN_EMAIL:
-        raise HTTPException(status_code=403, detail="Only admin can restore sessions")
+    require_admin(_user, message="Only admin can restore sessions")
 
     from sqlalchemy import text
     row = (
@@ -681,8 +688,7 @@ async def permanent_delete_session(session_id: UUID, db: DbSession, _user: Curre
     We delete in dependency order, then the parent. Port of MIC
     `app/api/sessions.py:1612-1687` adapted to the Rounds schema.
     """
-    if not hasattr(_user, "email") or _user.email != ADMIN_EMAIL:
-        raise HTTPException(status_code=403, detail="Only admin can permanently delete sessions")
+    require_admin(_user, message="Only admin can permanently delete sessions")
 
     from sqlalchemy import text
     row = (

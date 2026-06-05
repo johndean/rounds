@@ -79,17 +79,26 @@ def is_admin(user: _HasEmail, *, role: Optional[str] = None) -> bool:
     return user.email == LEGACY_ADMIN_EMAIL
 
 
-def require_admin(user: _HasEmail, *, role: Optional[str] = None) -> None:
+def require_admin(
+    user: _HasEmail,
+    *,
+    role: Optional[str] = None,
+    message: str = "admin only",
+) -> None:
     """
     Raise HTTPException(403, ADMIN_ONLY) if ``user`` is not an admin.
 
     Drop-in replacement for the local ``_require_admin`` helpers in
-    `email_templates.py`, `settings.py`, `email_debug.py`. The 403
-    detail body matches those callers verbatim so frontend error
-    handling is unchanged when adoption begins.
+    `email_templates.py`, `settings.py`, `email_debug.py`, and the 3
+    sessions.py admin gates. The 403 detail body matches the
+    ``email_templates.py`` shape (``{"code": "ADMIN_ONLY", "message": ...}``);
+    sites that previously raised string-detail 403s (settings.py,
+    email_debug.py, sessions.py) move to this richer shape as part of
+    adoption. ``message`` preserves the per-site descriptive text
+    those sites used (e.g. "Only admin can permanently delete sessions").
     """
     if not is_admin(user, role=role):
         raise HTTPException(
             status_code=403,
-            detail={"code": "ADMIN_ONLY", "message": "admin only"},
+            detail={"code": "ADMIN_ONLY", "message": message},
         )

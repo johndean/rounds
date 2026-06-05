@@ -143,6 +143,34 @@ class TestPhase8AdoptionGuarantees:
         existing admin (johndean@vin.com) must still pass."""
         require_admin(_user(LEGACY_ADMIN_EMAIL))  # no exception
 
+    def test_custom_message_appears_in_403_detail(self):
+        """Phase 8 step-3 (2026-06-05): the message kwarg lets callers
+        preserve their pre-adoption descriptive error text. sessions.py's
+        'Only admin can permanently delete sessions' etc. need to land
+        in the 403 detail.message field after adoption."""
+        with pytest.raises(HTTPException) as exc:
+            require_admin(
+                _user("non-admin@example.com"),
+                message="Only admin can permanently delete sessions",
+            )
+        assert exc.value.status_code == 403
+        assert exc.value.detail == {
+            "code":    "ADMIN_ONLY",
+            "message": "Only admin can permanently delete sessions",
+        }
+
+    def test_default_message_is_admin_only(self):
+        """Backward-compat: callers that omit the kwarg keep the
+        existing 'admin only' string (email_templates.py post-7882348)."""
+        with pytest.raises(HTTPException) as exc:
+            require_admin(_user("non-admin@example.com"))
+        assert exc.value.detail == {"code": "ADMIN_ONLY", "message": "admin only"}
+
+    def test_admin_user_ignores_message_kwarg(self):
+        """Admit path returns None regardless of message kwarg."""
+        require_admin(_user(LEGACY_ADMIN_EMAIL), message="ignored")
+        require_admin(_user(LEGACY_ADMIN_EMAIL))  # default
+
     def test_exact_byte_for_byte_legacy_replacement(self):
         """Phase 7.3 verification finding fix: the helper must produce
         EXACTLY the same admit/deny decision as the legacy

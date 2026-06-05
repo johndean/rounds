@@ -30,12 +30,9 @@ from sqlalchemy import text
 
 from app.auth import CurrentUser
 from app.db import DbSession
+from app.security.roles import require_admin
 
 router = APIRouter(prefix="/v1/email-templates", tags=["email-templates"])
-
-
-# Admin allowlist (matches settings.py / email_debug.py / diagnostics.py).
-ADMIN_EMAIL = "johndean@vin.com"
 
 
 # ── Template variable substitution ────────────────────────────────────
@@ -106,14 +103,6 @@ def substitute_variables_text(template_str: str, variables: dict[str, Any]) -> s
         value = variables.get(key)
         return str(value) if value is not None else ""
     return _VAR_PATTERN.sub(_replace, template_str or "")
-
-
-def _require_admin(user) -> None:
-    if not hasattr(user, "email") or user.email != ADMIN_EMAIL:
-        raise HTTPException(
-            status_code=403,
-            detail={"code": "ADMIN_ONLY", "message": "admin only"},
-        )
 
 
 # Canonical SOP stages accepted by the HTTP CRUD surfaces.
@@ -231,7 +220,7 @@ async def create_email_template(
 ) -> dict:
     """Create a new per-Type or default-Type template for a given stage.
     Admin-only. 409 if an active row already exists for (type, stage, locale)."""
-    _require_admin(user)
+    require_admin(user)
     if payload.stage_id not in _VALID_STAGES:
         raise HTTPException(
             status_code=400,
@@ -274,7 +263,7 @@ async def update_email_template(
     template_id: UUID, payload: EmailTemplatePatch, db: DbSession, user: CurrentUser,
 ) -> dict:
     """Partial update. Admin-only."""
-    _require_admin(user)
+    require_admin(user)
     sets: list[str] = []
     params: dict[str, Any] = {"id": str(template_id)}
     if payload.subject is not None: sets.append("subject = :sub"); params["sub"] = payload.subject
@@ -306,7 +295,7 @@ async def update_email_template(
 @router.delete("/{template_id}", status_code=204, response_class=Response)
 async def remove_email_template(template_id: UUID, db: DbSession, user: CurrentUser):
     """Soft-delete (is_active = FALSE). Admin-only."""
-    _require_admin(user)
+    require_admin(user)
     row = (await db.execute(text(
         "SELECT stage_id, session_type_id FROM email_templates "
         "WHERE id = :id AND is_active = TRUE"
