@@ -1,9 +1,11 @@
 # Phase 1 Baseline — SessionsView + SessionDetailView (Phase 3 scope)
 Generated 2026-06-04 against tip `6df4170` (`6df4170d22fd27127cdd413e0765e1c57ef8eb37`)
 
-> Mandate: pixel-parity / zero-unrequested-change. This document is READ-ONLY inventory for the Phase 3 work that proposes to move the "Chat Count" panel from `SessionsView.vue` to `SessionDetailView.vue`.
+> **2026-06-04 stakeholder update (after this baseline was written)**: the "chat widget" referenced in the original mandate is the **participant tally** — a list of every chat participant with the count of messages each posted, ordered by count desc. Currently shipping in EditorView's right-rail CHAT tab (e.g. `Heather Howell (she/her) — 6`, `Gaelle Roth — 5`, `Teresa Bousquet — 4`...). Stakeholder direction: this widget **should go on the details view, NOT the editor view**. Phase 3 implementation = surface the participant-tally widget on SessionDetailView. The "Questions!!??" sub-section below the tally in EditorView is editor-specific and stays in EditorView. Source-widget retention in EditorView is TBD (likely stays, since editors use it during prep).
 >
-> **Critical finding up front:** there is **no "Chat Count" panel in `SessionsView.vue`** (nor in the React SSOT `docs/port-source/sessions.jsx`). The token `chat` does not appear in either file. See [§ "Chat Count panel — precise location"](#chat-count-panel--precise-location-sessionsview) below for the exhaustive search evidence. Phase 3 cannot proceed as described until the stakeholder either (a) identifies which existing KPI/widget they mean by "Chat Count," or (b) re-scopes the task to a different source page (the only places "Chat" + a count appear today are `EditorView.vue` right-rail tab badge and `ChatTab.vue` header).
+> Phase 3 technical needs: (a) backend aggregation endpoint returning `[{speaker, message_count}]` per session — or piggyback on existing chat-message list + aggregate client-side, (b) a new participant-tally component mounted in SessionDetailView's `sd-widgets` row or as an additional KPI tile in the `.sd-kpis` strip.
+>
+> Original baseline body preserved below for reference. The "Chat Count panel does not exist in SessionsView" finding was correct — the chat surface is in EditorView, never was in SessionsView, and the destination is SessionDetailView per the new direction.
 
 ---
 
