@@ -34,6 +34,16 @@ from typing import Optional, Protocol
 from fastapi import HTTPException
 
 
+# BR-001 — Bootstrap admin email gate. See docs/BUSINESS_RULES.md#br-001.
+# Why: Rounds still needs a single named superadmin until `auth_users.role`
+# is wired into every operator surface. This constant gates `/v1/diag/*`,
+# `SESSION_TRASH_ALLOWED` (BR-002), and the editor Admin tab.
+# Risk if changed: changing the literal moves all admin power to whatever
+# new address is set. Removing the constant breaks every callsite.
+# Migration path: see ADR-001-authentication.md "When this ADR should be
+# revisited" — retire after `auth_users.role` is loaded by get_current_user
+# and every callsite passes `role=user.role`.
+#
 # Legacy single-admin fallback. Kept during the cutover window — once
 # `auth_users.role` is loaded by `get_current_user` and callers pass
 # `role=user.role`, this constant becomes dead code (remove with the

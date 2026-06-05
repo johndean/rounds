@@ -72,6 +72,14 @@ def _content_words_from_words(words: list[dict]) -> set[str]:
     Content words from words[] SSOT — alpha-only, length > 3, lowercase,
     excluding TIER1 fillers.
     """
+    # BR-016 (related) — TIER1_WORDS exclusion preserves clinical-term
+    # density. See docs/BUSINESS_RULES.md#br-016 + ADR-007 (locked weights).
+    # Why: the >3-char filter combined with the TIER1 set ("um", "uh", "er",
+    # "ah", "umm", "uhh", "hmm") drops fillers AND short stopwords ("the",
+    # "and", "for") so the content-word set is genuinely diagnostic. Changing
+    # the length filter or the TIER1 set shifts every downstream check
+    # that depends on this set (validation invariants in this module,
+    # alignment coverage scores in app/engines/alignment.py).
     out: set[str] = set()
     for w in words or []:
         token = (w.get("word") if isinstance(w, dict) else str(w)) or ""

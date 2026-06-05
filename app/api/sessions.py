@@ -33,6 +33,14 @@ router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
 # re-exported above as ADMIN_EMAIL). The SESSION_TRASH_ALLOWED set
 # below is a SEPARATE wider-allowlist mechanism, NOT an admin gate;
 # it stays as a literal set so the carlab carve-out is explicit.
+#
+# BR-002 — Session trash carve-out. See docs/BUSINESS_RULES.md#br-002.
+# Why: `carlab@vin.com` is an external integration partner who must be
+# able to soft-delete / restore / purge their OWN test sessions without
+# being granted full LEGACY_ADMIN_EMAIL privileges (which would expose
+# every `/v1/diag/*` route and the editor Admin tab). Coordinate with the
+# integration owner before adding or removing addresses here — adding
+# grants destructive data-loss power; removing breaks the partner workflow.
 SESSION_TRASH_ALLOWED = {ADMIN_EMAIL, "carlab@vin.com"}
 
 

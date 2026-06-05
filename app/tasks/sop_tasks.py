@@ -291,6 +291,19 @@ def _maybe_send_deadline_email(engine, session_id: str, stage: str, overdue_hour
             if last is not None:
                 if last.tzinfo is None:
                     last = last.replace(tzinfo=timezone.utc)
+                # BR-004 — 23-hour deadline-email throttle window.
+                # See docs/BUSINESS_RULES.md#br-004.
+                # Why: sop_check_deadlines_task fires hourly. Without
+                # the throttle, every Beat tick would re-email an
+                # overdue stage. 23h (not 24h) avoids "off-by-one"
+                # drift where two consecutive daily Beat ticks fall
+                # on either side of the boundary. The throttle row is
+                # the (session_id, stage) audit_events entry above.
+                #
+                # BR-005 — Zero-hour deadline-email grace period.
+                # See docs/BUSINESS_RULES.md#br-005. No grace check
+                # here (or anywhere): emails fire the moment overdue_hours
+                # > 0. BR-004 is the only thing that prevents repeat sends.
                 if datetime.now(timezone.utc) - last < timedelta(hours=23):
                     return
             audit_id = conn.execute(

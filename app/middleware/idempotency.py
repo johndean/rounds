@@ -166,6 +166,13 @@ class IdempotencyMiddleware(BaseHTTPMiddleware):
                 pass
 
         # Phase 5: cache 2xx responses for full TTL.
+        # BR-012 — Idempotency-key TTL (86400s / 24h).
+        # See docs/BUSINESS_RULES.md#br-012.
+        # Why: mobile-network retries can drift up to ~24h (offline → resume).
+        # Inside the window, the same Idempotency-Key returns the cached
+        # response (zero re-execution). Outside the window the key is forgotten
+        # — a same-key resubmit then runs fresh. Shortening risks double-effect
+        # in the gap. Lengthening grows Redis storage linearly.
         if 200 <= response.status_code < 300:
             try:
                 response_body = b""

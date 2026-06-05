@@ -49,6 +49,14 @@ def _detect_repetition_loop(text: str) -> tuple[str, bool]:
     on legitimate repetition like "yes, yes" or "the, the". O(n) memory and
     time over the segment text. Returns (cleaned_text, was_truncated).
     """
+    # BR-015 — Gemini hallucination-loop detector. See docs/BUSINESS_RULES.md#br-015.
+    # Why: Gemini STT can degrade into runaway repetition (one 80-char chunk
+    # cycling indefinitely — observed real-world burning 100k+ output tokens
+    # before timeout). Saves real cost AND prevents handing reviewers a mostly
+    # garbage transcript. Lowering MIN_REPS risks clipping a legitimate
+    # transcript that contains a long repeated phrase (chant, enumerated list);
+    # raising lets more hallucination tokens through. Applies only to the
+    # Gemini direct STT path; chunked Google STT does not need this.
     MIN_BLOCK = 80
     MIN_REPS  = 3
     n = len(text)

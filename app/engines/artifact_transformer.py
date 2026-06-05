@@ -217,6 +217,15 @@ def apply_srt_transform(text: str) -> str:
     11-step deterministic SRT macro — strips structural markup leaving only
     speech-as-text. Verbatim port of MIC artifact_transformer._apply_srt_transform.
     """
+    # BR-016 — Format-specific markup stripping rule.
+    # See docs/BUSINESS_RULES.md#br-016.
+    # Why: to_srt() calls this transform to produce clean caption text
+    # (slide codes / speaker labels / [pq] tags / curly annotations removed).
+    # to_vtt() deliberately does NOT call it — VTT captions preserve
+    # structural markup so editors can correlate captions to anchors.
+    # to_docx() / to_txt() apply their own format-specific cleanup. Filler
+    # words ("um"/"uh"/...) are stripped earlier at the normalize phase
+    # (app/iil/normalization.py:TIER1_WORDS), not here.
     t = text
     # 1. Slide codes
     t = re.sub(r"\+\+\d+\*\+\s*", "", t)

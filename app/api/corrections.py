@@ -46,6 +46,14 @@ ALLOWED_CORRECTION_TYPES = frozenset({
     "speaker_reassignment",
 })
 
+# BR-018 — Correction types that auto-close discrepancies.
+# See docs/BUSINESS_RULES.md#br-018.
+# Why: when an editor applies a `text_edit` at the spot of a discrepancy,
+# the discrepancy clears in one action (no separate "resolve" click). The
+# `mark_ok` type is the explicit "no change needed" close. Other correction
+# types (find_replace, chat_edit, speaker_reassignment) deliberately do NOT
+# auto-close because they don't necessarily resolve the reviewer's concern.
+# Adding a type here mass-closes discrepancies an operator may not intend.
 CLOSES_DISCREPANCY_TYPES = frozenset({"text_edit", "mark_ok"})
 
 
@@ -570,6 +578,13 @@ async def get_review_queue(session_id: UUID, db: DbSession, _u: CurrentUser) -> 
         )
     ).mappings().all()
 
+    # BR-006 — Confidence-threshold priority scoring. See docs/BUSINESS_RULES.md#br-006.
+    # Why: reviewer order is driven by these weights. Drift + no-slide is the
+    # worst case (alignment broke AND no candidate slide exists). The <0.4 and
+    # <0.6 confidence buckets came out of MIC audit §18 tuning — they push
+    # ambiguous rows to the top of the editor's "next discrepancy" cursor.
+    # Risk: changing weights re-orders what reviewers see first. Both <0.4 and
+    # <0.6 can apply (sub-0.4 rows accumulate both bonuses).
     def priority(a: dict) -> int:
         score = 0
         if a["drift_flag"]      and a["slide_id"] is None: score += 100
