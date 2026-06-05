@@ -215,18 +215,6 @@
 .help-empty svg { margin-bottom: 8px; }
 .help-empty h3 { margin: 0 0 4px; color: var(--color-navy); font-size: 14px; }
 .help-empty p { margin: 0 0 12px; font-size: 12px; }
-.help-cta {
-  margin-top: 18px;
-  padding: 12px 14px;
-  background: var(--color-warm-light);
-  border: 1px solid var(--color-gold);
-  border-radius: 8px;
-  font-size: 12px;
-  color: var(--color-navy);
-}
-.help-cta strong { display: block; font-size: 13px; margin-bottom: 4px; }
-.help-cta a { color: var(--color-navy); font-weight: 800; }
-.help-cta code { font-family: var(--font-mono); background: rgba(0,0,0,.06); padding: 1px 5px; border-radius: 3px; }
 
 /* ── Footer ───────────────────────────────────────────── */
 .help-drawer__footer {

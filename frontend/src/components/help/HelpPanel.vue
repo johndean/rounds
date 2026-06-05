@@ -232,18 +232,6 @@ onUnmounted(() => {
               :default-open="i === 0"
             />
           </div>
-
-          <div class="help-cta">
-            <strong>Still stuck?</strong>
-            <p>
-              Try the
-              <button type="button" class="help-cta__inline" @click="activeTab = 'ask'">Ask AI</button>
-              tab, drop a note in
-              <code>{{ help.resolved.contact.slack }}</code>
-              or email
-              <a :href="`mailto:${help.resolved.contact.email}`">{{ help.resolved.contact.email }}</a>.
-            </p>
-          </div>
         </template>
 
         <!-- FAQ -->
