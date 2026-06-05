@@ -56,6 +56,23 @@ function SessionDetailRoute({ id }) {
     return { n: i + 1, conf: pct, ok: pct >= 80 ? "ok" : "warn", slideColor: slideAccent(slideId) };
   });
 
+  // 2026-06-04 stakeholder direction: Chat Participants tally surfaces on
+  // the session detail view (NOT the editor view). Aggregates the chat
+  // stream by author. Backend endpoint:
+  //   GET /v1/sessions/{id}/chat-participants
+  // Shape: [{ speaker, message_count, first_seen_ms, last_seen_ms }]
+  // Sample data approximating the original VIN Rounds Zoom chat shape.
+  const chatParticipants = [
+    { speaker: "Heather Howell (she/her)", message_count: 6 },
+    { speaker: "Gaelle Roth",              message_count: 5 },
+    { speaker: "Teresa Bousquet",          message_count: 4 },
+    { speaker: "Gretchen Gerber",          message_count: 4 },
+    { speaker: "Giavanna Smith",           message_count: 4 },
+    { speaker: "Kathy Oh",                 message_count: 2 },
+    { speaker: "Claire Gossett",           message_count: 2 },
+  ];
+  const totalChatMessages = chatParticipants.reduce((sum, p) => sum + p.message_count, 0);
+
   return (
     <main className="page" data-screen-label={`Session Detail / ${session.id}`}>
       <div className="page-eyebrow">
@@ -292,6 +309,20 @@ function SessionDetailRoute({ id }) {
                   <div style={{ fontSize: 12, color: "var(--fg1)", lineHeight: 1.4, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
                     {r.preview}
                   </div>
+                </div>
+              ))}
+          </div>
+        </div>
+
+        <div className="card" data-test-id="sd-chat-participants">
+          <div className="card__header"><h3>Chat Participants</h3><span className="chip chip--ghost" style={{ fontSize: 10 }}>{totalChatMessages} msgs</span></div>
+          <div className="card__body" style={{ padding: 0, maxHeight: 380, overflowY: "auto" }}>
+            {chatParticipants.length === 0
+              ? <div style={{ padding: 18, fontSize: 12, color: "var(--fg2)", textAlign: "center" }}>No chat yet.</div>
+              : chatParticipants.map((p) => (
+                <div key={p.speaker} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", borderBottom: "1px solid var(--border)" }}>
+                  <span style={{ flex: 1, fontSize: 12, color: "var(--fg1)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.speaker}</span>
+                  <span style={{ fontSize: 11, color: "var(--fg2)", fontFamily: "var(--font-mono)", fontWeight: 700 }}>{p.message_count}</span>
                 </div>
               ))}
           </div>
