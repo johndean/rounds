@@ -1,16 +1,20 @@
 """
 /v1/sessions/{id}/exports/{format} — produces docx / srt / vtt / txt / zip.
+/v1/sessions/{id}/captions.vtt    — cache-friendly WebVTT for HTML5 <track>.
 
 Streams the artifact bytes back; writes a row in the artifacts table when
 generated successfully (idempotent via UNIQUE (session_id, kind)).
 
-Phase 6p / U142.
+Phase 6p / U142. Phase C1 (2026-06-05) adds the captions.vtt route with
+ETag + Cache-Control so the editor's <track> tag doesn't re-fetch every
+mount; the ETag fingerprints (session_id, max corrections.sequence_number)
+so the cache invalidates the moment any correction lands.
 """
 from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import Response
 from sqlalchemy import text
 
@@ -18,6 +22,7 @@ from app.auth import CurrentUser
 from app.db import DbSession
 
 router = APIRouter(prefix="/v1/sessions/{session_id}/exports", tags=["exports"])
+captions_router = APIRouter(prefix="/v1/sessions/{session_id}", tags=["exports"])
 
 
 _KIND_TO_MIME = {
@@ -97,4 +102,66 @@ async def export_session(
         content=body,
         media_type=_KIND_TO_MIME[fmt],
         headers={"content-disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ─── /captions.vtt — Phase C1 ─────────────────────────────────────────
+# Dedicated route for the HTML5 <track> element. The editor fetches this
+# via authenticated fetch() and wraps the body in a Blob URL, which
+# sidesteps <track>'s inability to send Authorization headers. The ETag
+# is the load-bearing perf bit: it fingerprints (session_id, latest
+# correction sequence_number), so the browser sends If-None-Match on
+# every reload and the server returns 304 (zero body bytes) until a new
+# correction lands. Cache-Control: private, max-age=60 also lets the
+# browser skip the network entirely for the first minute.
+@captions_router.get("/captions.vtt")
+async def get_captions_vtt(
+    session_id: UUID,
+    request: Request,
+    db: DbSession,
+    _user: CurrentUser,
+) -> Response:
+    """WebVTT captions for the video <track>. ETag-cached on the
+    (session_id, max_correction_seq) pair."""
+    # Compute the ETag fingerprint from the corrections ledger BEFORE
+    # materializing the body. If the client's If-None-Match matches,
+    # return 304 with no body — the entire VTT generation is skipped.
+    row = (
+        await db.execute(
+            text(
+                "SELECT COALESCE(MAX(sequence_number), -1) AS max_seq "
+                "FROM corrections WHERE session_id = CAST(:sid AS uuid)"
+            ),
+            {"sid": str(session_id)},
+        )
+    ).mappings().first()
+    max_seq = int(row["max_seq"]) if row else -1
+    etag = f'W/"{session_id}-{max_seq}"'
+
+    if request.headers.get("if-none-match") == etag:
+        return Response(
+            status_code=304,
+            headers={
+                "ETag": etag,
+                "Cache-Control": "private, max-age=60",
+            },
+        )
+
+    from app.engines.artifact_transformer import load_session_for_export, to_vtt
+    try:
+        sess = load_session_for_export(str(session_id))
+    except RuntimeError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    body = to_vtt(sess)
+    return Response(
+        content=body,
+        media_type="text/vtt; charset=utf-8",
+        headers={
+            "ETag": etag,
+            "Cache-Control": "private, max-age=60",
+            # Inline disposition so the browser plays this in <track>
+            # rather than offering it as a download.
+            "Content-Disposition": "inline",
+        },
     )

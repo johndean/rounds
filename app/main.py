@@ -201,6 +201,7 @@ app.include_router(diag_router.router)
 app.include_router(email_debug_router.router)
 app.include_router(email_templates_router.router)
 app.include_router(exports_router.router)
+app.include_router(exports_router.captions_router)
 app.include_router(queue_router.router)
 
 

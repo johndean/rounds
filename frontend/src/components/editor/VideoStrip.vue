@@ -20,10 +20,11 @@
  * this the unthrottled 30+ Hz default fires the per-word highlight watcher in
  * TranscriptPane too often on large sessions.
  */
-import { computed, ref, watch, onUnmounted } from 'vue';
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
 import type { Slide, Segment } from '@/fixtures/transcript';
 import { fmtTime } from '@/utils/editorHelpers';
+import { exportsApi } from '@/services/api';
 
 interface SessionLite { id: string; presenter?: string; recorded?: string }
 
@@ -54,6 +55,85 @@ const emit = defineEmits<{
 
 const mediaEl = ref<HTMLMediaElement | null>(null);
 const seeking = ref(false);
+
+// Phase C2 — captions <track>. We fetch via authenticated fetch() and
+// hold a Blob URL so the <track> element doesn't need an Authorization
+// header. Server ETag-caches (Phase C1) so this is cheap on remount.
+// captionsBlobUrl is null until the fetch resolves; on 404 it stays
+// null so the CC toggle is cosmetic for sessions without captions.
+const captionsBlobUrl = ref<string | null>(null);
+onMounted(async () => {
+  try {
+    captionsBlobUrl.value = await exportsApi.captionsBlobUrl(props.session.id);
+  } catch {
+    // Silent failure: CC toggle stays cosmetic. No console.error so we
+    // don't pollute logs on legacy sessions that 500 the captions route.
+    captionsBlobUrl.value = null;
+  }
+});
+onUnmounted(() => {
+  if (captionsBlobUrl.value) URL.revokeObjectURL(captionsBlobUrl.value);
+});
+
+// Watch cc + textTrack readiness so toggling CC live reflects in the
+// video. The track loads asynchronously after the blob URL is set;
+// poll briefly until textTracks[0] appears, then sync mode.
+function syncTrackMode(): void {
+  const el = mediaEl.value as HTMLVideoElement | null;
+  if (!el || !el.textTracks || el.textTracks.length === 0) return;
+  el.textTracks[0]!.mode = props.cc ? 'showing' : 'disabled';
+}
+watch(() => props.cc, syncTrackMode);
+watch(captionsBlobUrl, () => {
+  // Defer to next tick so the <track> element has mounted.
+  void Promise.resolve().then(syncTrackMode);
+});
+
+// Phase C3 — pointer-based scrubber drag-to-seek. requestAnimationFrame
+// throttles update:time emits so the playhead repaints at most once per
+// frame (60Hz on a typical display). pointer events instead of mouse so
+// touch/pen work too.
+const dragging = ref(false);
+let scrubberEl: HTMLElement | null = null;
+let rafPending = false;
+let pendingTime: number | null = null;
+function setScrubberRef(el: HTMLElement | null): void { scrubberEl = el; }
+function timeFromPointer(ev: PointerEvent): number | null {
+  if (!scrubberEl || props.total <= 0) return null;
+  const rect = scrubberEl.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+  return pct * props.total;
+}
+function flushPendingTime(): void {
+  rafPending = false;
+  if (pendingTime !== null) {
+    emit('update:time', pendingTime);
+    pendingTime = null;
+  }
+}
+function onScrubberPointerDown(ev: PointerEvent): void {
+  if (ev.button !== 0) return; // primary only
+  const t = timeFromPointer(ev);
+  if (t === null) return;
+  dragging.value = true;
+  scrubberEl?.setPointerCapture(ev.pointerId);
+  pendingTime = t;
+  if (!rafPending) { rafPending = true; requestAnimationFrame(flushPendingTime); }
+}
+function onScrubberPointerMove(ev: PointerEvent): void {
+  if (!dragging.value) return;
+  const t = timeFromPointer(ev);
+  if (t === null) return;
+  pendingTime = t;
+  if (!rafPending) { rafPending = true; requestAnimationFrame(flushPendingTime); }
+}
+function onScrubberPointerUp(ev: PointerEvent): void {
+  if (!dragging.value) return;
+  dragging.value = false;
+  try { scrubberEl?.releasePointerCapture(ev.pointerId); } catch { /* not captured */ }
+  // Final flush in case the rAF hasn't fired yet.
+  flushPendingTime();
+}
 
 // 10 Hz throttle on timeupdate (MIC parity — port of stores/playback.js:116-139).
 // Leading edge fires the first emit immediately; trailing edge guarantees the
@@ -178,7 +258,19 @@ onUnmounted(() => {
         @play="onPlay"
         @pause="onPause"
         @ended="onEnded"
-      />
+      >
+        <!-- Phase C2 — WebVTT captions. Track src is a Blob URL so we
+             don't need to ship the JWT in a query param. Mode follows
+             the cc prop so toggling actually shows / hides cues. -->
+        <track
+          v-if="captionsBlobUrl"
+          kind="subtitles"
+          srclang="en"
+          label="English"
+          :src="captionsBlobUrl"
+          :default="cc"
+        />
+      </video>
       <!-- Hidden <audio> fallback for sessions without a video source. -->
       <audio
         v-else-if="mediaUrl && mediaKind === 'audio'"
@@ -240,10 +332,16 @@ onUnmounted(() => {
       <div
         class="vstrip__scrubber"
         role="slider"
+        :class="dragging ? 'is-dragging' : ''"
+        :ref="(el) => setScrubberRef(el as HTMLElement | null)"
         :aria-valuenow="time"
         :aria-valuemin="0"
         :aria-valuemax="total"
         @click="emit('scrubClick', $event)"
+        @pointerdown="onScrubberPointerDown"
+        @pointermove="onScrubberPointerMove"
+        @pointerup="onScrubberPointerUp"
+        @pointercancel="onScrubberPointerUp"
       >
         <div class="vstrip__track"><span :style="{ width: trackWidth }" /></div>
         <div class="vstrip__chapter-marks">

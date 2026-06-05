@@ -416,6 +416,30 @@ export const exports_ = {
     document.body.removeChild(a);
     URL.revokeObjectURL(objUrl);
   },
+
+  // Phase C2 — fetch the session's WebVTT captions and return a Blob
+  // URL so the editor's <track src> can play them. We can't use the
+  // raw /captions.vtt URL directly because <track> can't send the
+  // Authorization header — the blob URL is a local reference, no auth
+  // crosses the wire on the <track> side. The server still ETag-caches
+  // (Phase C1), so the underlying fetch is cheap on repeat loads.
+  // Returns null on 404 (session has no captions yet) so the caller
+  // can hide CC controls gracefully.
+  captionsBlobUrl: async (sessionId: string): Promise<string | null> => {
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const url = `/v1/sessions/${encodeURIComponent(sessionId)}/captions.vtt`;
+    const resp = await fetch(url, { headers });
+    if (resp.status === 404) return null;
+    if (!resp.ok) {
+      let envelope: unknown = null;
+      try { envelope = await resp.json(); } catch { /* non-JSON */ }
+      throw new ApiError(resp.status, envelope);
+    }
+    const blob = await resp.blob();
+    return URL.createObjectURL(blob);
+  },
 };
 // Re-export under the canonical name; `exports` is a reserved-ish JS word
 // in some bundlers, so the internal symbol uses an underscore suffix.

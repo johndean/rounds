@@ -610,7 +610,11 @@ body.is-col-resizing .editor__resizer::before {
   position: relative; height: 14px;
   cursor: pointer;
   display: flex; align-items: center;
+  touch-action: none; /* let pointer events handle drag, not browser scroll */
+  user-select: none;
 }
+.vstrip__scrubber.is-dragging { cursor: grabbing; }
+.vstrip__scrubber.is-dragging .vstrip__head { transition: none; }
 .vstrip__track {
   position: absolute; inset: 5px 0 5px 0;
   background: var(--surface-muted); border-radius: 999px; overflow: hidden;
