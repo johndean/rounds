@@ -21,7 +21,10 @@ The frontend is a **faithful Vue port of the React prototype**. Source of truth 
 | [`docs/IMPLEMENTATION.md`](./docs/IMPLEMENTATION.md) | Transcript Software v4 zero-gap reference (v4.0.0-ssot-r2) — prose description of every route/component/state. |
 | [`docs/port-source/`](./docs/port-source/) | The React prototype source — 16 JSX files + 5 CSS files + HTML entry + fonts/assets. **Authoritative for layout + class names.** When porting a view, read the corresponding `.jsx` first. |
 | [`docs/plans/2026-05-17-001-feat-rounds-bootstrap-plan.md`](./docs/plans/2026-05-17-001-feat-rounds-bootstrap-plan.md) | Build plan — 10 phases, ~70 implementation units. Updated as phases land. |
+| [`docs/plans/2026-06-05-009-help-center-povin-pixel-port-plan.md`](./docs/plans/2026-06-05-009-help-center-povin-pixel-port-plan.md) | **Active** Help Center plan — pixel-perfect port from po.vin (`C:\Users\JohnDean\po-vin\`) + Ask AI (Gemini) + CC-Rounds compliance + bulk-AI Celery tasks + version history + cross-links + numbered steps. Supersedes the earlier MIC-mirror plan (`...-008-...`). |
 | [`docs/SPEC.md`](./docs/SPEC.md) | Open dependencies + decisions log. |
+
+> **Help Center SSOT note (2026-06-05):** the React `docs/port-source/` directory does NOT contain a help.jsx — confirmed by the audit at workflow `waqecj0sd`. For the Help Center specifically, the **po.vin** repository (`C:\Users\JohnDean\po-vin\`) is the pixel-perfect source of truth. Every other view continues to follow the React JSX rule above.
 
 **THE REACT JSX IS THE SINGLE SOURCE OF TRUTH.** Per direct user directive (2026-05-17): "the react version is 100% accurate and is SSOT." When porting any view:
 - Open the corresponding `docs/port-source/<name>.jsx` file.

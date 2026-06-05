@@ -1,3 +1,13 @@
+# rounds.vin Help Center — Full CMS Port Plan (MIC-Sourced) — SUPERSEDED
+
+> **⚠ SUPERSEDED 2026-06-05.** This plan mirrored the MIC Help Center. The user subsequently provided pixel-reference screenshots of the **po.vin** Help Center and required a pixel-perfect port with an inline-under-banner layout (not a teleport overlay). The X1–X8 feature decisions captured here still apply, but the visual + architectural source of truth has changed.
+>
+> **Active plan:** [`2026-06-05-009-help-center-povin-pixel-port-plan.md`](./2026-06-05-009-help-center-povin-pixel-port-plan.md)
+>
+> This file is retained for historical context only. Do not implement from it.
+
+---
+
 # rounds.vin Help Center — Full CMS Port Plan (MIC-Sourced)
 
 - **Date:** 2026-06-05
