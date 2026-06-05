@@ -11,7 +11,7 @@
  * "OVERDUE" pill when past SLA. Click a row to navigate to the
  * session's SOP tab so the user can act on the queue item.
  */
-import { computed, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { queue as queueApi, type QueueItem } from '@/services/api';
 import { toast } from '@/composables/useToast';
@@ -22,19 +22,53 @@ const items = ref<QueueItem[]>([]);
 const loading = ref(true);
 const error = ref<string | null>(null);
 
-async function load(): Promise<void> {
-  loading.value = true;
+// Refresh cadence — chosen to balance "queue feels live" against
+// API load. WS would be tighter but the bus is session-scoped (see
+// app/engines/ws_bridge.py), and a user-scoped channel is out of
+// scope for the v1 queue. 30s is small enough that operators don't
+// notice the staleness when switching tabs.
+const POLL_INTERVAL_MS = 30_000;
+
+let inFlight = false;
+let pollHandle: ReturnType<typeof setInterval> | null = null;
+
+async function load(opts: { showSpinner?: boolean } = {}): Promise<void> {
+  // Drop overlapping loads — visibilitychange + interval can race.
+  if (inFlight) return;
+  inFlight = true;
+  if (opts.showSpinner !== false) loading.value = true;
   error.value = null;
   try {
     items.value = await queueApi.mine();
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Failed to load queue';
-    toast.push(error.value, { tone: 'error' });
+    // Suppress toast on silent background refreshes — operators don't
+    // want a red banner every 30s if the network blips.
+    if (opts.showSpinner !== false) toast.push(error.value, { tone: 'error' });
   } finally {
     loading.value = false;
+    inFlight = false;
   }
 }
-onMounted(load);
+
+function refreshSilently(): void {
+  void load({ showSpinner: false });
+}
+
+function onVisibility(): void {
+  if (document.visibilityState === 'visible') refreshSilently();
+}
+
+onMounted(() => {
+  void load();
+  pollHandle = setInterval(refreshSilently, POLL_INTERVAL_MS);
+  document.addEventListener('visibilitychange', onVisibility);
+});
+
+onBeforeUnmount(() => {
+  if (pollHandle !== null) { clearInterval(pollHandle); pollHandle = null; }
+  document.removeEventListener('visibilitychange', onVisibility);
+});
 
 function displayTitle(it: QueueItem): string {
   return (it.title_long || it.title_short || it.title || '(untitled)').trim();

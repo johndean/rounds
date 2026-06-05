@@ -512,6 +512,43 @@ function handlePlaceAtActive(itemId: string): void {
   if (activeSegment.value) handleDropOnSegment(itemId, activeSegment.value.id);
 }
 
+// Phase 6.2 — list reorder for chat + polls. Optimistic local mutation
+// followed by a single bulk PATCH; on API failure we revert. The
+// backend writes order_index per row in the supplied position, so
+// subsequent loads return rows in this order via the
+// (order_index IS NULL) ASC, order_index ASC, sent_at_ms ASC tie-break.
+function handleChatReorder(ids: readonly string[]): void {
+  const before = CHAT.value.slice();
+  const byId = new Map(before.map((c) => [c.id, c] as const));
+  const next = ids.map((id) => byId.get(id)).filter((c): c is NonNullable<typeof c> => !!c);
+  // Defensive: if the incoming ids set doesn't match the current list
+  // (race with a concurrent add), bail rather than dropping rows.
+  if (next.length !== before.length) {
+    toast.push('Chat list changed during reorder — refresh and try again', { tone: 'error' });
+    return;
+  }
+  CHAT.value = next;
+  void placementsApi.chatReorder(props.id, [...ids]).catch(() => {
+    CHAT.value = before;
+    toast.push('Could not save chat reorder', { tone: 'error' });
+  });
+}
+
+function handlePollsReorder(ids: readonly string[]): void {
+  const before = POLLS.value.slice();
+  const byId = new Map(before.map((p) => [p.id, p] as const));
+  const next = ids.map((id) => byId.get(id)).filter((p): p is NonNullable<typeof p> => !!p);
+  if (next.length !== before.length) {
+    toast.push('Polls list changed during reorder — refresh and try again', { tone: 'error' });
+    return;
+  }
+  POLLS.value = next;
+  void placementsApi.pollsReorder(props.id, [...ids]).catch(() => {
+    POLLS.value = before;
+    toast.push('Could not save polls reorder', { tone: 'error' });
+  });
+}
+
 function onSlideClick(slideId: string): void {
   focusedSlideId.value = slideId;
   if (slideRailMode.value === 'focus') {
@@ -979,6 +1016,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
             :placements="placements"
             @unplace="handleRemoveAnchor"
             @place-at-active="handlePlaceAtActive"
+            @reorder="handleChatReorder"
           />
           <PollsTab
             v-else
@@ -988,6 +1026,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
             :placements="placements"
             @unplace="handleRemoveAnchor"
             @place-at-active="handlePlaceAtActive"
+            @reorder="handlePollsReorder"
           />
         </div>
       </aside>
