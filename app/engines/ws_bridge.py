@@ -8,6 +8,8 @@ via `start_ws_bridge(ws_manager)` and forwards each message to all
 clients currently connected to that session's WebSocket.
 
 Closes audit gaps 🟠 #19 (no WS bridge), 🟡 (live status). Phase 6n / U130-U132.
+
+Related ADRs: ADR-008 (WebSocket architecture — session-scoped Redis pub/sub).
 """
 from __future__ import annotations
 

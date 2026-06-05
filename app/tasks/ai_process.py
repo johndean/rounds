@@ -11,6 +11,9 @@ Ports the `_process_direct` half of MIC `app/tasks/ai_process.py:79-300`
 into the Rounds schema (start_ms / end_ms / seq / flags JSONB).
 
 Pipeline 2 (enhanced — refines an STT transcript) lives in 6m.
+
+Related ADRs: ADR-006 (Celery queue processing).
+Related business rules: BR-015 (Gemini hallucination-loop detector).
 """
 from __future__ import annotations
 

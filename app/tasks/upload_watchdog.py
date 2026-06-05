@@ -24,6 +24,9 @@ this is a NEW file, does NOT touch any C1-locked file (gcs_upload.py,
 ingest.py, ai_process.py, transcribe.py, normalize.py, align.py,
 fusion.py, classify_task.py, finalize.py, anchor_task.py, frame_task.py,
 slide_extract.py, lcs_discrepancies.py, burn_captions.py, kp_task.py).
+
+Related ADRs: ADR-006 (Celery Beat scheduler).
+Related business rules: BR-014 (upload-stuck threshold).
 """
 from __future__ import annotations
 

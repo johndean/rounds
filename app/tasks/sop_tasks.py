@@ -13,6 +13,9 @@ Two tasks here:
     helper when wired (deferred).
 
 Phase 7g. Closes residual 🟠 (SOP auto-advance + deadline notifications).
+
+Related ADRs: ADR-006 (Celery queue + Beat scheduler).
+Related business rules: BR-003 (SLA hours table), BR-004 (23h throttle), BR-005 (0h grace period).
 """
 from __future__ import annotations
 

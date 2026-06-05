@@ -13,6 +13,10 @@
  *   • FIXTURE-DEMO (prototype.html): no props → falls through to the
  *     original fixture SEGMENTS + DISCREPANCIES + AI-text-as-STT path so
  *     the React-port demo keeps rendering identically.
+ *
+ * Related ADRs: ADR-005 (corrections — Mark OK + Dismiss write corrections).
+ * Related business rules: BR-006 (priority scoring drives row order),
+ * BR-018 (Mark OK auto-closes discrepancies on the same segment).
  */
 import { computed, ref } from 'vue';
 import Icon from '@/components/shared/Icon.vue';

@@ -3,6 +3,17 @@
  *
  * Typed thin wrappers around http(). Endpoint shapes mirror the backend
  * routers in app/api/*.
+ *
+ * Critical invariants:
+ *   - The envelope contract is enforced server-side (app/middleware/envelope.py);
+ *     these wrappers always receive {success, data, error, meta}. http()
+ *     unwraps `data` on success and throws ApiError on `success=false`.
+ *   - Title precedence cascade (BR-019): when displaying a session title,
+ *     use long → short → fallback. Do not invert.
+ *
+ * Related ADRs: ADR-009 (React SSOT + Vue port discipline).
+ * Related business rules: BR-019 (title precedence cascade), BR-013
+ * (signed-URL TTL surfaced as `expires_in` on /add/signed-url).
  */
 import { http, getToken, ApiError } from './http';
 

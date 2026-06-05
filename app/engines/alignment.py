@@ -19,6 +19,9 @@ Phase 7i (parity-3) — closes the alignment drift gaps from re-audit:
   • #34 dead duplicate run_pre_ready_gate removed
 
 Pre-ready gate moved to canonical home in engines/pre_ready_gate.py.
+
+Related ADRs: ADR-007 (locked scoring weights).
+Related business rules: BR-009 (alignment weights), BR-006 (drift confidence → priority score).
 """
 from __future__ import annotations
 

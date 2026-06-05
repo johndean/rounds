@@ -1,6 +1,15 @@
 """
 /v1/diag — diagnostic endpoints (GCS QA, classify-route, SMTP test).
 Settings → Diagnostics drill-in (IMPLEMENTATION.md §10).
+
+Operator rescue + queue surgery + auth recovery routes (see CLAUDE.md
+"Emergency operator commands" for the full curl catalog). All routes
+require a logged-in CurrentUser; admin-gated routes additionally enforce
+LEGACY_ADMIN_EMAIL via require_admin.
+
+Related ADRs: ADR-002 (session lifecycle — reingest uses the failed→ingesting
+escape hatch), ADR-006 (queue processing), ADR-001 (auth).
+Related business rules: BR-001 (admin gate), BR-007 (FSM escape hatch).
 """
 from __future__ import annotations
 

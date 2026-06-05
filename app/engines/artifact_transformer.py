@@ -6,6 +6,9 @@ Ports MIC `app/engines/artifact_transformer.py` (540 LOC). Each public
 function returns raw bytes for the caller to stream out via FastAPI.
 
 Phase 6p / U141-U142. Closes audit gap 🟠 #11.
+
+Related ADRs: ADR-004 (single-source export engine).
+Related business rules: BR-016 (format-specific markup stripping), BR-017 (Unknown speaker fallback).
 """
 from __future__ import annotations
 

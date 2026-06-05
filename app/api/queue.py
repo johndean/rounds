@@ -11,6 +11,9 @@ Closes the "Queue visibility" requirement. The Phase 1 baseline
 flagged that there was no per-user queue endpoint and the Dashboard's
 "Your Queue" widget was just `allSessions.slice(0, 3)` — globally
 sliced, not assignee-filtered.
+
+Related ADRs: ADR-006 (queue processing).
+Related business rules: BR-003 (SLA hours table mirrored here).
 """
 from __future__ import annotations
 

@@ -22,6 +22,9 @@ Phase 7j (zero-gap parity) — verbatim port of MIC fusion model:
   • Anchor + semantic pulled from rounded-timestamp maps within ±5s
   • NO slide_count parameter, NO proportional padding
   • 3s merge-nearby window, 5s soft-window expansion
+
+Related ADRs: ADR-007 (locked scoring weights).
+Related business rules: BR-008 (fusion weights), BR-011 (visual-change threshold).
 """
 from __future__ import annotations
 

@@ -33,6 +33,13 @@ sentence — MIC ships the raw STT instead so the human reviewer sees the
 unedited text and can correct from there.
 
 Phase 7j / parity-4 zero-gap.
+
+Critical invariant: raw_text fallback is clinical-safety locked. A drug
+name dropped during normalization MUST ship as raw STT, not as a silently
+broken sentence — never weaken this fallback without an audit pass.
+
+Related ADRs: ADR-007 (IIL TIER2 + locked weights).
+Related business rules: BR-010 (IIL TIER2 gate), BR-016 (TIER1 filler set).
 """
 from __future__ import annotations
 

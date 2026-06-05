@@ -19,6 +19,16 @@
  * leading + trailing edges, ported from MIC stores/playback.js:116-139. Without
  * this the unthrottled 30+ Hz default fires the per-word highlight watcher in
  * TranscriptPane too often on large sessions.
+ *
+ * Critical invariants:
+ *   - <track> element receives a Blob URL (authenticated fetch + URL.createObjectURL)
+ *     because <track> cannot carry Authorization headers. Server ETag-caches
+ *     captions.vtt (ADR-005) so the underlying fetch is cheap on remount.
+ *   - Scrubber drag-to-seek uses pointerdown/move/up + requestAnimationFrame
+ *     throttle. Native <input range> drag is not used (causes jank at scale).
+ *
+ * Related ADRs: ADR-004 (export engine — captions.vtt endpoint), ADR-005
+ * (corrections fingerprint drives caption ETag invalidation).
  */
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
 import Icon from '@/components/shared/Icon.vue';

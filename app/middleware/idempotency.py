@@ -12,6 +12,8 @@ Pattern (audit §6 IDEMPOTENCY_KEY_TTL_SECONDS=86400):
     {status: "processing"} (#8 — prevents duplicate concurrent submits).
 
 Phase 7i (parity-3): closes 🟠 #8 + #9.
+
+Related business rules: BR-012 (86400s TTL).
 """
 from __future__ import annotations
 

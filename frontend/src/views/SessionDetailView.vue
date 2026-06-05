@@ -10,6 +10,11 @@
  *
  * Empty arrays render empty-state copy; layout stays intact so visual
  * parity vs React holds whether the session has been ingested or not.
+ *
+ * Related ADRs: ADR-002 (session lifecycle — soft-delete + status FSM),
+ * ADR-009 (React SSOT — see docs/port-source/session-detail.jsx).
+ * Related business rules: BR-007 (FSM allowed transitions surfaced as
+ * status chips), BR-019 (title precedence cascade).
  */
 import { computed, onMounted, ref } from 'vue';
 import Icon from '@/components/shared/Icon.vue';

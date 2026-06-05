@@ -26,6 +26,9 @@ widening the admit set; the verification workflow flagged this and the
 helper is now a strict drop-in replacement for the existing
 ``user.email != ADMIN_EMAIL`` patterns. See ``is_admin`` docstring for
 the formal contract.
+
+Related ADRs: ADR-001 (authentication).
+Related business rules: BR-001 (LEGACY_ADMIN_EMAIL bootstrap admin gate).
 """
 from __future__ import annotations
 

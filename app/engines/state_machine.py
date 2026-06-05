@@ -12,6 +12,9 @@ Two entry points:
   • `transition_session_sync()`   sync, used by Celery tasks
 
 Both raise `ConflictError` on illegal transitions — FastAPI maps to 409.
+
+Related ADRs: ADR-002 (session lifecycle), ADR-003 (Python-only FSM).
+Related business rules: BR-007 (ALLOWED_TRANSITIONS).
 """
 from __future__ import annotations
 

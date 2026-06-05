@@ -21,6 +21,9 @@ Routes:
 Closes audit Phase 4. Frontend re-enable of Editor Undo/Redo +
 FindReplaceModal + inline saves lives in Phase 4b after the editor
 gets real-data wiring (currently fixture-driven).
+
+Related ADRs: ADR-005 (corrections ledger + pointer undo/redo).
+Related business rules: BR-006 (confidence-priority scoring), BR-018 (auto-close types).
 """
 from __future__ import annotations
 

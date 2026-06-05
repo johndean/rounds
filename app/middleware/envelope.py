@@ -15,6 +15,10 @@ Closes 🟠 #11 (envelope dropped across all responses) + 🟡 #12 (request_id
 not in response body — header-only).
 
 Phase 7i / parity-3.
+
+Critical invariant: every JSON response MUST be envelope-shaped. The middleware
+is the only place this contract is enforced. Direct `Response(json.dumps(...))`
+in a handler bypasses it — don't do that.
 """
 from __future__ import annotations
 

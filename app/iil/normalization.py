@@ -21,6 +21,9 @@ JSONB blob in `normalization_results.validation_results`.
 
 Phase 7c. Closes residual 🟠 (Rounds' normalize was simple word substitution
 without RULE 3 protection / TIER 2 conditional logic / TIER 3 compression).
+
+Related ADRs: ADR-007 (locked weights — IIL_TIER2_DEFAULT_THRESHOLD = 0.7).
+Related business rules: BR-010 (IIL TIER2 gate), BR-016 (TIER1_WORDS filler set).
 """
 from __future__ import annotations
 

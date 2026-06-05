@@ -12,6 +12,10 @@
  * /v1/diag/* with native browser confirmation prompts. Server gates the
  * routes via CurrentUser; the v-if here is a UX guard so non-admins don't
  * see destructive buttons.
+ *
+ * Related ADRs: ADR-001 (admin gate), ADR-006 (operator rescue routes).
+ * Related business rules: BR-001 (LEGACY_ADMIN_EMAIL — UX gate mirrors
+ * server gate; server is the authoritative check).
  */
 import { computed, ref } from 'vue';
 import { slideAccent, type Slide, type Segment } from '@/fixtures/transcript';

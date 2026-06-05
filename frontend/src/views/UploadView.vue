@@ -13,6 +13,15 @@
  *           PUT  <signed_url>        → bytes go straight to GCS
  *      c. POST /v1/gcs/upload-complete (R7 scope-validated, writes Source rows)
  *      d. Router push to /p/<session_id> for ingest progress (Phase 6)
+ *
+ * Critical invariants:
+ *   - Direct-to-GCS PUT (R7 invariant on upload-complete validates scope).
+ *   - Signed URL is single-use, 1h TTL (BR-013). Browser must finish the PUT
+ *     before the URL expires; slow uploads get a re-request on 401/403.
+ *
+ * Related ADRs: ADR-009 (React SSOT — see docs/port-source/upload.jsx).
+ * Related business rules: BR-013 (signed-URL TTL), BR-014 (upload-stuck
+ * threshold — watchdog rescues abandoned uploading sessions).
  */
 import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';

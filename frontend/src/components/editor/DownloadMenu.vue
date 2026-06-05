@@ -7,6 +7,10 @@
  * Replaces the previous toast-only stub. The exportsApi helper streams
  * the artifact bytes as a Blob and triggers a browser save dialog via
  * a transient <a download> element.
+ *
+ * Related ADRs: ADR-004 (single-source export engine).
+ * Related business rules: BR-016 (format-specific markup stripping —
+ * docx/txt strip, srt/vtt preserve), BR-017 ("(Unknown)" speaker fallback).
  */
 import { ref, onMounted, onUnmounted } from 'vue';
 import Icon from '@/components/shared/Icon.vue';

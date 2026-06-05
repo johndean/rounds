@@ -3,6 +3,14 @@
 
 Supports the frontend's ?stage / ?ai / ?f query params for filtered lists
 (IMPLEMENTATION.md §6 + §9 Pipeline circles → /sessions?ai=… or ?stage=…).
+
+Critical invariants:
+    - Every status mutation MUST go through app/engines/state_machine.py
+      (ADR-003 — no DB-level CHECK constraint).
+    - Soft-delete / restore / purge gated by SESSION_TRASH_ALLOWED (BR-002).
+
+Related ADRs: ADR-002 (session lifecycle), ADR-003 (FSM Python-only).
+Related business rules: BR-001 (admin gate), BR-002 (trash carve-out), BR-007 (FSM transitions).
 """
 from __future__ import annotations
 

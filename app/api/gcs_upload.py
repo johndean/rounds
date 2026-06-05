@@ -11,6 +11,12 @@ Phase 7i: closes residual gaps from re-audit
   • #36       Structured upload-complete summary log line
   • #40       Pydantic enforces files non-empty
   • #41       Session existence verified before INSERT into sources
+
+Critical invariant: R7 — /upload-complete REJECTS any gcs_uri outside
+gs://<bucket>/sessions/<id>/. Enforced by app/services/gcs.py
+find_out_of_scope_uri + tests/test_gcs_scope.py.
+
+Related business rules: BR-013 (signed-URL TTL = 3600s).
 """
 from __future__ import annotations
 

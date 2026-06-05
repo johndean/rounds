@@ -15,6 +15,9 @@ This file deliberately keeps the surface narrow:
 `LLMError.category` is one of:
   gemini_overloaded | gemini_quota | gemini_config | gemini_error
 The worker uses these to mark sessions failed with a useful reason.
+
+Related ADRs: ADR-006 (queue processing + retries).
+Related business rules: BR-015 (Gemini hallucination-loop detector lives in ai_process.py, not here).
 """
 from __future__ import annotations
 

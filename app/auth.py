@@ -9,6 +9,9 @@ var is unused and can be cleared.
 
 Tokens are unchanged: HS256, signed with API_SECRET_KEY, expire after
 ACCESS_TOKEN_EXPIRE_MINUTES (default 480 = 8 hours).
+
+Related ADRs: ADR-001 (authentication).
+Related business rules: BR-001 (LEGACY_ADMIN_EMAIL), BR-020 (env-CSV fallback).
 """
 from __future__ import annotations
 

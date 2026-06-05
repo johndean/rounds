@@ -9,6 +9,9 @@ Phase 6p / U142. Phase C1 (2026-06-05) adds the captions.vtt route with
 ETag + Cache-Control so the editor's <track> tag doesn't re-fetch every
 mount; the ETag fingerprints (session_id, max corrections.sequence_number)
 so the cache invalidates the moment any correction lands.
+
+Related ADRs: ADR-004 (export engine), ADR-005 (corrections ETag fingerprint).
+Related business rules: BR-016 (format-specific stripping), BR-017 (Unknown speaker fallback).
 """
 from __future__ import annotations
 

@@ -14,6 +14,19 @@
  * Empty state until the ingest pipeline (Phase 6) produces rows. The 3-column
  * layout, slide rail, transcript pane, STT pane, discrepancies pane, audit
  * pane, and right-rail tabs all render their empty-state copy gracefully.
+ *
+ * Critical invariants:
+ *   - React JSX at docs/port-source/editor.jsx is the SINGLE SOURCE OF TRUTH
+ *     for layout / class names / data-test-ids. Do not edit the Vue template
+ *     to "improve" structure — diverging from the JSX is a regression.
+ *   - Every edit becomes an append-only corrections row (ADR-005). Undo/redo
+ *     are pointer moves, never row deletions.
+ *
+ * Related ADRs: ADR-005 (corrections ledger), ADR-009 (editor architecture),
+ * ADR-008 (WebSocket — receives correction events from other tabs + worker),
+ * ADR-010 (hash-routed SPA).
+ * Related business rules: BR-001 (Admin tab gate), BR-006 (discrepancy
+ * priority order), BR-018 (Mark OK auto-closes discrepancies).
  */
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { RouterLink, useRouter } from 'vue-router';

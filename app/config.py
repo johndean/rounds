@@ -5,6 +5,15 @@ The 47-var table from the audit is materialized here as a single Pydantic
 Settings class. Defaults match the audit table verbatim, with two exceptions:
   • Vault fields are removed (audit §5: scaffold-only; never wired).
   • VERTEX_AI_GEMINI_API_KEY removed (audit §3.3: vestigial — never read).
+
+Critical invariant: every value under the "LOCKED weights (audit §6)" block
+header is pinned by tests/test_health.py::test_locked_weights_match_audit.
+Drift requires a coordinated config + test update + plan-doc justification.
+
+Related ADRs: ADR-007 (locked scoring weights).
+Related business rules: BR-008 (fusion weights), BR-009 (alignment weights),
+BR-010 (IIL TIER2 gate), BR-011 (visual-change threshold), BR-012 (idempotency
+TTL), BR-014 (upload-stuck threshold).
 """
 from typing import Optional
 

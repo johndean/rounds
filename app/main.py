@@ -5,6 +5,19 @@ Phase 1 scaffold — only /v1/health is wired so CI + Railway healthchecks pass.
 Domain routers (auth, sessions, gcs_upload, segments, slides, discrepancies,
 sop, audit, improvements, settings, exports, diagnostics, ws) land in
 Phases 5-7 per docs/plans/2026-05-17-001-feat-rounds-bootstrap-plan.md.
+
+Critical invariants:
+    - Middleware stack ordering (outermost-first per add order):
+        RequestIdMiddleware → EnvelopeMiddleware → IdempotencyMiddleware → CORS.
+        Envelope MUST sit below RequestId so meta.request_id can read it.
+    - WS bridge starts in lifespan AFTER auth_users seed; tasks publishing
+      events before the bridge is up will simply have no listeners.
+    - SPA fallback at the bottom has a path-traversal guard — do not remove.
+
+Related ADRs: ADR-001 (auth seed), ADR-006 (queue + WS bridge),
+ADR-008 (WebSocket architecture), ADR-010 (hash-routed SPA).
+Related business rules: BR-001 (admin gate), BR-012 (idempotency TTL),
+BR-020 (env-CSV fallback).
 """
 import asyncio
 from contextlib import asynccontextmanager

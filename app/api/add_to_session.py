@@ -14,6 +14,13 @@ Phase 6-style staging path keeps the surface self-contained:
   gs://<bucket>/sessions/{id}/staging/phase6/<uuid>/<filename>
 
 The bucket lifecycle reaps abandoned uploads at 48h — no Redis, no token table.
+
+Critical invariant: every signed PUT URL is scoped to the session's
+gs://<bucket>/sessions/<id>/staging/phase6/ prefix (R7 invariant — see
+app/services/gcs.py). A leaked URL has limited blast radius (1h TTL,
+session-scoped path).
+
+Related business rules: BR-013 (signed-URL TTL = 3600s).
 """
 from __future__ import annotations
 
