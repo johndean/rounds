@@ -30,10 +30,11 @@ def _client() -> TestClient:
         "/v1/help/admin/fix-summaries",
         "/v1/help/admin/expand-steps",
         "/v1/help/admin/expand-faqs",
+        "/v1/help/admin/generate-faq-corpus",  # Phase 5
     ],
 )
 def test_phase4_admin_routes_registered_and_auth_gated(path):
-    """Without a bearer token, every Phase 4 admin route returns 401 —
+    """Without a bearer token, every Phase 4/5 admin route returns 401 —
     proving it's mounted under the auth-gated router. 404 would mean the
     route is missing entirely."""
     client = _client()
@@ -103,7 +104,7 @@ def test_row_to_dict_handles_null_jsonb():
 
 
 def test_celery_help_tasks_registered():
-    """All three tasks should be picked up by celery_app.conf.include
+    """All four tasks should be picked up by celery_app.conf.include
     via the 'app.tasks.help_tasks' entry."""
     from app.tasks.celery_app import celery_app
     # Importing app.tasks.help_tasks triggers @celery_app.task decorators.
@@ -113,3 +114,112 @@ def test_celery_help_tasks_registered():
     assert "rounds.tasks.help.fix_summaries" in names
     assert "rounds.tasks.help.expand_steps" in names
     assert "rounds.tasks.help.expand_faqs" in names
+    assert "rounds.tasks.help.generate_faq_corpus" in names
+
+
+# ─── Phase 5 — generate_faq_corpus dev-speak filter + route table ──────
+
+
+def test_contains_devspeak_catches_vue_component_name():
+    from app.tasks.help_tasks import _contains_devspeak
+    assert _contains_devspeak("Open the SpeakerEditPanel on the right") == "SpeakerEditPanel"
+
+
+def test_contains_devspeak_catches_db_term():
+    from app.tasks.help_tasks import _contains_devspeak
+    assert _contains_devspeak("The correction ledger logs every edit") == "correction ledger"
+
+
+def test_contains_devspeak_catches_http_route():
+    from app.tasks.help_tasks import _contains_devspeak
+    found = _contains_devspeak("Call GET /v1/sessions/abc to fetch")
+    assert found is not None
+    assert "/v1/" in found
+
+
+def test_contains_devspeak_catches_framework_name():
+    from app.tasks.help_tasks import _contains_devspeak
+    assert _contains_devspeak("The FastAPI route validates") == "FastAPI"
+
+
+def test_contains_devspeak_catches_phase_marker():
+    """Phase markers are caught via regex `\\bphase\\s*\\d` — the match
+    is the prefix 'Phase 9' (the regex stops at the first digit), not
+    the full '9.5' version string. Either is sufficient for rejection."""
+    from app.tasks.help_tasks import _contains_devspeak
+    found = _contains_devspeak("Phase 9.5 introduced spellcheck")
+    assert found is not None
+    assert "phase 9" in found.lower()
+
+
+def test_contains_devspeak_catches_arbitrary_phase_number():
+    """Regex catches any phase marker, not just the two literal strings
+    that were in the original blacklist."""
+    from app.tasks.help_tasks import _contains_devspeak
+    for raw in ("Phase 1 work", "Phase 4 of the port", "phase 12 cleanup"):
+        assert _contains_devspeak(raw) is not None, f"{raw!r} should be flagged"
+
+
+def test_contains_devspeak_catches_paraphrased_dev_terms():
+    """Hardened 2026-06-05: the blacklist now catches the spaced /
+    paraphrased forms an LLM realistically emits, not just the literal
+    snake_case identifiers."""
+    from app.tasks.help_tasks import _contains_devspeak
+    paraphrases = [
+        "Open the speaker edit panel",       # was: SpeakerEditPanel
+        "Check the audit events table",       # was: audit_events
+        "Open the help articles table",       # was: help_articles
+        "The background worker runs at 60s",  # generic celery synonym
+    ]
+    for p in paraphrases:
+        assert _contains_devspeak(p) is not None, f"missed paraphrase: {p!r}"
+
+
+def test_contains_devspeak_catches_dotvue_reference():
+    """Regex catches any FooBar.vue mention."""
+    from app.tasks.help_tasks import _contains_devspeak
+    assert _contains_devspeak("Edit HelpFaqAccordion.vue to add a chip") is not None
+
+
+def test_contains_devspeak_catches_env_var_pattern():
+    """Regex catches SCREAMING_SNAKE env-var-like identifiers."""
+    from app.tasks.help_tasks import _contains_devspeak
+    assert _contains_devspeak("Set HELP_ASK_AI_ENABLED in the env") is not None
+
+
+def test_contains_devspeak_returns_none_on_clean_copy():
+    from app.tasks.help_tasks import _contains_devspeak
+    clean = (
+        "Click the Editor in the top bar. The transcript appears in the middle pane. "
+        "Type a correction and click Save. Your change is recorded and reversible."
+    )
+    assert _contains_devspeak(clean) is None
+
+
+def test_contains_devspeak_case_insensitive():
+    """Lower-casing the input ensures common case variants are caught."""
+    from app.tasks.help_tasks import _contains_devspeak
+    assert _contains_devspeak("the speakereditpanel") == "SpeakerEditPanel"
+    assert _contains_devspeak("FASTAPI") == "FastAPI"
+
+
+def test_faq_generator_routes_cover_phase1_route_inventory():
+    """Sanity check that the route table the FAQ generator iterates
+    covers all the Phase-1 HELP_CONTENT routes (drift sentinel)."""
+    from app.tasks.help_tasks import _FAQ_GENERATOR_ROUTES
+    page_keys = {r[0] for r in _FAQ_GENERATOR_ROUTES}
+    expected = {
+        "dashboard", "sessions", "session-detail", "editor", "sop",
+        "upload", "improvements", "settings", "audit", "viewer",
+        "processing", "help",
+    }
+    missing = expected - page_keys
+    assert not missing, f"FAQ generator route table missing: {missing}"
+
+
+def test_faq_generator_routes_have_friendly_labels():
+    """Every entry must have a non-empty page_key + content_domain + label,
+    or the prompt template renders blank substitutions."""
+    from app.tasks.help_tasks import _FAQ_GENERATOR_ROUTES
+    for page_key, content_domain, friendly in _FAQ_GENERATOR_ROUTES:
+        assert page_key and content_domain and friendly, (page_key, content_domain, friendly)

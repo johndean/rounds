@@ -188,3 +188,13 @@ export async function expandSteps(): Promise<EnqueueResponse> {
 export async function expandFaqs(): Promise<EnqueueResponse> {
   return http<EnqueueResponse>('/v1/help/admin/expand-faqs', { method: 'POST' });
 }
+
+/**
+ * Enqueue the generate_faq_corpus_task (Phase 5). One-time AI seed:
+ * drafts one FAQ article per registered route, validates against
+ * CC-Rounds + a dev-speak blacklist, inserts as drafts for admin
+ * review. Safe to invoke multiple times (slug-based idempotency).
+ */
+export async function generateFaqCorpus(): Promise<EnqueueResponse> {
+  return http<EnqueueResponse>('/v1/help/admin/generate-faq-corpus', { method: 'POST' });
+}

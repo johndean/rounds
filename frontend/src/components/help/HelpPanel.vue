@@ -26,10 +26,12 @@ import { useRoute } from 'vue-router';
 import { useHelpStore } from '@/stores/help';
 import { useAuthStore } from '@/stores/auth';
 import HelpItem from '@/components/help/HelpItem.vue';
+import HelpFaqAccordion from '@/components/help/HelpFaqAccordion.vue';
 import HelpAskComposer from '@/components/help/HelpAskComposer.vue';
 import Icon from '@/components/shared/Icon.vue';
 import { resolvePageKey } from '@/utils/routeToPageKey';
 import { LEGACY_ADMIN_EMAIL_CLIENT } from '@/constants/help-content';
+import { listArticles, type HelpArticleDTO } from '@/services/helpArticlesApi';
 
 const help = useHelpStore();
 const auth = useAuthStore();
@@ -72,6 +74,80 @@ const pageEntry = computed(() => {
 const pageTitle = computed(() => pageContent.value?.title ?? 'Help');
 
 const isSearching = computed(() => query.value.trim().length >= 2);
+
+// ── FAQ tab API source (Phase 5 cutover) ─────────────────────────────
+// When the FAQ tab is shown, fetch all published faq-category articles
+// from /v1/help/articles. If the API returns any results, render them
+// through HelpFaqAccordion (full title + summary + steps + cross-links).
+// If the API errors or returns empty (no DB / no AI seed yet), fall
+// back to the hardcoded HELP_CONTENT.faq array via HelpItem (Phase 1
+// posture). The cutover is non-destructive: removing the seed in the
+// DB silently returns the user to the hardcoded list.
+const faqArticles = ref<HelpArticleDTO[]>([]);
+const faqLoading = ref(false);
+const faqLoaded = ref(false);
+
+async function loadFaqArticles(): Promise<void> {
+  if (faqLoaded.value || faqLoading.value) return;
+  faqLoading.value = true;
+  try {
+    // List every published article and filter to category="faq" or
+    // category="faq:*". Tight filter — a stray "non-faq-internal"
+    // category used to slip through a loose includes('faq') check.
+    // The endpoint is audience-filtered server-side for non-admins, so
+    // we get only published-to-users rows. We do NOT request audience
+    // explicitly — the default behavior of the server is correct.
+    const all = await listArticles({ limit: 200 });
+    faqArticles.value = all.filter((a) => {
+      const cat = (a.category || '').toLowerCase();
+      const isFaq = cat === 'faq' || cat.startsWith('faq:');
+      return isFaq && a.is_published;
+    });
+    // Only mark "loaded" on SUCCESS — a transient error should let the
+    // next FAQ-tab open retry the fetch (the fallback hardcoded list
+    // renders in the meantime).
+    faqLoaded.value = true;
+  } catch {
+    faqArticles.value = [];
+  } finally {
+    faqLoading.value = false;
+  }
+}
+
+// Trigger the fetch the FIRST time the user switches to the FAQ tab.
+// Caching: the result stays for the panel session. Closing + reopening
+// the panel does not invalidate the cache.
+watch(activeTab, (next) => {
+  if (next === 'faq') void loadFaqArticles();
+});
+
+// Invalidate the FAQ cache when the signed-in user changes. The server
+// audience filter masks admin-only rows for non-admins — if a different
+// user (or admin) signs in inside the same SPA session, the cached
+// non-admin result would otherwise look stale.
+watch(
+  () => auth.email,
+  () => {
+    faqLoaded.value = false;
+    faqArticles.value = [];
+  },
+);
+
+// When the user clicks a related-article chip inside a FAQ accordion,
+// scroll the panel body to the matching FAQ article in the same list.
+// Best-effort: only works when the target is in the currently-loaded
+// FAQ corpus. Full in-panel article-swap UX is a follow-up.
+function onOpenRelated(articleId: string): void {
+  const i = faqArticles.value.findIndex((a) => a.id === articleId);
+  if (i < 0) return;
+  void nextTick(() => {
+    const els = document.querySelectorAll<HTMLElement>(
+      '[data-test-id="help-faq-api-list"] .help-faq',
+    );
+    const target = els[i];
+    if (target) target.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
+}
 
 // Reset state on (re)open + auto-focus search.
 watch(() => help.open, async (isOpen) => {
@@ -234,13 +310,27 @@ onUnmounted(() => {
           </div>
         </template>
 
-        <!-- FAQ -->
+        <!-- FAQ — Phase 5 cutover: prefer API-fetched faq-category articles;
+             fall back to hardcoded HELP_CONTENT.faq when the API is
+             empty or unreachable. -->
         <template v-if="!isSearching && activeTab === 'faq'">
           <div class="help-pagehead">
             <div class="help-pagehead__role">Frequently asked</div>
             <p class="help-pagehead__intro">Top questions across all roles.</p>
           </div>
-          <div class="help-list">
+
+          <!-- API-backed FAQ list -->
+          <div v-if="faqArticles.length > 0" class="help-list" data-test-id="help-faq-api-list">
+            <HelpFaqAccordion
+              v-for="a in faqArticles"
+              :key="a.id"
+              :article="a"
+              @open-related="onOpenRelated"
+            />
+          </div>
+
+          <!-- Hardcoded fallback (Phase 1 corpus) -->
+          <div v-else class="help-list" data-test-id="help-faq-fallback-list">
             <HelpItem
               v-for="(t, i) in help.resolved.faq"
               :key="`f-${i}`"

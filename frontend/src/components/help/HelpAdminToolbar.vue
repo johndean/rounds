@@ -28,6 +28,7 @@ import {
   fixSummaries,
   expandSteps,
   expandFaqs,
+  generateFaqCorpus,
   type BulkPublishResponse,
 } from '@/services/helpArticlesApi';
 
@@ -41,6 +42,7 @@ const publishing = ref(false);
 const fixing = ref(false);
 const expandingHelp = ref(false);
 const expandingFaqs = ref(false);
+const seedingFaqs = ref(false);
 
 async function onPublishAll(): Promise<void> {
   if (publishing.value) return;
@@ -102,6 +104,27 @@ async function onExpandFaqs(): Promise<void> {
     expandingFaqs.value = false;
   }
 }
+
+async function onGenerateFaqCorpus(): Promise<void> {
+  if (seedingFaqs.value) return;
+  if (!confirm(
+    'Generate AI FAQ corpus? Drafts one FAQ article per page (a dozen+ articles). ' +
+    'Output passes a strict dev-speak filter and CC-Rounds thresholds before insert. ' +
+    'Each draft lands as is_published=false for your review. Safe to re-run (slug-based idempotency).',
+  )) return;
+  seedingFaqs.value = true;
+  try {
+    const res = await generateFaqCorpus();
+    toast.push(
+      `Queued FAQ corpus seed (task ${res.task_id.slice(0, 8)}). Drafts appear over the next minute.`,
+      { tone: 'success' },
+    );
+  } catch (e) {
+    toast.push(e instanceof Error ? e.message : 'Could not enqueue FAQ corpus seed', { tone: 'error' });
+  } finally {
+    seedingFaqs.value = false;
+  }
+}
 </script>
 
 <template>
@@ -124,6 +147,10 @@ async function onExpandFaqs(): Promise<void> {
     <button class="hat__btn" type="button" :disabled="expandingFaqs" data-test-id="help-admin-expand-faqs" @click="onExpandFaqs">
       <Icon name="list" :size="12" />
       {{ expandingFaqs ? 'Queuing…' : 'Expand FAQs' }}
+    </button>
+    <button class="hat__btn" type="button" :disabled="seedingFaqs" data-test-id="help-admin-seed-faqs" @click="onGenerateFaqCorpus">
+      <Icon name="sparkles" :size="12" />
+      {{ seedingFaqs ? 'Queuing…' : 'Generate FAQ corpus' }}
     </button>
     <button class="hat__btn hat__btn--ghost" type="button" aria-label="Refresh list" @click="emit('refresh')">
       <Icon name="history" :size="12" /> Refresh

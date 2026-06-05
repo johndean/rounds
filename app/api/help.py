@@ -932,3 +932,17 @@ async def admin_expand_steps(user: CurrentUser) -> dict:
 async def admin_expand_faqs(user: CurrentUser) -> dict:
     require_admin(user)
     return _enqueue("rounds.tasks.help.expand_faqs")
+
+
+@router.post("/admin/generate-faq-corpus")
+async def admin_generate_faq_corpus(user: CurrentUser) -> dict:
+    """Phase 5 — enqueue the one-time AI FAQ corpus seed task. Returns
+    the Celery task_id; the task drafts one FAQ article per route in
+    the registered route table, validates against CC-Rounds + a
+    dev-speak blacklist, and inserts each as a draft for admin review.
+
+    Re-invoking is safe — each insert uses a deterministic slug
+    `faq-ai-{page_key}` with ON CONFLICT DO NOTHING, so routes that
+    already have an AI-seeded article are skipped."""
+    require_admin(user)
+    return _enqueue("rounds.tasks.help.generate_faq_corpus")
