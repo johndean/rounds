@@ -20,17 +20,29 @@ def _user(email: str) -> SimpleNamespace:
 
 class TestIsAdminLegacyFallback:
     """When ``role`` is not provided, behavior must match the existing
-    five hardcoded ``user.email != ADMIN_EMAIL`` checks exactly."""
+    five hardcoded ``user.email != ADMIN_EMAIL`` checks exactly. Phase
+    7.3 (2026-06-05) tightened the helper after the verification
+    workflow flagged that earlier whitespace/case tolerance silently
+    widened the admin set vs. the legacy checks."""
 
     def test_legacy_admin_email_is_admin(self):
         assert is_admin(_user(LEGACY_ADMIN_EMAIL)) is True
 
-    def test_legacy_admin_email_is_case_insensitive(self):
-        assert is_admin(_user(LEGACY_ADMIN_EMAIL.upper())) is True
-        assert is_admin(_user(LEGACY_ADMIN_EMAIL.title())) is True
+    def test_legacy_admin_email_uppercase_is_not_admin(self):
+        # Phase 7.3 tightened: case-sensitive exact match mirrors the
+        # legacy `user.email != ADMIN_EMAIL` strict equality. An
+        # auth_users row stored with non-canonical casing won't
+        # spuriously become admin.
+        assert is_admin(_user(LEGACY_ADMIN_EMAIL.upper())) is False
+        assert is_admin(_user(LEGACY_ADMIN_EMAIL.title())) is False
 
-    def test_legacy_admin_email_whitespace_tolerant(self):
-        assert is_admin(_user(f"  {LEGACY_ADMIN_EMAIL}  ")) is True
+    def test_legacy_admin_email_whitespace_padded_is_not_admin(self):
+        # Phase 7.3 tightened: whitespace-sensitive. A leading/trailing
+        # space in the DB row would be a data-integrity bug; the helper
+        # must NOT paper over it.
+        assert is_admin(_user(f"  {LEGACY_ADMIN_EMAIL}  ")) is False
+        assert is_admin(_user(f" {LEGACY_ADMIN_EMAIL}")) is False
+        assert is_admin(_user(f"{LEGACY_ADMIN_EMAIL} ")) is False
 
     def test_non_admin_email_is_not_admin(self):
         assert is_admin(_user("someone@example.com")) is False
@@ -51,21 +63,31 @@ class TestIsAdminLegacyFallback:
 class TestIsAdminWithExplicitRole:
     """When ``role`` is passed in, it OVERRIDES the legacy email check.
     This is the future path — callers will load
-    ``auth_users.role`` and pass ``role=user.role`` to this helper."""
+    ``auth_users.role`` and pass ``role=user.role`` to this helper.
+
+    Phase 7.3 tightened: role comparison is now case-sensitive exact
+    match against the literal ``"admin"`` (the canonical form
+    ``auth_users.role`` stores)."""
 
     def test_explicit_admin_role(self):
         assert is_admin(_user("anyone@example.com"), role="admin") is True
 
-    def test_explicit_admin_role_case_insensitive(self):
-        assert is_admin(_user("x@y.com"), role="Admin") is True
-        assert is_admin(_user("x@y.com"), role="ADMIN") is True
-        assert is_admin(_user("x@y.com"), role="aDmIn") is True
+    def test_explicit_role_case_sensitive(self):
+        # Phase 7.3 tightened: only lowercase "admin" admits. A
+        # non-canonical casing in auth_users.role would be a data bug
+        # we want to surface, not mask.
+        assert is_admin(_user("x@y.com"), role="Admin") is False
+        assert is_admin(_user("x@y.com"), role="ADMIN") is False
+        assert is_admin(_user("x@y.com"), role="aDmIn") is False
 
-    def test_explicit_role_whitespace_tolerant(self):
-        assert is_admin(_user("x@y.com"), role="  admin  ") is True
+    def test_explicit_role_whitespace_sensitive(self):
+        # Phase 7.3 tightened: whitespace breaks the match.
+        assert is_admin(_user("x@y.com"), role="  admin  ") is False
+        assert is_admin(_user("x@y.com"), role="admin ") is False
+        assert is_admin(_user("x@y.com"), role=" admin") is False
 
     def test_legacy_admin_email_can_be_demoted_via_role(self):
-        # Future: johndean@vin.com is in auth_users with role='editor'
+        # johndean@vin.com is in auth_users with role='editor'
         # → legacy email no longer wins. Role parameter is authoritative.
         assert is_admin(_user(LEGACY_ADMIN_EMAIL), role="editor") is False
 
@@ -120,3 +142,22 @@ class TestPhase8AdoptionGuarantees:
         call require_admin(user) without the role kwarg. The single
         existing admin (johndean@vin.com) must still pass."""
         require_admin(_user(LEGACY_ADMIN_EMAIL))  # no exception
+
+    def test_exact_byte_for_byte_legacy_replacement(self):
+        """Phase 7.3 verification finding fix: the helper must produce
+        EXACTLY the same admit/deny decision as the legacy
+        `user.email != ADMIN_EMAIL` check for every input. Pin the
+        five existing hardcoded patterns' behavior so adoption is a
+        no-op behavior change."""
+        # Legacy: `user.email != "johndean@vin.com"` is True (deny) for:
+        for non_admin in [
+            "JOHNDEAN@VIN.COM",   # uppercase
+            " johndean@vin.com",  # leading space
+            "johndean@vin.com ",  # trailing space
+            "Johndean@vin.com",   # mixed case
+            "",                    # empty
+            "other@vin.com",       # different email
+        ]:
+            assert is_admin(_user(non_admin)) is False, f"expected deny for {non_admin!r}"
+        # Legacy admits only the exact literal:
+        assert is_admin(_user(LEGACY_ADMIN_EMAIL)) is True

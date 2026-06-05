@@ -72,13 +72,20 @@ def test_first_and_last_seen_ms_track_min_max():
     ...
 
 
-@pytest.mark.skip(reason="Needs DB fixture.")
 def test_unauthenticated_request_returns_401():
     """Auth dependency matches the sibling /chat endpoint. No bearer
-    token = 401."""
+    token = 401. This test does NOT need a DB fixture — it exercises
+    the auth path before the route body runs, so an empty / nonexistent
+    session_id is fine.
+
+    Phase 7.3 (2026-06-05) added this as the single non-skipped test
+    in the file after the verification workflow flagged that 5/5
+    skipped tests provide zero CI coverage for the new endpoint."""
     client = _client()
-    resp = client.get("/v1/sessions/00000000-0000-0000-0000-000000000000/chat-participants")
-    # NB: when test_client has no auth, FastAPI's OAuth2PasswordBearer
-    # with auto_error=False routes through get_current_user which
-    # raises 401 via _credentials_exception. Confirm same path here.
+    resp = client.get(
+        "/v1/sessions/00000000-0000-0000-0000-000000000000/chat-participants"
+    )
+    # FastAPI's OAuth2PasswordBearer with auto_error=False routes
+    # through get_current_user which raises 401 via
+    # _credentials_exception when no bearer token is present.
     assert resp.status_code == 401

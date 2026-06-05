@@ -16,11 +16,13 @@ Phase 7g. Closes residual 🟠 (SOP auto-advance + deadline notifications).
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from app.tasks.celery_app import RoundsTask, celery_app
 
@@ -136,6 +138,41 @@ def sop_auto_init_task(self, session_id: str) -> dict:
         engine.dispose()
 
 
+def _mask_email(email: str) -> str:
+    """
+    Mask the local-part of an email address for audit-log summaries.
+
+    ``jane.doe@vin.com`` -> ``jan***@vin.com``. The full email stays in
+    ``audit_events.details->>'recipient'`` for operators who need it; the
+    user-readable ``summary`` field gets the masked form so an audit-log
+    dump isn't a recipient-address harvest. Returns ``***`` for
+    addresses without an ``@`` (defensive — caller already validates).
+    """
+    if not email or "@" not in email:
+        return "***"
+    local, _, domain = email.partition("@")
+    if len(local) <= 3:
+        return f"***@{domain}"
+    return f"{local[:3]}***@{domain}"
+
+
+def _deadline_lock_key(session_id: str, stage: str) -> int:
+    """
+    Stable per-(session_id, stage) Postgres advisory-lock key.
+
+    Used by ``_maybe_send_deadline_email`` to serialize concurrent
+    invocations against the same overdue (session, stage) pair so the
+    23h throttle SELECT and the throttle-row INSERT happen atomically.
+    Python's built-in ``hash()`` is randomized per process and would
+    produce different lock keys across worker restarts; an MD5 digest
+    of the canonical string gives a deterministic value. Trimmed to
+    8 bytes and masked into the signed-positive bigint range Postgres
+    requires.
+    """
+    h = hashlib.md5(f"{session_id}::{stage}".encode("utf-8")).digest()
+    return int.from_bytes(h[:8], "big") & 0x7FFFFFFFFFFFFFFF
+
+
 def _html_to_text(html: str) -> str:
     """Crude HTML → plain-text for the email plain-text alternative part.
 
@@ -171,18 +208,31 @@ def _maybe_send_deadline_email(engine, session_id: str, stage: str, overdue_hour
     if migration 051 hasn't applied yet or an operator soft-deleted
     the overdue variants.
 
+    Phase 7.3 hardening (2026-06-05) closes three race / contract gaps
+    surfaced by the verification workflow:
+      • Throttle SELECT + audit INSERT run inside a single transaction
+        guarded by a per-(session, stage) advisory lock — no double-send
+        between Beat tick and /v1/diag/sop-check.
+      • Audit row is inserted BEFORE the SMTP attempt (claims the
+        throttle slot); on SMTP failure the same row is UPDATEd to
+        kind='sop.deadline_email_failed' instead of inserting a second
+        row. Throttle WHERE matches both 'sent' and 'failed' so a
+        broken recipient doesn't trigger hourly resend storms.
+      • Recipient email is masked in audit_events.summary; full
+        address stays in audit_events.details->>'recipient' for
+        operator forensics (policy-bound retention).
+
     Throttle: a single email per (session_id, stage) per 23 hours.
-    Lookup via audit_events of kind 'sop.deadline_email_sent' (written
-    by this function after a successful send). 23h chosen so the next
-    hourly Beat tick after a 24h-after-overdue moment will re-send.
+    Lookup via audit_events of kind IN ('sop.deadline_email_sent',
+    'sop.deadline_email_failed').
 
     Skips silently when:
       • the assignees JSONB is missing the stage entry
       • the assignee value is a group ("group:NAME") — group expansion
         is deferred (no per-group roster table wired yet)
       • the assignee doesn't look like an email address
-      • a previous sop.deadline_email_sent exists for (session_id, stage)
-        within the 23h window
+      • a previous send-or-failure audit row exists within the 23h
+        window
     """
     from app.api.email_templates import resolve_template_sync, substitute_variables
     from app.services.email import send_smtp_email
@@ -207,24 +257,57 @@ def _maybe_send_deadline_email(engine, session_id: str, stage: str, overdue_hour
     if not isinstance(raw, str) or raw.startswith("group:") or "@" not in raw:
         return
 
-    # Throttle: did we send for this (session, stage) within 23h?
-    with engine.connect() as conn:
-        last = conn.execute(
-            text(
-                "SELECT MAX(occurred_at) FROM audit_events "
-                "WHERE session_id = CAST(:sid AS uuid) "
-                "  AND kind = 'sop.deadline_email_sent' "
-                "  AND details->>'stage' = :stage"
-            ),
-            {"sid": session_id, "stage": stage},
-        ).scalar()
-    if last is not None:
-        # Postgres returns timezone-aware datetimes when the column is
-        # TIMESTAMPTZ; coerce defensively in case of TIMESTAMP.
-        if last.tzinfo is None:
-            last = last.replace(tzinfo=timezone.utc)
-        if datetime.now(timezone.utc) - last < timedelta(hours=23):
-            return
+    masked_recipient = _mask_email(raw)
+    lock_key = _deadline_lock_key(session_id, stage)
+
+    # Atomic throttle-check + slot-claim. The advisory lock serializes
+    # concurrent invocations against the same (session, stage), so two
+    # workers can't both pass the throttle SELECT and both INSERT.
+    audit_id: Optional[str] = None
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
+            last = conn.execute(
+                text(
+                    "SELECT MAX(occurred_at) FROM audit_events "
+                    "WHERE session_id = CAST(:sid AS uuid) "
+                    "  AND kind IN ('sop.deadline_email_sent', 'sop.deadline_email_failed') "
+                    "  AND details->>'stage' = :stage"
+                ),
+                {"sid": session_id, "stage": stage},
+            ).scalar()
+            if last is not None:
+                if last.tzinfo is None:
+                    last = last.replace(tzinfo=timezone.utc)
+                if datetime.now(timezone.utc) - last < timedelta(hours=23):
+                    return
+            audit_id = conn.execute(
+                text(
+                    "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
+                    "VALUES (CAST(:sid AS uuid), 'system:sop_check_deadlines', "
+                    "        'sop.deadline_email_sent', :s, CAST(:d AS jsonb)) "
+                    "RETURNING id"
+                ),
+                {
+                    "sid": session_id,
+                    "s":   f"Notify attempt for {masked_recipient} for stage {stage}",
+                    "d":   json.dumps({
+                        "stage":         stage,
+                        "overdue_hours": overdue_hours,
+                        "recipient":     raw,
+                    }),
+                },
+            ).scalar()
+    except Exception as exc:  # noqa: BLE001
+        # Failed to claim the throttle slot — log and skip. Next Beat
+        # tick will retry. Better to drop one notification than to
+        # double-send.
+        logger.warning(
+            f"sop_check_deadlines: throttle/claim failed for {session_id}/{stage}: {exc}"
+        )
+        return
+    if audit_id is None:
+        return
 
     editor_url = f"https://rounds.vin/#/e/{session_id}/sop"
     # Derive a reasonable first-name from the assignee email's local part
@@ -288,35 +371,47 @@ def _maybe_send_deadline_email(engine, session_id: str, stage: str, overdue_hour
         )
     result = send_smtp_email(raw, subject, text_body, html_body=html_body)
 
-    # Record outcome regardless of success/failure so retries can be observed.
-    kind = "sop.deadline_email_sent" if result["ok"] else "sop.deadline_email_failed"
-    summary = (
-        f"Notified {raw} for stage {stage}"
-        if result["ok"]
-        else f"Notify failed for {raw}: {result.get('error', 'unknown')}"
-    )
+    # Update the throttle row to record the outcome. The row already
+    # claimed the slot (kind='sop.deadline_email_sent'); on success we
+    # only enrich details with latency. On failure we update the kind
+    # and merge in the error so audit consumers see the actual outcome.
     try:
         with engine.begin() as conn:
-            conn.execute(
-                text(
-                    "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
-                    "VALUES (CAST(:sid AS uuid), 'system:sop_check_deadlines', :k, :s, CAST(:d AS jsonb))"
-                ),
-                {
-                    "sid": session_id,
-                    "k":   kind,
-                    "s":   summary,
-                    "d":   json.dumps({
-                        "stage": stage,
-                        "overdue_hours": overdue_hours,
-                        "recipient": raw,
-                        "latency_ms": result["latency_ms"],
-                        **({"error": result["error"]} if not result["ok"] and result.get("error") else {}),
-                    }),
-                },
-            )
+            if result["ok"]:
+                conn.execute(
+                    text(
+                        "UPDATE audit_events SET "
+                        "  summary = :s, "
+                        "  details = details || CAST(:d AS jsonb) "
+                        "WHERE id = CAST(:id AS uuid)"
+                    ),
+                    {
+                        "id": str(audit_id),
+                        "s":  f"Notified {masked_recipient} for stage {stage}",
+                        "d":  json.dumps({"latency_ms": result["latency_ms"], "outcome": "sent"}),
+                    },
+                )
+            else:
+                conn.execute(
+                    text(
+                        "UPDATE audit_events SET "
+                        "  kind = 'sop.deadline_email_failed', "
+                        "  summary = :s, "
+                        "  details = details || CAST(:d AS jsonb) "
+                        "WHERE id = CAST(:id AS uuid)"
+                    ),
+                    {
+                        "id": str(audit_id),
+                        "s":  f"Notify failed for {masked_recipient} for stage {stage}: {result.get('error', 'unknown')}",
+                        "d":  json.dumps({
+                            "latency_ms": result["latency_ms"],
+                            "outcome":    "failed",
+                            "error":      result.get("error"),
+                        }),
+                    },
+                )
     except Exception as exc:  # noqa: BLE001
-        logger.warning(f"sop_check_deadlines: email audit insert failed: {exc}")
+        logger.warning(f"sop_check_deadlines: email audit update failed: {exc}")
 
 
 @celery_app.task(

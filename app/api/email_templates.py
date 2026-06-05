@@ -86,10 +86,23 @@ def _require_admin(user) -> None:
         )
 
 
-# Eight canonical SOP stages. Migration 048 seeds one default row per stage.
+# Canonical SOP stages accepted by the HTTP CRUD surfaces.
+#
+# Migration 048 seeds one stage-TRANSITION row per stage in the first
+# block. Migration 051 (2026-06-04) seeds a deadline-OVERDUE row per
+# non-terminal stage. Both sets are listed here so admins can edit the
+# overdue variants via Settings → Email templates (POST / PUT / PATCH /
+# resolve all route through this allowlist).
+#
+# 'complete' is terminal (SLA = 0h) so it has no _overdue variant —
+# the deadline-check task never emits a warning for the complete stage.
 _VALID_STAGES = frozenset({
+    # Stage-transition templates (migration 048)
     "prep", "copy_draft", "medical", "copy_final",
     "cms", "captions", "qa", "complete",
+    # Deadline-overdue templates (migration 051, Phase 7.2)
+    "prep_overdue", "copy_draft_overdue", "medical_overdue", "copy_final_overdue",
+    "cms_overdue", "captions_overdue", "qa_overdue",
 })
 
 

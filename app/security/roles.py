@@ -47,19 +47,31 @@ def is_admin(user: _HasEmail, *, role: Optional[str] = None) -> bool:
 
     Resolution order:
       1. If ``role`` is provided (caller has already loaded
-         ``auth_users.role`` for this user), use it directly. Case
-         insensitive — "admin", "ADMIN", "Admin" all match.
+         ``auth_users.role`` for this user), use it directly. Case-
+         sensitive exact match against the literal ``"admin"`` — same
+         shape the DB column stores. Non-canonical casing or whitespace
+         in the role string MUST fail; the database enforces canonical
+         casing and a leaky helper would mask data-integrity bugs.
       2. Otherwise fall back to comparing ``user.email`` against
-         ``LEGACY_ADMIN_EMAIL``. Case insensitive.
+         ``LEGACY_ADMIN_EMAIL``. Case-sensitive, whitespace-sensitive
+         exact match — mirrors the existing hardcoded checks in
+         ``email_templates.py:_require_admin`` etc. so a swap-in
+         migration to this helper is byte-identical behavior.
+
+    Verification workflow 2026-06-05 surfaced that earlier versions of
+    this helper were case-insensitive and whitespace-tolerant, which
+    silently widened the admin set vs. the legacy gate. Tightened to
+    exact-match per that finding (HIGH-confidence MEDIUM severity).
+    Callers that want lenient matching must normalize input upstream.
 
     Returns False when the user object lacks an ``email`` attribute or
     has an empty email. Never raises.
     """
     if role is not None:
-        return role.strip().lower() == "admin"
+        return role == "admin"
     if not hasattr(user, "email") or not getattr(user, "email"):
         return False
-    return user.email.strip().lower() == LEGACY_ADMIN_EMAIL.lower()
+    return user.email == LEGACY_ADMIN_EMAIL
 
 
 def require_admin(user: _HasEmail, *, role: Optional[str] = None) -> None:
