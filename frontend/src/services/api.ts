@@ -975,6 +975,16 @@ export const diag = {
       '/v1/diag/reseed-auth-users',
       { method: 'POST' },
     ),
+
+  // ── Per-session operator rescue (Phase A5) ──
+  // Routes documented in CLAUDE.md "Emergency operator commands". Each
+  // is server-gated by CurrentUser; the editor's AdminTab also gates
+  // the UI behind isAdmin as a UX guard.
+  reingest:          (sessionId: string) => http<unknown>(`/v1/diag/reingest/${encodeURIComponent(sessionId)}`,            { method: 'POST' }),
+  realign:           (sessionId: string) => http<unknown>(`/v1/diag/realign/${encodeURIComponent(sessionId)}`,             { method: 'POST' }),
+  initSessionStages: (sessionId: string) => http<unknown>(`/v1/diag/init-session-stages/${encodeURIComponent(sessionId)}`, { method: 'POST' }),
+  autoplacePolls:    (sessionId: string) => http<unknown>(`/v1/diag/autoplace-polls/${encodeURIComponent(sessionId)}`,     { method: 'POST' }),
+  abortSession:      (sessionId: string) => http<unknown>(`/v1/diag/abort-session/${encodeURIComponent(sessionId)}`,       { method: 'POST' }),
 };
 
 export type Api = typeof auth & typeof sessions; // ergonomic export

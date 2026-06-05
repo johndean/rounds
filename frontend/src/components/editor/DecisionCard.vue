@@ -33,43 +33,48 @@ const seg = computed(() => props.segmentsById.get(props.c.seg));
 const slide = computed(() => (seg.value ? (props.liveSlides ?? []).find((s) => s.id === seg.value!.slide_id) : null));
 const isActive = computed(() => seg.value && seg.value.id === props.activeSegmentId);
 
-interface Pill { label: string; tone: 'amber' | 'blue' }
+interface Pill { label: string; tone: 'amber' | 'blue' | 'green' }
 const pill = computed<Pill>(() => {
   switch (props.c.type) {
     case 'text_edit':            return { label: 'edited',           tone: 'amber' };
     case 'chat_insert':          return { label: 'inserted chat',    tone: 'amber' };
+    case 'chat_edit':            return { label: 'chat edited',      tone: 'amber' };
+    case 'chat_remove':          return { label: 'chat removed',     tone: 'amber' };
     case 'slide_reassignment':   return { label: 'slide reassigned', tone: 'amber' };
     case 'speaker_reassignment': return { label: 'speaker change',   tone: 'amber' };
     case 'annotation_add':       return { label: 'annotation',       tone: 'blue'  };
+    case 'mark_ok':              return { label: 'marked OK',        tone: 'green' };
     default:                     return { label: props.c.type as string, tone: 'amber' };
   }
 });
 
-// text_edit corrections store the FULL old/new segment text. Compute a
+// text_edit + chat_edit corrections store the FULL old/new text. Compute a
 // token-level diff so only the changed words get strikethrough / highlight,
 // not the entire paragraph.
-const textEditDiff = computed(() => {
+const wordDiffPair = computed(() => {
   const c = props.c;
-  if (c.type !== 'text_edit') return null;
+  if (c.type !== 'text_edit' && c.type !== 'chat_edit') return null;
   return wordDiff(c.prior ?? '', c.next ?? '');
 });
 
 const wasHtml = computed(() => {
   const c = props.c;
-  if (c.type === 'text_edit' && textEditDiff.value) {
-    return `<p>${diffToHtml(textEditDiff.value.was, 'dc-was-strike', 'dc-now-mark')}</p>`;
+  if ((c.type === 'text_edit' || c.type === 'chat_edit') && wordDiffPair.value) {
+    return `<p>${diffToHtml(wordDiffPair.value.was, 'dc-was-strike', 'dc-now-mark')}</p>`;
   }
   if (c.type === 'chat_insert') return '<p><s class="dc-was-strike">(none)</s></p>';
+  if (c.type === 'chat_remove') return `<p>${c.prior ?? '(chat)'}</p>`;
   if (c.type === 'slide_reassignment')   return `<p>Slide <s class="dc-was-strike">${c.prior ?? ''}</s></p>`;
   if (c.type === 'speaker_reassignment') return `<p>Speaker: <s class="dc-was-strike">${c.prior ?? ''}</s></p>`;
   if (c.type === 'annotation_add')       return '<p><s class="dc-was-strike">(no annotation)</s></p>';
+  if (c.type === 'mark_ok')              return `<p style="color: var(--fg2)">${c.prior ?? seg.value?.text ?? '—'}</p>`;
   return '<p style="color: var(--fg2)">—</p>';
 });
 
 const nowHtml = computed(() => {
   const c = props.c;
-  if (c.type === 'text_edit' && textEditDiff.value) {
-    return `<p>${diffToHtml(textEditDiff.value.now, 'dc-was-strike', 'dc-now-mark')}</p>`;
+  if ((c.type === 'text_edit' || c.type === 'chat_edit') && wordDiffPair.value) {
+    return `<p>${diffToHtml(wordDiffPair.value.now, 'dc-was-strike', 'dc-now-mark')}</p>`;
   }
   if (c.type === 'chat_insert') {
     const parts = c.actor.split(/[. ]/);
@@ -77,9 +82,14 @@ const nowHtml = computed(() => {
     const last = parts[parts.length - 1] || '';
     return `<p><mark class="dc-now-mark">[${first} ${last}]</mark> ${seg.value?.text || c.note || ''}</p>`;
   }
+  if (c.type === 'chat_remove') return '<p><s class="dc-was-strike">(removed)</s></p>';
   if (c.type === 'slide_reassignment')   return `<p>Slide <mark class="dc-now-mark">${c.next ?? ''}</mark> — ${c.note ?? ''}</p>`;
   if (c.type === 'speaker_reassignment') return `<p>Speaker: <mark class="dc-now-mark">${c.next ?? ''}</mark></p>`;
   if (c.type === 'annotation_add')       return `<p>Marked as <mark class="dc-now-mark">${c.next ?? ''}</mark> — ${c.note ?? ''}</p>`;
+  if (c.type === 'mark_ok') {
+    const isDismiss = (c.note ?? '').toLowerCase().includes('dismiss');
+    return `<p><mark class="dc-now-mark">${isDismiss ? 'Dismissed' : 'Confirmed OK'}</mark>${c.note ? ` — ${c.note}` : ''}</p>`;
+  }
   return `<p>${c.note ?? ''}</p>`;
 });
 

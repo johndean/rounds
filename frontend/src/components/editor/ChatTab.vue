@@ -31,7 +31,31 @@ const emit = defineEmits<{
   (e: 'unplace', id: string): void;
   (e: 'placeAtActive', id: string): void;
   (e: 'reorder', ids: string[]): void;
+  // Phase B2 — inline edit of placed chat. EditorView handles the
+  // correction POST + optimistic CHAT array patch; this tab just
+  // surfaces save intent.
+  (e: 'editChat', id: string, newText: string): void;
 }>();
+
+// Phase B2 — inline edit state. Only one row in edit mode at a time.
+const editingId = ref<string | null>(null);
+const editDraft = ref<string>('');
+function startEdit(msg: ChatMessage): void {
+  editingId.value = msg.id;
+  editDraft.value = msg.text;
+}
+function cancelEdit(): void {
+  editingId.value = null;
+  editDraft.value = '';
+}
+function saveEdit(msg: ChatMessage): void {
+  const next = editDraft.value.trim();
+  if (!next || next === msg.text) { cancelEdit(); return; }
+  emit('editChat', msg.id, next);
+  // Optimistic UI lives in the parent (CHAT array patch); close locally.
+  editingId.value = null;
+  editDraft.value = '';
+}
 
 interface DividerRow { divider: true; slide: Slide; }
 interface MsgRow { divider: false; msg: ChatMessage; seg: Segment | undefined; }
@@ -156,12 +180,37 @@ function trim32(t: string): string {
           <span class="chat-msg__author">{{ row.msg.author }}</span>
           <span class="chat-msg__t">{{ fmtTime(row.msg.t) }}</span>
         </div>
-        <div class="chat-msg__body">{{ row.msg.text }}</div>
-        <div class="chat-msg__foot">
+        <div v-if="editingId === row.msg.id" class="chat-msg__editor">
+          <textarea
+            v-model="editDraft"
+            class="chat-msg__editor-textarea"
+            wrap="soft"
+            spellcheck="true"
+            :rows="3"
+            :data-test-id="`chat-edit-textarea-${row.msg.id}`"
+            @click.stop
+          />
+          <div class="chat-msg__editor-foot">
+            <button class="btn btn--secondary btn--sm" @click.stop="cancelEdit">Cancel</button>
+            <button
+              class="btn btn--sm"
+              :style="{ background: 'var(--color-green)', color: '#fff' }"
+              :data-test-id="`chat-edit-save-${row.msg.id}`"
+              @click.stop="saveEdit(row.msg)"
+            >Save</button>
+          </div>
+        </div>
+        <div v-else class="chat-msg__body">{{ row.msg.text }}</div>
+        <div v-if="editingId !== row.msg.id" class="chat-msg__foot">
           <template v-if="placements[row.msg.id]">
             <span class="chat-msg__placed">
               <Icon name="anchor" :size="10" /> PLACED · Slide {{ placedSlide(row.msg.id) ? String(placedSlide(row.msg.id)!.n).padStart(2, '0') : '?' }}
             </span>
+            <button
+              class="chat-msg__edit-btn"
+              :data-test-id="`chat-edit-${row.msg.id}`"
+              @click.stop="startEdit(row.msg)"
+            >Edit</button>
             <button class="chat-msg__unplace" @click="emit('unplace', row.msg.id)">× Remove</button>
           </template>
           <template v-else>
@@ -197,4 +246,20 @@ function trim32(t: string): string {
   border-top: 2px solid var(--color-blue, #0861CE);
   margin-top: -1px;
 }
+.chat-msg__editor { padding: 6px 0; }
+.chat-msg__editor-textarea {
+  width: 100%; font: inherit; font-size: 12.5px;
+  padding: 6px 8px; border-radius: 4px;
+  border: 1px solid var(--border, #e5e7eb);
+  background: var(--surface, #fff); color: var(--fg1, #002855);
+  resize: vertical;
+}
+.chat-msg__editor-textarea:focus { outline: 2px solid var(--color-blue, #0861CE); outline-offset: -1px; }
+.chat-msg__editor-foot { display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px; }
+.chat-msg__edit-btn {
+  background: transparent; border: none; cursor: pointer;
+  font-size: 11px; color: var(--color-blue, #0861CE); font-weight: 600;
+  padding: 2px 6px;
+}
+.chat-msg__edit-btn:hover { text-decoration: underline; }
 </style>

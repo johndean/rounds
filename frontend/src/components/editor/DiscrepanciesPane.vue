@@ -24,8 +24,10 @@ import {
   type Slide,
 } from '@/fixtures/transcript';
 import type { DiscrepancyRow, WordRow } from '@/services/api';
+import { corrections as correctionsApi } from '@/services/api';
 import { withAlpha, fmtTime } from '@/utils/editorHelpers';
 import { toast } from '@/composables/useToast';
+import { ApiError } from '@/services/http';
 
 const props = defineProps<{
   activeSegmentId: string | null | undefined;
@@ -35,12 +37,44 @@ const props = defineProps<{
   liveSlides?: readonly Slide[];
   liveDiscrepancies?: readonly DiscrepancyRow[];
   liveWords?: Map<string, WordRow[]>;
+  sessionId: string;
 }>();
 
 const emit = defineEmits<{
   (e: 'segmentClick', id: string): void;
   (e: 'clearFocus'): void;
+  (e: 'requestEdit', segmentId: string): void;
+  (e: 'discrepancyResolved', segmentId: string): void;
 }>();
+
+// Track per-segment in-flight rescue so the operator can't double-fire.
+const resolving = ref<Set<string>>(new Set());
+
+// Phase B1 — Mark OK closes any discrepancies attached to this segment
+// because mark_ok ∈ CLOSES_DISCREPANCY_TYPES (app/api/corrections.py:49).
+// Optimistic: emit discrepancyResolved so the parent removes this segment
+// from the discrepancies array immediately; revert by re-emitting on error
+// (parent re-fetches).
+async function onMarkOk(seg: Segment, dismiss = false): Promise<void> {
+  if (resolving.value.has(seg.id)) return;
+  resolving.value.add(seg.id);
+  try {
+    await correctionsApi.apply(props.sessionId, {
+      segment_id:      seg.id,
+      correction_type: 'mark_ok',
+      old_text:        '',
+      new_text:        '',
+      ...(dismiss ? { note: 'dismissed' } : {}),
+    });
+    emit('discrepancyResolved', seg.id);
+    toast.push(dismiss ? 'Discrepancy dismissed' : 'Marked OK', { tone: 'success' });
+  } catch (e) {
+    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Could not mark';
+    toast.push(msg, { tone: 'error' });
+  } finally {
+    resolving.value.delete(seg.id);
+  }
+}
 
 const mode = ref<'all' | 'flagged' | 'meaningful'>('flagged');
 
@@ -167,10 +201,17 @@ function sttConfStyle(seg: Segment): Record<string, string> {
 }
 
 function onSegEdit(seg: Segment): void {
-  toast.push(`Edit segment ${seg.id}`, { tone: 'info' });
+  // Phase B1: pivot the editor to the AI tab + open the inline edit on
+  // this segment. Parent (EditorView) handles the tab switch + scroll +
+  // startEdit dispatch.
+  emit('requestEdit', seg.id);
 }
 function onSegReassign(seg: Segment): void {
-  toast.push(`Reassign segment ${seg.id}`, { tone: 'info' });
+  // Reassign UI lives in the AI tab. Pivot via the same path; the
+  // operator clicks the segment's Reassign button there. Keeps this
+  // pane focused on the diff comparison and avoids duplicating the
+  // slide picker.
+  emit('requestEdit', seg.id);
 }
 </script>
 
@@ -255,6 +296,20 @@ function onSegReassign(seg: Segment): void {
               >{{ (flagsBySeg.get(seg.id) || []).length }} diff</span>
               <button class="segment__inline-action" data-test-id="seg-edit-disc" @click.stop="onSegEdit(seg)">Edit</button>
               <button class="segment__inline-action" data-test-id="seg-reassign-disc" @click.stop="onSegReassign(seg)">Reassign</button>
+              <button
+                v-if="flaggedSegmentIds.has(seg.id)"
+                class="segment__inline-action"
+                :data-test-id="`seg-mark-ok-${seg.id}`"
+                :disabled="resolving.has(seg.id)"
+                @click.stop="onMarkOk(seg, false)"
+              >Mark OK</button>
+              <button
+                v-if="flaggedSegmentIds.has(seg.id)"
+                class="segment__inline-action"
+                :data-test-id="`seg-dismiss-${seg.id}`"
+                :disabled="resolving.has(seg.id)"
+                @click.stop="onMarkOk(seg, true)"
+              >Dismiss</button>
             </span>
           </header>
           <div class="segment__body">

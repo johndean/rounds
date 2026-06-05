@@ -587,6 +587,36 @@ function handlePollsReorder(ids: readonly string[]): void {
   });
 }
 
+// Phase B2 — inline chat edit. Optimistic local CHAT array patch +
+// chat_edit correction POST. Backend segment_id is the placement
+// segment (chat must be placed to be editable; the ChatTab only shows
+// the Edit button on placed rows). Revert on API failure.
+async function handleChatEdit(chatId: string, newText: string): Promise<void> {
+  const idx = CHAT.value.findIndex((c) => c.id === chatId);
+  if (idx < 0) return;
+  const prior = CHAT.value[idx]!;
+  const placedSegId = placements.value[chatId];
+  if (!placedSegId) {
+    toast.push('Edit only available for placed chat', { tone: 'warn' });
+    return;
+  }
+  CHAT.value[idx] = { ...prior, text: newText };
+  try {
+    await correctionsApi.apply(props.id, {
+      segment_id:      placedSegId,
+      correction_type: 'chat_edit',
+      old_text:        prior.text,
+      new_text:        newText,
+    });
+    toast.push('Chat edit saved', { tone: 'success' });
+  } catch (e) {
+    // Revert.
+    CHAT.value[idx] = prior;
+    const msg = e instanceof ApiError ? `${e.status} — ${e.message}` : 'Save failed';
+    toast.push(msg, { tone: 'error' });
+  }
+}
+
 function onSlideClick(slideId: string): void {
   focusedSlideId.value = slideId;
   if (slideRailMode.value === 'focus') {
@@ -719,6 +749,22 @@ const flaggedSecondary = computed(() => ([
 // a data-integrity lie. Phase 4 (corrections API) re-introduces them with
 // real undo-stack persistence + AI-result history.
 function onPreview(): void { router.push(`/v/${props.id}`); }
+
+// Phase B1 — DiscrepanciesPane handlers.
+// onDiscRequestEdit: pivot to AI tab + emit segmentClick so TranscriptPane
+// scrolls to and (in future iterations) opens inline edit on this segment.
+function onDiscRequestEdit(segId: string): void {
+  tab.value = 'ai';
+  // Defer the scroll until the AI tab is mounted (next tick).
+  void Promise.resolve().then(() => onSegmentClick(segId));
+}
+// onDiscrepancyResolved: optimistic removal of any discrepancy rows tied
+// to this segment from the local DISCREPANCIES array. Backend has already
+// flipped resolved=true via the mark_ok correction; refetching the full
+// list would be one wasted round-trip.
+function onDiscrepancyResolved(segId: string): void {
+  DISCREPANCIES.value = DISCREPANCIES.value.filter((d) => d.segment_id !== segId);
+}
 function openFind(): void {
   void modal.open(
     FindReplaceModal,
@@ -1065,8 +1111,11 @@ onUnmounted(() => { window.removeEventListener('keydown', onEditorKeydown); });
         :live-slides="SLIDES"
         :live-discrepancies="DISCREPANCIES"
         :live-words="WORDS_BY_SEGMENT"
+        :session-id="props.id"
         @segment-click="onSegmentClick"
         @clear-focus="focusedSlideId = null"
+        @request-edit="onDiscRequestEdit"
+        @discrepancy-resolved="onDiscrepancyResolved"
       />
       <AuditTabInline
         v-else
@@ -1137,6 +1186,7 @@ onUnmounted(() => { window.removeEventListener('keydown', onEditorKeydown); });
               :total-duration="TOTAL_DURATION"
               :slides="SLIDES"
               :iil="iilSignals"
+              :session-id="props.id"
             />
             <SpeakerEditPanel
               :session-id="props.id"
@@ -1153,6 +1203,7 @@ onUnmounted(() => { window.removeEventListener('keydown', onEditorKeydown); });
             @unplace="handleRemoveAnchor"
             @place-at-active="handlePlaceAtActive"
             @reorder="handleChatReorder"
+            @edit-chat="handleChatEdit"
           />
           <PollsTab
             v-else

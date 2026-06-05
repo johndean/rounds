@@ -42,7 +42,7 @@ const segmentsById = computed<Map<string, Segment>>(() => {
   return m;
 });
 
-const decisionTypes = new Set(['text_edit', 'chat_insert', 'slide_reassignment', 'speaker_reassignment', 'annotation_add']);
+const decisionTypes = new Set(['text_edit', 'chat_insert', 'chat_edit', 'chat_remove', 'slide_reassignment', 'speaker_reassignment', 'annotation_add', 'mark_ok']);
 const decisions = computed(() => corrections.value.filter((c) => decisionTypes.has(c.type)).slice().reverse());
 
 function exportCsv(): void {
