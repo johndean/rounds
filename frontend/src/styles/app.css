@@ -2132,7 +2132,22 @@ body.is-col-resizing .editor__resizer::before {
 .sd-kpis .kpi__value { font-size: 22px; }
 .sd-kpis .kpi__delta { font-weight: var(--weight-regular); text-transform: none; letter-spacing: 0; }
 
-.sd-row-2 { display: grid; grid-template-columns: 1fr 1.4fr; gap: 14px; }
+.sd-row-2 { display: grid; grid-template-columns: 1fr 1.4fr; gap: 14px; align-items: start; }
+
+/* Stacked-card column inside .sd-row-2 — left holds Alignment + Chat
+   Participants, right holds AI Mode + Session Files. align-items: start
+   on .sd-row-2 lets each column grow independently. */
+.sd-col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+
+.sd-chat-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--border-subtle, var(--border));
+}
+.sd-chat-row:last-child { border-bottom: none; }
+.sd-chat-row__name  { font-size: 13px; color: var(--color-navy, var(--fg1)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sd-chat-row__count { font-size: 13px; font-weight: 700; color: var(--color-steel, var(--fg2)); font-variant-numeric: tabular-nums; }
+.sd-chat-row__empty { padding: 18px; font-size: 12px; color: var(--fg2); text-align: center; }
 
 .sd-aimode {
   border-color: rgba(8,97,206,0.4);

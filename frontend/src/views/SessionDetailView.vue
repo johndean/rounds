@@ -442,58 +442,81 @@ function pubLink(p: string): void {
           </div>
 
           <div class="sd-row-2">
-            <div class="card">
-              <div class="card__header"><h3>Alignment</h3></div>
-              <div class="card__body" :style="{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }">
-                <div>
-                  <div :style="{ fontSize: '36px', fontWeight: 800, color: totalSegs === 0 ? 'var(--fg2)' : alignedPct >= 100 ? 'var(--color-green)' : alignedPct >= 80 ? 'var(--color-amber)' : 'var(--color-red)', lineHeight: 1 }">{{ totalSegs > 0 ? alignedPct : '—' }}<span v-if="totalSegs > 0">%</span></div>
-                  <div :style="{ fontSize: '11px', color: 'var(--fg2)', marginTop: '4px', textTransform: 'uppercase', letterSpacing: '.08em', fontWeight: 700 }">Auto-aligned</div>
-                </div>
-                <div>
-                  <div :style="{ fontSize: '36px', fontWeight: 800, color: 'var(--fg1)', lineHeight: 1 }">{{ totalSegs }}</div>
-                  <div :style="{ fontSize: '11px', color: 'var(--fg2)', marginTop: '4px', textTransform: 'uppercase', letterSpacing: '.08em', fontWeight: 700 }">Sections</div>
-                </div>
-              </div>
-            </div>
-            <div class="card sd-aimode">
-              <div class="card__header"><h3>AI Mode — Gemini cleaned filler</h3></div>
-              <div class="card__body">
-                <div :style="{ display: 'flex', gap: '6px', flexWrap: 'wrap' }">
-                  <span class="chip chip--blue" :style="{ fontSize: '11px' }">um/uh/er/ah removed</span>
-                  <span class="chip chip--blue" :style="{ fontSize: '11px' }">Verbatim otherwise</span>
-                </div>
-                <p :style="{ fontSize: '12px', color: 'var(--fg2)', marginTop: '10px', lineHeight: 1.5 }">
-                  Three-tier normalization: <strong>raw</strong> → <strong>verbatim-minus-fillers</strong> (default export) → <strong>key points</strong> (optional).
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div class="card">
-            <div class="card__header">
-              <h3 :style="{ color: missingCount > 0 ? 'var(--color-amber)' : 'var(--color-green)' }">
-                <Icon name="alert" :size="12" /> Session files — attention
-              </h3>
-              <span :class="['chip', missingCount > 0 ? 'chip--amber' : 'chip--green']" :style="{ fontSize: '10px' }">
-                {{ missingCount > 0 ? `${missingCount} missing` : 'all present' }}
-              </span>
-            </div>
-            <div class="card__body" :style="{ padding: 0 }">
-              <div v-for="f in sessionFiles" :key="f.name" class="sd-file">
-                <div class="sd-file__icon"><Icon :name="f.icon" :size="16" /></div>
-                <div>
-                  <div :style="{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '2px' }">
-                    <strong :style="{ fontSize: '13px', color: 'var(--fg1)' }">{{ f.name }}</strong>
-                    <span v-if="hasFile(f.role)" class="chip chip--green" :style="{ fontSize: '9px' }">PRESENT</span>
-                    <span v-else class="chip chip--amber" :style="{ fontSize: '9px' }">MISSING</span>
+            <!-- LEFT COLUMN: Alignment + Chat Participants -->
+            <div class="sd-col">
+              <div class="card">
+                <div class="card__header"><h3>Alignment</h3></div>
+                <div class="card__body" :style="{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px' }">
+                  <div>
+                    <div :style="{ fontSize: '36px', fontWeight: 800, color: totalSegs === 0 ? 'var(--fg2)' : alignedPct >= 100 ? 'var(--color-green)' : alignedPct >= 80 ? 'var(--color-amber)' : 'var(--color-red)', lineHeight: 1 }">{{ totalSegs > 0 ? alignedPct : '—' }}<span v-if="totalSegs > 0">%</span></div>
+                    <div :style="{ fontSize: '11px', color: 'var(--fg2)', marginTop: '4px', textTransform: 'uppercase', letterSpacing: '.08em', fontWeight: 700 }">Auto-aligned</div>
                   </div>
-                  <div :style="{ fontSize: '12px', color: 'var(--fg2)' }">{{ f.desc }}</div>
+                  <div>
+                    <div :style="{ fontSize: '36px', fontWeight: 800, color: 'var(--fg1)', lineHeight: 1 }">{{ totalSegs }}</div>
+                    <div :style="{ fontSize: '11px', color: 'var(--fg2)', marginTop: '4px', textTransform: 'uppercase', letterSpacing: '.08em', fontWeight: 700 }">Sections</div>
+                  </div>
                 </div>
-                <button
-                  :class="['btn', 'btn--sm', hasFile(f.role) ? 'btn--secondary' : 'btn--primary']"
-                  :data-test-id="`sd-file-${f.name.replace(/\s/g, '_')}`"
-                  @click="fileAction(f)"
-                >{{ hasFile(f.role) ? 'Update' : 'Add' }}</button>
+              </div>
+              <div class="card" data-test-id="sd-chat-participants">
+                <div class="card__header">
+                  <h3>Chat Participants</h3>
+                  <span class="chip chip--ghost" :style="{ fontSize: '10px' }">{{ totalChatMessages }} msgs</span>
+                </div>
+                <div class="card__body" :style="{ padding: 0, maxHeight: '320px', overflowY: 'auto' }">
+                  <div v-if="chatParticipants.length === 0" class="sd-chat-row__empty">No chat yet.</div>
+                  <div
+                    v-for="p in chatParticipants"
+                    :key="p.speaker"
+                    class="sd-chat-row"
+                  >
+                    <span class="sd-chat-row__name">{{ p.speaker.replace(/^Dr\.\s*/, '') }}</span>
+                    <span class="sd-chat-row__count">{{ p.message_count }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- RIGHT COLUMN: AI Mode + Session Files -->
+            <div class="sd-col">
+              <div class="card sd-aimode">
+                <div class="card__header"><h3>AI Mode — Gemini cleaned filler</h3></div>
+                <div class="card__body">
+                  <div :style="{ display: 'flex', gap: '6px', flexWrap: 'wrap' }">
+                    <span class="chip chip--blue" :style="{ fontSize: '11px' }">um/uh/er/ah removed</span>
+                    <span class="chip chip--blue" :style="{ fontSize: '11px' }">Verbatim otherwise</span>
+                  </div>
+                  <p :style="{ fontSize: '12px', color: 'var(--fg2)', marginTop: '10px', lineHeight: 1.5 }">
+                    Three-tier normalization: <strong>raw</strong> → <strong>verbatim-minus-fillers</strong> (default export) → <strong>key points</strong> (optional).
+                  </p>
+                </div>
+              </div>
+              <div class="card">
+                <div class="card__header">
+                  <h3 :style="{ color: missingCount > 0 ? 'var(--color-amber)' : 'var(--color-green)' }">
+                    <Icon name="alert" :size="12" /> Session files — attention
+                  </h3>
+                  <span :class="['chip', missingCount > 0 ? 'chip--amber' : 'chip--green']" :style="{ fontSize: '10px' }">
+                    {{ missingCount > 0 ? `${missingCount} missing` : 'all present' }}
+                  </span>
+                </div>
+                <div class="card__body" :style="{ padding: 0 }">
+                  <div v-for="f in sessionFiles" :key="f.name" class="sd-file">
+                    <div class="sd-file__icon"><Icon :name="f.icon" :size="16" /></div>
+                    <div>
+                      <div :style="{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '2px' }">
+                        <strong :style="{ fontSize: '13px', color: 'var(--fg1)' }">{{ f.name }}</strong>
+                        <span v-if="hasFile(f.role)" class="chip chip--green" :style="{ fontSize: '9px' }">PRESENT</span>
+                        <span v-else class="chip chip--amber" :style="{ fontSize: '9px' }">MISSING</span>
+                      </div>
+                      <div :style="{ fontSize: '12px', color: 'var(--fg2)' }">{{ f.desc }}</div>
+                    </div>
+                    <button
+                      :class="['btn', 'btn--sm', hasFile(f.role) ? 'btn--secondary' : 'btn--primary']"
+                      :data-test-id="`sd-file-${f.name.replace(/\s/g, '_')}`"
+                      @click="fileAction(f)"
+                    >{{ hasFile(f.role) ? 'Update' : 'Add' }}</button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -718,23 +741,6 @@ function pubLink(p: string): void {
           </div>
         </div>
 
-        <div class="card" data-test-id="sd-chat-participants">
-          <div class="card__header">
-            <h3>Chat Participants</h3>
-            <span class="chip chip--ghost" :style="{ fontSize: '10px' }">{{ totalChatMessages }} msgs</span>
-          </div>
-          <div class="card__body" :style="{ padding: 0, maxHeight: '380px', overflowY: 'auto' }">
-            <div v-if="chatParticipants.length === 0" :style="{ padding: '18px', fontSize: '12px', color: 'var(--fg2)', textAlign: 'center' }">No chat yet.</div>
-            <div
-              v-for="p in chatParticipants"
-              :key="p.speaker"
-              :style="{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 12px', borderBottom: '1px solid var(--border)' }"
-            >
-              <span :style="{ flex: 1, fontSize: '12px', color: 'var(--fg1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }">{{ p.speaker }}</span>
-              <span :style="{ fontSize: '11px', color: 'var(--fg2)', fontFamily: 'var(--font-mono)', fontWeight: 700 }">{{ p.message_count }}</span>
-            </div>
-          </div>
-        </div>
       </div>
     </template>
 
