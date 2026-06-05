@@ -17,6 +17,7 @@
  * | #/settings/:section? | SettingsView      |
  * | #/audit           | AuditView             |
  * | #/gcs             | GcsView               |
+ * | #/queue           | QueueView             |
  */
 import { createRouter, createWebHashHistory } from 'vue-router';
 import { useAuthStore } from '@/stores/auth';
@@ -39,6 +40,7 @@ export const router = createRouter({
     { path: '/settings/:section?',  component: () => import('@/views/SettingsView.vue'),        name: 'settings', props: true },
     { path: '/audit',               component: () => import('@/views/AuditView.vue'),           name: 'audit' },
     { path: '/gcs',                 component: () => import('@/views/GcsView.vue'),             name: 'gcs' },
+    { path: '/queue',               component: () => import('@/views/QueueView.vue'),           name: 'queue' },
     { path: '/:catchAll(.*)',       redirect: '/dashboard' },
   ],
 });

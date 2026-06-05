@@ -336,6 +336,25 @@ export const media = {
     ),
 };
 
+export interface QueueItem {
+  session_id:         string;
+  code:               string;
+  title:              string | null;
+  title_short:        string | null;
+  title_long:         string | null;
+  status:             string;
+  current_stage:      string;
+  entered_current_at: string | null;
+  overdue_hours:      number | null;
+}
+
+export const queue = {
+  // Phase 7-broader (2 of 2) — per-user queue. Sessions where the
+  // current user is the assignee for the session's current SOP stage.
+  // Backend computes overdue_hours server-side.
+  mine: () => http<QueueItem[]>('/v1/queue/mine'),
+};
+
 export const placements = {
   chatAnchor: (sessionId: string, chatId: string, anchorSegment: string | null) =>
     http<unknown>(

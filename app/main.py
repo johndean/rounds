@@ -26,6 +26,7 @@ from app.api import discrepancies as disc_router
 from app.api import exports as exports_router
 from app.api import gcs_upload as gcs_router
 from app.api import improvements as improvements_router
+from app.api import queue as queue_router
 from app.api import segments as segments_router
 from app.api import session_resources as session_resources_router
 from app.api import sessions as sessions_router
@@ -200,6 +201,7 @@ app.include_router(diag_router.router)
 app.include_router(email_debug_router.router)
 app.include_router(email_templates_router.router)
 app.include_router(exports_router.router)
+app.include_router(queue_router.router)
 
 
 # ── Static frontend (production) ─────────────────────────────────────────
