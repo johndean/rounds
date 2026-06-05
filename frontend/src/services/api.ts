@@ -202,7 +202,20 @@ export const sessions = {
       bytes: number | null; version: number; is_current: boolean;
       generated_at: string | null; style_config: Record<string, unknown> | null;
     } | null>(`/v1/sessions/${encodeURIComponent(id)}/captioned-video`),
+  // Chat participant tally (Phase 3 of the 2026-06-04 stakeholder remediation).
+  // Aggregates chat_messages by author. Empty array for sessions without chat.
+  chatParticipants: (id: string) =>
+    http<ChatParticipantRow[]>(
+      `/v1/sessions/${encodeURIComponent(id)}/chat-participants`,
+    ),
 };
+
+export interface ChatParticipantRow {
+  speaker:       string;
+  message_count: number;
+  first_seen_ms: number;
+  last_seen_ms:  number;
+}
 
 // ─── Speakers (Phase 9 — per-session speaker CRUD + bulk segment reassign) ──
 export interface SessionSpeaker {

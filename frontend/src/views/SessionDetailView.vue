@@ -26,6 +26,7 @@ import {
   type SettingsType,
   type SettingsPerson,
   type SettingsGroup,
+  type ChatParticipantRow,
 } from '@/services/api';
 import { http } from '@/services/http';
 import { slideAccent } from '@/fixtures/transcript';
@@ -63,6 +64,7 @@ function onCodeSaved(next: string): void {
 const sources = ref<SourceRow[]>([]);
 const slides   = ref<SlideRow[]>([]);
 const segments = ref<SegmentRow[]>([]);
+const chatParticipants = ref<ChatParticipantRow[]>([]);
 const loading = ref(true);
 const error = ref<string | null>(null);
 
@@ -87,7 +89,7 @@ async function load(): Promise<void> {
   loading.value = true;
   error.value = null;
   try {
-    const [s, src, sl, sg, sa, tps, pp, gg] = await Promise.all([
+    const [s, src, sl, sg, sa, tps, pp, gg, cp] = await Promise.all([
       sessionsApi.get(props.id).catch(() => null),
       http<SourceRow[]>(`/v1/sessions/${encodeURIComponent(props.id)}/sources`).catch(() => []),
       http<SlideRow[]>(`/v1/sessions/${encodeURIComponent(props.id)}/slides`).catch(() => []),
@@ -96,6 +98,7 @@ async function load(): Promise<void> {
       settingsApi.types().catch(() => [] as SettingsType[]),
       settingsApi.people().catch(() => [] as SettingsPerson[]),
       settingsApi.groups().catch(() => [] as SettingsGroup[]),
+      sessionsApi.chatParticipants(props.id).catch(() => [] as ChatParticipantRow[]),
     ]);
     session.value = s;
     sources.value = src;
@@ -105,6 +108,7 @@ async function load(): Promise<void> {
     sessionTypes.value = tps;
     teamPeople.value = pp.filter((p) => p.is_active !== false);
     teamGroups.value = gg;
+    chatParticipants.value = cp;
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Failed to load';
   } finally {
@@ -272,6 +276,10 @@ const segConfList = computed(() => segments.value.slice(0, 31).map((s, i) => {
   const pct = typeof s.confidence === 'number' ? Math.round(s.confidence * 100) : 0;
   return { n: i + 1, conf: pct, ok: pct >= 80 ? 'ok' : 'warn', slideColor: slideAccent(s.slide_id ?? null) };
 }));
+
+const totalChatMessages = computed<number>(() =>
+  chatParticipants.value.reduce((sum, p) => sum + p.message_count, 0),
+);
 
 function durationLabel(): string {
   const total = session.value?.duration_sec ?? 0;
@@ -706,6 +714,24 @@ function pubLink(p: string): void {
                 <span :style="{ fontSize: '10px', color: 'var(--fg2)', fontStyle: 'italic' }">{{ r.assignee }}</span>
               </div>
               <div :style="{ fontSize: '12px', color: 'var(--fg1)', lineHeight: 1.4 }">{{ r.preview }}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card" data-test-id="sd-chat-participants">
+          <div class="card__header">
+            <h3>Chat Participants</h3>
+            <span class="chip chip--ghost" :style="{ fontSize: '10px' }">{{ totalChatMessages }} msgs</span>
+          </div>
+          <div class="card__body" :style="{ padding: 0, maxHeight: '380px', overflowY: 'auto' }">
+            <div v-if="chatParticipants.length === 0" :style="{ padding: '18px', fontSize: '12px', color: 'var(--fg2)', textAlign: 'center' }">No chat yet.</div>
+            <div
+              v-for="p in chatParticipants"
+              :key="p.speaker"
+              :style="{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 12px', borderBottom: '1px solid var(--border)' }"
+            >
+              <span :style="{ flex: 1, fontSize: '12px', color: 'var(--fg1)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }">{{ p.speaker }}</span>
+              <span :style="{ fontSize: '11px', color: 'var(--fg2)', fontFamily: 'var(--font-mono)', fontWeight: 700 }">{{ p.message_count }}</span>
             </div>
           </div>
         </div>

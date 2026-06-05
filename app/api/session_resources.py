@@ -548,6 +548,51 @@ async def patch_chat_anchor(
     return dict(row)
 
 
+# ─── chat participants tally (Phase 3 of 2026-06-04 stakeholder remediation) ──
+class ChatParticipantOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    speaker:       str
+    message_count: int
+    first_seen_ms: int
+    last_seen_ms:  int
+
+
+@router.get("/chat-participants", response_model=list[ChatParticipantOut])
+async def list_chat_participants(
+    session_id: UUID, db: DbSession, _user: CurrentUser,
+) -> list[dict]:
+    """
+    Aggregate ``chat_messages`` by author for a session.
+
+    Returns one row per distinct speaker with the count of messages they
+    posted and their first/last message timestamps (ms offset from
+    session start). Ordered by message count descending, then by
+    speaker name ascending for deterministic tie-breaking. Returns an
+    empty list when the session has no chat — every call is safe even
+    for sessions ingested before chat extraction landed.
+
+    Powers SessionDetailView's Chat Participants tally widget.
+    Authorization mirrors the existing ``/chat`` endpoint (any
+    authenticated user). Reads only; no mutations.
+    """
+    rows = (
+        await db.execute(
+            text(
+                "SELECT author               AS speaker, "
+                "       COUNT(*)::int        AS message_count, "
+                "       MIN(sent_at_ms)::int AS first_seen_ms, "
+                "       MAX(sent_at_ms)::int AS last_seen_ms "
+                "FROM chat_messages "
+                "WHERE session_id = :sid "
+                "GROUP BY author "
+                "ORDER BY COUNT(*) DESC, author ASC"
+            ),
+            {"sid": str(session_id)},
+        )
+    ).mappings().all()
+    return [dict(r) for r in rows]
+
+
 # ─── polls ─────────────────────────────────────────────────────────────
 class PollOptionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
