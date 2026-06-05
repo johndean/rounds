@@ -16,6 +16,7 @@ Phase 7g. Closes residual 🟠 (SOP auto-advance + deadline notifications).
 """
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
@@ -265,6 +266,13 @@ def _maybe_send_deadline_email(engine, session_id: str, stage: str, overdue_hour
     else:
         # Inline fallback — used before migration 051 lands, or when
         # an operator soft-deletes the overdue template variants.
+        # HTML-escape all operator-controlled values (title, code, stage)
+        # before they land in the HTML body — substitute_variables does
+        # this for the template path; matching here so both paths share
+        # XSS-safety guarantees.
+        e_title = html.escape(title, quote=True)
+        e_code  = html.escape(code,  quote=True)
+        e_stage = html.escape(stage, quote=True)
         subject = f"[Rounds] {code} — {stage} stage overdue by {overdue_hours}h"
         text_body = (
             f"Session: {title} ({code})\n"
@@ -273,8 +281,8 @@ def _maybe_send_deadline_email(engine, session_id: str, stage: str, overdue_hour
             f"Open in editor: {editor_url}\n"
         )
         html_body = (
-            f"<p>Session: <strong>{title}</strong> ({code})</p>"
-            f"<p>Stage: <code>{stage}</code></p>"
+            f"<p>Session: <strong>{e_title}</strong> ({e_code})</p>"
+            f"<p>Stage: <code>{e_stage}</code></p>"
             f"<p style='color:#b00'>Overdue: <strong>{overdue_hours}h</strong> past SLA</p>"
             f"<p><a href='{editor_url}'>Open in editor</a></p>"
         )

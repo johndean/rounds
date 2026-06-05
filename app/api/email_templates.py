@@ -19,6 +19,7 @@ separate plan).
 """
 from __future__ import annotations
 
+import html
 import re
 from typing import Any, Optional
 from uuid import UUID
@@ -53,12 +54,27 @@ def substitute_variables(template_str: str, variables: dict[str, Any]) -> str:
     Whitespace inside the braces is tolerated: ``{{var}}`` and
     ``{{ var }}`` and ``{{  var  }}`` all resolve to the same key.
 
-    Pure function — safe to call from any context.
+    **Substituted values are HTML-escaped** via
+    ``html.escape(str(value), quote=True)``. Templates are HTML bodies
+    (see migration 048 + 051 seeds) whose surrounding markup is
+    operator-controlled but the substituted *values* (session title,
+    session code, assignee name, etc.) flow from end-user-editable
+    DB columns. Without escaping, a session title containing
+    ``</strong><a href="phish">…`` would inject markup into outgoing
+    deadline emails. ``quote=True`` also escapes ``'`` and ``"`` so
+    values can land safely inside attribute strings like
+    ``href="{{ editor_url }}"``.
+
+    The template's own HTML markup is left unchanged — only the values
+    being interpolated are escaped. Pure function — safe to call from
+    any context.
     """
     def _replace(match: re.Match[str]) -> str:
         key = match.group(1)
         value = variables.get(key)
-        return str(value) if value is not None else ""
+        if value is None:
+            return ""
+        return html.escape(str(value), quote=True)
     return _VAR_PATTERN.sub(_replace, template_str or "")
 
 

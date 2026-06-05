@@ -75,13 +75,46 @@ class TestSubstituteVariables:
             "Hours: {{ h }}", {"h": 1.5}
         ) == "Hours: 1.5"
 
-    def test_html_safe_substitution_does_not_double_escape(self):
-        # Substitution is verbatim — HTML escaping is caller's job.
-        # Confirms the helper does NOT html-escape; it's a string
-        # replacer for content the caller has already sanitized.
+    def test_substituted_values_are_html_escaped(self):
+        # Substituted values are HTML-escaped to block XSS via
+        # operator-controlled inputs (session title, code, etc.).
+        # Replaces the pre-2026-06-05 "does not escape" pin.
         assert substitute_variables(
             "<p>Hi {{ name }}</p>", {"name": "<b>bold</b>"}
-        ) == "<p>Hi <b>bold</b></p>"
+        ) == "<p>Hi &lt;b&gt;bold&lt;/b&gt;</p>"
+
+    def test_html_escape_blocks_attribute_breakout_xss(self):
+        # quote=True escapes both " and ' so values are safe inside
+        # href="..." OR href='...' attributes.
+        result = substitute_variables(
+            '<a href="{{ url }}">link</a>',
+            {"url": 'evil" onclick="alert(1)'},
+        )
+        assert result == '<a href="evil&quot; onclick=&quot;alert(1)">link</a>'
+
+    def test_html_escape_blocks_tag_breakout_xss(self):
+        # The classic "title contains </strong><script>" payload from
+        # the Phase 7.2 verification finding (HIGH severity).
+        result = substitute_variables(
+            "<p>Session: <strong>{{ title }}</strong></p>",
+            {"title": '</strong><a href="https://phish.example">Click</a><strong>'},
+        )
+        assert "<a href=" not in result
+        assert "&lt;a href=" in result
+        assert result == (
+            "<p>Session: <strong>"
+            "&lt;/strong&gt;&lt;a href=&quot;https://phish.example&quot;&gt;Click&lt;/a&gt;&lt;strong&gt;"
+            "</strong></p>"
+        )
+
+    def test_template_markup_itself_is_not_escaped(self):
+        # The template's surrounding HTML is preserved as-is — only the
+        # variable VALUES are escaped. Confirms migration-048/051 seed
+        # bodies render correctly.
+        template = '<p style="color:red">Stage <strong>{{ stage }}</strong> overdue</p>'
+        assert substitute_variables(template, {"stage": "prep"}) == (
+            '<p style="color:red">Stage <strong>prep</strong> overdue</p>'
+        )
 
     def test_seed_template_subject_shape(self):
         # Smoke test against the actual seed template shape from
