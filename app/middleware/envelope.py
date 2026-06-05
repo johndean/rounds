@@ -37,8 +37,13 @@ logger = logging.getLogger(__name__)
 ERROR_HTTP_MAP: dict[str, int] = {
     "INVALID_INPUT":     400,
     "VALIDATION_FAILED": 400,
+    "INVALID_TIMESTAMP": 400,   # Phase 4 — segment time-edit validation (start_ms/end_ms)
+    "EMPTY_REORDER":     400,   # Phase 6.1 — chat/polls reorder with empty ids array
+    "UNKNOWN_CHAT_IDS":  400,   # Phase 6.1 — chat reorder with ids not in session
+    "UNKNOWN_POLL_IDS":  400,   # Phase 6.1 — polls reorder with ids not in session
     "UNAUTHORIZED":      401,
     "FORBIDDEN":         403,
+    "ADMIN_ONLY":        403,   # Phase 8 step-3 — require_admin
     "NOT_FOUND":         404,
     "CONFLICT":          409,
     "TEMPLATE_LOCKED":   409,

@@ -73,6 +73,14 @@ async def list_my_queue(db: DbSession, user: CurrentUser) -> list[dict]:
         "qa":         8,
         "complete":   0,
     }
+    # Phase 7-broader-2 hardening (2026-06-05): handle BOTH writers'
+    # assignees JSONB shapes. Two writers exist:
+    #   * app/api/sop.py::assign_stage writes a NESTED OBJECT:
+    #       {"assignee": "user@vin.com", "assigned_by": ..., "assigned_at": ...}
+    #   * app/tasks/sop_tasks.py + Settings -> Stages matrix writes a
+    #     PLAIN STRING email (or "group:NAME" for groups).
+    # The COALESCE matches either shape — nested-object path falls
+    # back to flat-string path when the value isn't an object.
     rows = (
         await db.execute(
             text(
@@ -86,13 +94,16 @@ async def list_my_queue(db: DbSession, user: CurrentUser) -> list[dict]:
                        sop.current_stage,
                        sop.entered_current_at,
                        sop.sla_target_hours,
-                       sop.assignees ->> sop.current_stage AS current_assignee
+                       COALESCE(sop.assignees -> sop.current_stage ->> 'assignee',
+                                sop.assignees ->> sop.current_stage) AS current_assignee
                   FROM sessions s
                   JOIN sop_state sop ON sop.session_id = s.id
-                 WHERE sop.assignees ->> sop.current_stage = :email
+                 WHERE COALESCE(sop.assignees -> sop.current_stage ->> 'assignee',
+                                sop.assignees ->> sop.current_stage) = :email
                    AND s.deleted_at IS NULL
                    AND sop.current_stage != 'complete'
                  ORDER BY sop.entered_current_at ASC NULLS LAST
+                 LIMIT 200
                 """
             ),
             {"email": user.email},

@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, HTTPException
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import text
 
@@ -508,7 +508,7 @@ async def list_chat(session_id: UUID, db: DbSession, _user: CurrentUser) -> list
                 """
                 SELECT id, author, body, sent_at_ms, anchor_segment, placed
                 FROM chat_messages WHERE session_id = :sid
-                ORDER BY COALESCE(order_index, sent_at_ms) ASC, sent_at_ms ASC
+                ORDER BY (order_index IS NULL) ASC, order_index ASC, sent_at_ms ASC
                 """
             ),
             {"sid": str(session_id)},
@@ -558,18 +558,23 @@ async def reorder_chat(session_id: UUID, body: ReorderRequest, db: DbSession, us
         raise HTTPException(status_code=400, detail={
             "code": "UNKNOWN_CHAT_IDS",
             "message": f"{len(bad)} id(s) not in this session",
-            "ids": bad[:5],  # cap to avoid leaking too much in the error body
+            "ids": bad[:5],
         })
-    # Apply the renumber in a single transaction.
-    for pos, mid in enumerate(body.ids, start=1):
-        await db.execute(
-            text(
-                "UPDATE chat_messages SET order_index = :pos "
-                "WHERE id = CAST(:mid AS uuid) AND session_id = CAST(:sid AS uuid)"
-            ),
-            {"pos": pos, "mid": str(mid), "sid": str(session_id)},
-        )
+    # Phase 6.2 hardening (2026-06-05) — collapse N per-row UPDATEs into
+    # a single statement. With ~100-row chat threads the old loop did
+    # 100 network round-trips per reorder (operator-interactive hot
+    # path). The jsonb_to_recordset construct keeps the wire payload
+    # to one PATCH with one query.
     import json
+    pairs = [{"id": str(mid), "pos": pos} for pos, mid in enumerate(body.ids, start=1)]
+    await db.execute(
+        text(
+            "UPDATE chat_messages t SET order_index = v.pos "
+            "FROM (SELECT * FROM jsonb_to_recordset(CAST(:pairs AS jsonb)) AS x(id uuid, pos int)) AS v "
+            "WHERE t.id = v.id AND t.session_id = CAST(:sid AS uuid)"
+        ),
+        {"pairs": json.dumps(pairs), "sid": str(session_id)},
+    )
     await db.execute(
         text(
             "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
@@ -583,7 +588,7 @@ async def reorder_chat(session_id: UUID, body: ReorderRequest, db: DbSession, us
         },
     )
     await db.commit()
-    return {"reordered": len(body.ids)}
+    return {"reordered": len(body.ids), "ids": [str(i) for i in body.ids]}
 
 
 class AnchorPatch(BaseModel):
@@ -708,7 +713,7 @@ async def list_polls(session_id: UUID, db: DbSession, _user: CurrentUser) -> lis
                 SELECT id, question, status, opened_at_ms, closed_at_ms,
                        total_votes, anchor_segment, placed, metadata
                 FROM polls WHERE session_id = :sid
-                ORDER BY COALESCE(order_index, opened_at_ms) ASC, opened_at_ms ASC
+                ORDER BY (order_index IS NULL) ASC, order_index ASC, opened_at_ms ASC
                 """
             ),
             {"sid": str(session_id)},
@@ -760,15 +765,17 @@ async def reorder_polls(session_id: UUID, body: ReorderRequest, db: DbSession, u
             "message": f"{len(bad)} id(s) not in this session",
             "ids": bad[:5],
         })
-    for pos, pid in enumerate(body.ids, start=1):
-        await db.execute(
-            text(
-                "UPDATE polls SET order_index = :pos "
-                "WHERE id = CAST(:pid AS uuid) AND session_id = CAST(:sid AS uuid)"
-            ),
-            {"pos": pos, "pid": str(pid), "sid": str(session_id)},
-        )
+    # Phase 6.2 hardening — single-statement renumber (see reorder_chat).
     import json
+    pairs = [{"id": str(pid), "pos": pos} for pos, pid in enumerate(body.ids, start=1)]
+    await db.execute(
+        text(
+            "UPDATE polls t SET order_index = v.pos "
+            "FROM (SELECT * FROM jsonb_to_recordset(CAST(:pairs AS jsonb)) AS x(id uuid, pos int)) AS v "
+            "WHERE t.id = v.id AND t.session_id = CAST(:sid AS uuid)"
+        ),
+        {"pairs": json.dumps(pairs), "sid": str(session_id)},
+    )
     await db.execute(
         text(
             "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
@@ -782,7 +789,7 @@ async def reorder_polls(session_id: UUID, body: ReorderRequest, db: DbSession, u
         },
     )
     await db.commit()
-    return {"reordered": len(body.ids)}
+    return {"reordered": len(body.ids), "ids": [str(i) for i in body.ids]}
 
 
 @router.patch("/polls/{poll_id}/anchor")

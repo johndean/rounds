@@ -370,12 +370,12 @@ export const placements = {
   // order of row ids; backend sets order_index = position (1-indexed)
   // and writes a single audit_events row for the reorder action.
   chatReorder: (sessionId: string, ids: string[]) =>
-    http<{ reordered: number }>(
+    http<{ reordered: number; ids: string[] }>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/chat/order`,
       { body: { ids }, method: 'PATCH' },
     ),
   pollsReorder: (sessionId: string, ids: string[]) =>
-    http<{ reordered: number }>(
+    http<{ reordered: number; ids: string[] }>(
       `/v1/sessions/${encodeURIComponent(sessionId)}/polls/order`,
       { body: { ids }, method: 'PATCH' },
     ),

@@ -44,7 +44,10 @@ function hoursInStage(it: QueueItem): string {
   if (!it.entered_current_at) return '—';
   const entered = new Date(it.entered_current_at).getTime();
   const now = Date.now();
-  const h = (now - entered) / 1000 / 3600;
+  // Math.max guard against client clock skew — without it a laptop
+  // whose clock is ~5 min behind the server would render "-5m" which
+  // looks like a bug.
+  const h = Math.max(0, (now - entered) / 1000 / 3600);
   if (h < 1) return `${Math.round(h * 60)}m`;
   if (h < 24) return `${h.toFixed(1)}h`;
   return `${Math.floor(h / 24)}d ${Math.floor(h % 24)}h`;
