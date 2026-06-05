@@ -1,11 +1,30 @@
 #!/usr/bin/env python3
 """
-Rounds migration runner. Ports MIC's scripts/migrate.py:32-80.
+Rounds migration runner. Ports MIC's scripts/migrate.py:32-80; adds a
+schema_migrations ledger as of 2026-06-05.
 
-Globs `migrations/[0-9][0-9][0-9]_*.sql`, applies each in autocommit transaction
-order. Excludes `migrations/schema.sql` if present (bootstrap).
+Globs ``migrations/[0-9][0-9][0-9]_*.sql``, applies each that has not
+yet been recorded in the ``schema_migrations`` ledger. Excludes
+``migrations/schema.sql`` if present (bootstrap-only).
 
-Railway pre-deploy command: `python scripts/migrate.py`.
+**Why the ledger** (2026-06-05): the original no-ledger runner re-ran
+every numbered .sql file on every deploy under an advisory lock and
+relied on each statement being idempotent (``IF EXISTS`` /
+``IF NOT EXISTS`` / ``ON CONFLICT``). That assumption broke for
+``048_email_templates.sql``, which begins with
+``DROP TABLE IF EXISTS email_templates CASCADE`` and re-seeds the
+table — so every deploy silently destroyed operator-edited email
+templates. The ledger ensures each migration applies exactly once.
+
+**Bootstrap path** for the FIRST run of this ledger-aware script
+against an already-migrated production DB: if any non-``schema_migrations``
+table exists in the ``public`` schema AND the ledger is empty, mark every
+existing migration file as already-applied. This prevents 048's DROP
+from firing again on prod, where the post-migration state is already
+correct. Fresh dev DBs (no other tables) run every file from scratch
+and the ledger records each as it lands.
+
+Railway pre-deploy command: ``python scripts/migrate.py``.
 """
 from __future__ import annotations
 
@@ -19,10 +38,82 @@ import psycopg2
 ROOT = Path(__file__).resolve().parent.parent
 MIGRATIONS_DIR = ROOT / "migrations"
 
+# Advisory lock serializes concurrent migrate.py processes (Railway runs
+# the pre-deploy command once per service; api + worker share one
+# railway.json, so two concurrent runs hit the same DB). 0x524F554E =
+# ASCII 'ROUN'. The lock is held for the entire run.
+_LOCK_KEY = 0x524F554E
+
 
 def _normalize_dsn(dsn: str) -> str:
-    """psycopg2 needs `postgresql://` — Railway / app code uses `postgresql+asyncpg://`."""
+    """psycopg2 needs ``postgresql://`` — Railway / app code uses ``postgresql+asyncpg://``."""
     return dsn.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+
+def _ensure_ledger(cur) -> None:
+    """Create ``schema_migrations`` if it doesn't exist."""
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            name        TEXT        PRIMARY KEY,
+            applied_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+        """
+    )
+
+
+def _bootstrap_from_existing_db(cur, files: list[str]) -> int:
+    """
+    First-run bootstrap for an already-migrated DB.
+
+    If the ledger is empty AND the public schema contains tables OTHER
+    than schema_migrations (i.e. prior no-ledger runs already applied
+    everything), record every current migration filename as
+    already-applied so subsequent runs skip them.
+
+    Returns the count of files marked as bootstrapped (0 on a fresh DB).
+    """
+    cur.execute("SELECT count(*) FROM schema_migrations")
+    ledger_rows = cur.fetchone()[0]
+    if ledger_rows > 0:
+        return 0
+
+    cur.execute(
+        """
+        SELECT count(*) FROM information_schema.tables
+         WHERE table_schema = 'public'
+           AND table_name  != 'schema_migrations'
+        """
+    )
+    other_tables = cur.fetchone()[0]
+    if other_tables == 0:
+        return 0
+
+    names = [Path(p).name for p in files]
+    cur.executemany(
+        "INSERT INTO schema_migrations (name) VALUES (%s) ON CONFLICT DO NOTHING",
+        [(n,) for n in names],
+    )
+    return len(names)
+
+
+def _apply_one(cur, path: str) -> bool:
+    """Apply a single migration if not yet recorded. Returns True if
+    applied, False if skipped."""
+    name = Path(path).name
+    cur.execute("SELECT 1 FROM schema_migrations WHERE name = %s", (name,))
+    if cur.fetchone():
+        print(f"  ✓ {name} (already applied)")
+        return False
+    print(f"  → {name}")
+    with open(path, encoding="utf-8") as fh:
+        sql = fh.read()
+    cur.execute(sql)
+    cur.execute(
+        "INSERT INTO schema_migrations (name) VALUES (%s) ON CONFLICT DO NOTHING",
+        (name,),
+    )
+    return True
 
 
 def main() -> int:
@@ -36,39 +127,31 @@ def main() -> int:
         print(f"No migrations found in {MIGRATIONS_DIR}; nothing to do.")
         return 0
 
-    print(f"Applying {len(files)} migration(s) from {MIGRATIONS_DIR}:")
+    print(f"Found {len(files)} migration file(s) in {MIGRATIONS_DIR}")
     conn = psycopg2.connect(_normalize_dsn(dsn))
     conn.set_session(autocommit=True)
+    applied = 0
+    skipped = 0
     try:
         with conn.cursor() as cur:
-            # Serialize concurrent migration runs via a Postgres session-level
-            # advisory lock. Railway's pre-deploy command runs once per
-            # service (api + worker share one railway.json), so every deploy
-            # triggers TWO concurrent migrate.py processes against the same
-            # database. Destructive DDL (DROP TABLE CASCADE in 047/048)
-            # races between them and one side fails with no log output
-            # (Railway-diagnosed root cause of deploy 2c0151eb).
-            #
-            # pg_advisory_lock blocks until the lock is free; the second
-            # runner waits behind the first and then runs migrations
-            # against the post-migrated schema (every statement is
-            # IF EXISTS / IF NOT EXISTS / ON CONFLICT, so re-running is
-            # a no-op for already-applied state).
-            #
-            # Lock key 0x524F554E = ASCII 'ROUN' (Rounds) — arbitrary but
-            # collision-free with any other advisory locks in the app.
-            _LOCK_KEY = 0x524F554E
             print(f"Acquiring advisory lock 0x{_LOCK_KEY:X} (serializes concurrent migration runs)...")
             cur.execute("SELECT pg_advisory_lock(%s)", (_LOCK_KEY,))
             print("Lock acquired.")
             try:
+                _ensure_ledger(cur)
+                bootstrapped = _bootstrap_from_existing_db(cur, files)
+                if bootstrapped:
+                    print(
+                        f"Bootstrap: existing tables detected with empty ledger; "
+                        f"marked {bootstrapped} migration file(s) as already-applied. "
+                        f"(This run will be a no-op except for ledger population.)"
+                    )
                 for path in files:
-                    name = Path(path).name
-                    print(f"  → {name}")
-                    with open(path, encoding="utf-8") as fh:
-                        sql = fh.read()
                     try:
-                        cur.execute(sql)
+                        if _apply_one(cur, path):
+                            applied += 1
+                        else:
+                            skipped += 1
                     except Exception as exc:
                         print(f"    FAILED: {exc}", file=sys.stderr)
                         return 1
@@ -78,7 +161,7 @@ def main() -> int:
     finally:
         conn.close()
 
-    print("Migrations complete.")
+    print(f"Migrations complete: {applied} applied, {skipped} skipped.")
     return 0
 
 
