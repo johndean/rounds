@@ -40,6 +40,8 @@ import {
   type HelpContentShape,
   type HelpTopic,
 } from '@/constants/help-content';
+import { askHelp, type HelpAskSource } from '@/services/helpApi';
+import { ApiError } from '@/services/http';
 
 export type HelpRole = 'user' | 'admin';
 
@@ -47,12 +49,41 @@ export interface AskTurn {
   id: string;
   question: string;
   answer: string;
-  citations: { id: string; title: string }[];
+  citations: HelpAskSource[];
   streaming: boolean;
   done: boolean;
   errorCode: string | null;
   errorMessage: string | null;
   startedAt: number;
+}
+
+function makeAskTurnId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
+  return `ask-${Math.floor(Math.random() * 1e9).toString(36)}-${Date.now().toString(36)}`;
+}
+
+function helpErrorMessage(e: unknown): { code: string; message: string } {
+  if (e instanceof ApiError) {
+    // The backend returns 429 with a structured detail; surface that
+    // distinctly so the composer can render a useful chip.
+    if (e.status === 429) {
+      return {
+        code: 'HELP_ASK_RATE_LIMIT',
+        message: 'Hourly Ask AI limit reached. Try again in a few minutes.',
+      };
+    }
+    if (e.status === 404) {
+      return { code: 'NOT_ENABLED', message: 'Ask AI is not enabled on this environment.' };
+    }
+    if (e.status === 400) {
+      return { code: 'BAD_REQUEST', message: 'That question is empty or too long.' };
+    }
+    return { code: `HTTP_${e.status}`, message: e.message || 'Ask AI request failed.' };
+  }
+  if (e instanceof DOMException && e.name === 'AbortError') {
+    return { code: 'ABORTED', message: 'Cancelled.' };
+  }
+  return { code: 'UNKNOWN', message: (e as Error)?.message || 'Ask AI request failed.' };
 }
 
 export const useHelpStore = defineStore('help', () => {
@@ -100,19 +131,92 @@ export const useHelpStore = defineStore('help', () => {
   // ── Resolved content (Phase 1: passthrough; Phase 3 will layer overrides) ──
   const resolved = computed<HelpContentShape>(() => HELP_CONTENT);
 
-  // ── Ask AI placeholder state (wired in Phase 2) ─────────
+  // ── Ask AI state (Phase 2 — real backend wiring) ─────────
   const askThread = ref<AskTurn[]>([]);
   const isStreaming = ref(false);
-  const askEnabled = ref(false); // backend reports this via /v1/version in Phase 2
+  /** Backend SSOT — frontend reads this from /v1/version at app mount. */
+  const askEnabled = ref(false);
+  let activeAbortController: AbortController | null = null;
 
-  function startAsk(question: string): null {
-    // Phase 1 stub — Phase 2 will replace this with real Gemini wiring.
-    // Caller component handles the user-facing "coming soon" surface.
-    void question;
-    return null;
+  function setAskEnabled(v: boolean): void { askEnabled.value = v; }
+
+  /**
+   * Phase 2 — calls POST /v1/help/ask, mutates the matching turn in
+   * askThread with the answer (and citations) or with an error code.
+   * Returns the turn after the call resolves; returns null if a turn is
+   * already in flight or the question is too short.
+   */
+  async function startAsk(questionRaw: string): Promise<AskTurn | null> {
+    const q = questionRaw.trim();
+    if (q.length < 2) return null;
+    if (isStreaming.value) return null;
+
+    const turn: AskTurn = {
+      id: makeAskTurnId(),
+      question: q,
+      answer: '',
+      citations: [],
+      streaming: true,
+      done: false,
+      errorCode: null,
+      errorMessage: null,
+      startedAt: Date.now(),
+    };
+    askThread.value = [...askThread.value, turn];
+    isStreaming.value = true;
+    activeAbortController = new AbortController();
+    const controller = activeAbortController;
+
+    try {
+      const resp = await askHelp({
+        question: q,
+        page_key: pageKey.value,
+        signal: controller.signal,
+      });
+      const i = askThread.value.findIndex((t) => t.id === turn.id);
+      if (i >= 0) {
+        const next = [...askThread.value];
+        next[i] = {
+          ...next[i],
+          answer: resp.answer,
+          citations: resp.sources,
+          streaming: false,
+          done: true,
+        };
+        askThread.value = next;
+      }
+    } catch (e) {
+      const i = askThread.value.findIndex((t) => t.id === turn.id);
+      if (i >= 0) {
+        const next = [...askThread.value];
+        const err = helpErrorMessage(e);
+        next[i] = {
+          ...next[i],
+          streaming: false,
+          done: false,
+          errorCode: err.code,
+          errorMessage: err.message,
+        };
+        askThread.value = next;
+      }
+    } finally {
+      isStreaming.value = false;
+      if (activeAbortController === controller) activeAbortController = null;
+    }
+    return askThread.value.find((t) => t.id === turn.id) ?? null;
   }
-  function abortAsk(): void { isStreaming.value = false; }
-  function clearAskThread(): void { askThread.value = []; }
+
+  function abortAsk(): void {
+    if (activeAbortController) {
+      activeAbortController.abort();
+      activeAbortController = null;
+    }
+    isStreaming.value = false;
+  }
+  function clearAskThread(): void {
+    abortAsk();
+    askThread.value = [];
+  }
 
   return {
     // panel
@@ -122,7 +226,7 @@ export const useHelpStore = defineStore('help', () => {
     // resolved
     resolved,
     // ask
-    askThread, isStreaming, askEnabled,
+    askThread, isStreaming, askEnabled, setAskEnabled,
     startAsk, abortAsk, clearAskThread,
   };
 });

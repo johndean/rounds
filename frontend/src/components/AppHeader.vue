@@ -41,8 +41,14 @@ onMounted(async () => {
     // Plain fetch — /v1/version is unauthenticated, no need for the http() wrapper.
     const r = await fetch('/v1/version');
     if (!r.ok) return;
-    const data = await r.json().catch(() => null) as { commit?: string } | null;
+    const data = await r.json().catch(() => null) as
+      | { commit?: string; help_ask_ai_enabled?: boolean }
+      | null;
     apiSha.value = data?.commit || '';
+    // Phase 2 — Help Center Ask AI tab visibility (backend SSOT).
+    if (typeof data?.help_ask_ai_enabled === 'boolean') {
+      help.setAskEnabled(data.help_ask_ai_enabled);
+    }
   } catch {
     /* silent — version chip is non-essential */
   }

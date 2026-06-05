@@ -38,6 +38,7 @@ from app.api import email_templates as email_templates_router
 from app.api import discrepancies as disc_router
 from app.api import exports as exports_router
 from app.api import gcs_upload as gcs_router
+from app.api import help as help_router
 from app.api import improvements as improvements_router
 from app.api import queue as queue_router
 from app.api import segments as segments_router
@@ -173,6 +174,12 @@ async def version() -> JSONResponse:
         "commit":      commit,
         "commit_short": commit[:7],
         "env":         settings.ENVIRONMENT,
+        # Phase 2 (2026-06-05): the Help Center Ask AI tab reads this at
+        # app mount and shows / hides the chat composer accordingly.
+        # SSOT lives on the backend (settings.HELP_ASK_AI_ENABLED); the
+        # broken Phase-0 VITE_HELP_ASK_AI_ENABLED build-time flag is no
+        # longer consulted by the frontend.
+        "help_ask_ai_enabled": settings.HELP_ASK_AI_ENABLED,
     })
 
 
@@ -216,6 +223,7 @@ app.include_router(email_templates_router.router)
 app.include_router(exports_router.router)
 app.include_router(exports_router.captions_router)
 app.include_router(queue_router.router)
+app.include_router(help_router.router)
 
 
 # ── Static frontend (production) ─────────────────────────────────────────

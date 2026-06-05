@@ -110,6 +110,18 @@ class Settings(BaseSettings):
     SOP_DEADLINE_EMAIL_ENABLED: bool = False
     UPLOAD_WATCHDOG_COOLDOWN_SEC: int = 600     # 10min — minimum gap between watchdog retries on same session
 
+    # ── Help Center Ask AI (Phase 2, 2026-06-05) ─────────────────────
+    # SSOT backend kill-switch for the /v1/help/ask endpoint. Default OFF
+    # so enabling Ask AI is an intentional production action — flip
+    # HELP_ASK_AI_ENABLED=true in Railway api + worker env vars to
+    # activate. Frontend reads this flag from /v1/version at app mount
+    # and shows the Ask tab only when true. The build-time
+    # VITE_HELP_ASK_AI_ENABLED flag is NOT plumbed through the Dockerfile
+    # and is intentionally not consulted (it was the Phase-0 placeholder).
+    HELP_ASK_AI_ENABLED: bool = False
+    # Per-user hourly cap. 0 disables. Soft cap — guards LLM cost surface.
+    HELP_ASK_AI_RATE_LIMIT_PER_HOUR: int = 30
+
     # ── Validators ─────────────────────────────────────────────────────
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

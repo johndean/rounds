@@ -26,9 +26,9 @@ import { useRoute } from 'vue-router';
 import { useHelpStore } from '@/stores/help';
 import { useAuthStore } from '@/stores/auth';
 import HelpItem from '@/components/help/HelpItem.vue';
+import HelpAskComposer from '@/components/help/HelpAskComposer.vue';
 import Icon from '@/components/shared/Icon.vue';
 import { resolvePageKey } from '@/utils/routeToPageKey';
-import { toast } from '@/composables/useToast';
 import { LEGACY_ADMIN_EMAIL_CLIENT } from '@/constants/help-content';
 
 const help = useHelpStore();
@@ -93,20 +93,10 @@ onUnmounted(() => {
   if (debounceTimer) clearTimeout(debounceTimer);
 });
 
-// ── Ask AI Phase 1 placeholder ─────────────────────────────
-const askInput = ref('');
-function onAskSubmit(): void {
-  if (!askInput.value.trim()) return;
-  toast.push('Ask AI ships in the next release. For now, search or browse the tabs above.', { tone: 'info' });
-  askInput.value = '';
-}
-function onAskKeydown(e: KeyboardEvent): void {
-  // Cmd/Ctrl + Enter → submit (matches po.vin convention).
-  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-    e.preventDefault();
-    onAskSubmit();
-  }
-}
+// Ask AI is gated by the backend SSOT flag (`help.askEnabled`), set by
+// AppHeader.vue on mount from /v1/version. When the flag is false the
+// tab still renders so users see what's coming — with a coming-soon
+// notice in place of the chat composer.
 </script>
 
 <template>
@@ -272,9 +262,12 @@ function onAskKeydown(e: KeyboardEvent): void {
           </div>
         </template>
 
-        <!-- Ask AI (Phase 1 placeholder; Phase 2 wires the real backend) -->
+        <!-- Ask AI — real backend wiring when help.askEnabled is true;
+             coming-soon notice otherwise (the tab stays visible so users
+             see what's on the way). -->
         <template v-if="!isSearching && activeTab === 'ask'">
-          <div class="help-ask">
+          <HelpAskComposer v-if="help.askEnabled" />
+          <div v-else class="help-ask">
             <div class="help-ask__head">
               <span class="help-ask__overline">
                 <Icon name="sparkles" :size="12" /> Ask the Help Center AI
@@ -284,29 +277,9 @@ function onAskKeydown(e: KeyboardEvent): void {
               <p class="help-ask__empty">
                 Ask anything about rounds.vin transcript editing, sessions, SOP workflow, exports.
                 Answers cite the help articles they came from.
+                <br /><br />
+                <strong>Coming soon</strong> — for now, use the search bar above or browse the tabs.
               </p>
-            </div>
-            <div class="help-ask__composer">
-              <textarea
-                v-model="askInput"
-                class="help-ask__input"
-                rows="2"
-                placeholder="Ask a question… (⌘/Ctrl + Enter to send)"
-                aria-label="Ask the help center AI"
-                data-test-id="help-ask-input"
-                @keydown="onAskKeydown"
-              />
-              <div class="help-ask__composer-actions">
-                <button
-                  type="button"
-                  class="help-ask__send"
-                  :disabled="!askInput.trim()"
-                  data-test-id="help-ask-submit"
-                  @click="onAskSubmit"
-                >
-                  <Icon name="send" :size="12" /> Ask
-                </button>
-              </div>
             </div>
           </div>
         </template>
