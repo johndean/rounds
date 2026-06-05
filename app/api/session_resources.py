@@ -498,18 +498,92 @@ class ChatMessageOut(BaseModel):
 
 @router.get("/chat", response_model=list[ChatMessageOut])
 async def list_chat(session_id: UUID, db: DbSession, _user: CurrentUser) -> list[dict]:
+    # Phase 6 (2026-06-05) — COALESCE order_index, sent_at_ms so
+    # operator-reordered rows surface in their new positions while
+    # un-reordered rows still appear in chronological order. Pre-fix
+    # this ORDER BY was just sent_at_ms ASC.
     rows = (
         await db.execute(
             text(
                 """
                 SELECT id, author, body, sent_at_ms, anchor_segment, placed
-                FROM chat_messages WHERE session_id = :sid ORDER BY sent_at_ms ASC
+                FROM chat_messages WHERE session_id = :sid
+                ORDER BY COALESCE(order_index, sent_at_ms) ASC, sent_at_ms ASC
                 """
             ),
             {"sid": str(session_id)},
         )
     ).mappings().all()
     return [dict(r) for r in rows]
+
+
+class ReorderRequest(BaseModel):
+    """Body for the bulk reorder endpoints. ``ids`` is the new desired
+    order of the rows in the session's chat or polls list. Positions
+    are 1-indexed (matches how operators think about list order)."""
+    ids: list[UUID]
+
+
+@router.patch("/chat/order")
+async def reorder_chat(session_id: UUID, body: ReorderRequest, db: DbSession, user: CurrentUser) -> dict:
+    """Bulk-reorder chat messages within a session.
+
+    Accepts the new desired order of rows as an array of UUIDs. Sets
+    ``order_index = position`` (1-indexed) for every row in the array.
+    Rows NOT in the array keep their existing order_index (or NULL),
+    which is the right behavior when the operator partial-reorders
+    only the top of a long thread.
+
+    Validation: every UUID must already exist in this session's
+    chat_messages, else a 400 is returned (prevents accidentally
+    inserting a foreign row's id). All-or-nothing transaction so a
+    bad request can't leave a partially-renumbered list.
+
+    Phase 6 of the 2026-06-04 stakeholder remediation."""
+    if not body.ids:
+        raise HTTPException(status_code=400, detail={
+            "code": "EMPTY_REORDER",
+            "message": "ids array must contain at least one chat message id",
+        })
+    # Sanity-check membership: every requested id must belong to this session.
+    existing = (
+        await db.execute(
+            text("SELECT id FROM chat_messages WHERE session_id = CAST(:sid AS uuid)"),
+            {"sid": str(session_id)},
+        )
+    ).scalars().all()
+    existing_set = {str(uid) for uid in existing}
+    bad = [str(uid) for uid in body.ids if str(uid) not in existing_set]
+    if bad:
+        raise HTTPException(status_code=400, detail={
+            "code": "UNKNOWN_CHAT_IDS",
+            "message": f"{len(bad)} id(s) not in this session",
+            "ids": bad[:5],  # cap to avoid leaking too much in the error body
+        })
+    # Apply the renumber in a single transaction.
+    for pos, mid in enumerate(body.ids, start=1):
+        await db.execute(
+            text(
+                "UPDATE chat_messages SET order_index = :pos "
+                "WHERE id = CAST(:mid AS uuid) AND session_id = CAST(:sid AS uuid)"
+            ),
+            {"pos": pos, "mid": str(mid), "sid": str(session_id)},
+        )
+    import json
+    await db.execute(
+        text(
+            "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
+            "VALUES (CAST(:sid AS uuid), :a, 'chat.reorder', :s, CAST(:d AS jsonb))"
+        ),
+        {
+            "sid": str(session_id),
+            "a":   user.email,
+            "s":   f"reordered {len(body.ids)} chat message(s)",
+            "d":   json.dumps({"count": len(body.ids), "first_3": [str(i) for i in body.ids[:3]]}),
+        },
+    )
+    await db.commit()
+    return {"reordered": len(body.ids)}
 
 
 class AnchorPatch(BaseModel):
@@ -624,13 +698,17 @@ class PollOut(BaseModel):
 
 @router.get("/polls", response_model=list[PollOut])
 async def list_polls(session_id: UUID, db: DbSession, _user: CurrentUser) -> list[dict[str, Any]]:
+    # Phase 6 (2026-06-05) — COALESCE order_index, opened_at_ms so
+    # operator-reordered polls surface in their new positions while
+    # un-reordered polls still appear in chronological order.
     polls = (
         await db.execute(
             text(
                 """
                 SELECT id, question, status, opened_at_ms, closed_at_ms,
                        total_votes, anchor_segment, placed, metadata
-                FROM polls WHERE session_id = :sid ORDER BY opened_at_ms ASC
+                FROM polls WHERE session_id = :sid
+                ORDER BY COALESCE(order_index, opened_at_ms) ASC, opened_at_ms ASC
                 """
             ),
             {"sid": str(session_id)},
@@ -651,6 +729,60 @@ async def list_polls(session_id: UUID, db: DbSession, _user: CurrentUser) -> lis
         ).mappings().all()
         out.append({**dict(p), "options": [dict(o) for o in opts]})
     return out
+
+
+@router.patch("/polls/order")
+async def reorder_polls(session_id: UUID, body: ReorderRequest, db: DbSession, user: CurrentUser) -> dict:
+    """Bulk-reorder polls within a session. Mirror of /chat/order.
+
+    Sets ``order_index = position`` (1-indexed) for every poll id in
+    the supplied list. Validation + transaction semantics match the
+    chat variant: every id must belong to this session; all-or-nothing
+    update so a bad request can't half-renumber the list.
+
+    Phase 6 of the 2026-06-04 stakeholder remediation."""
+    if not body.ids:
+        raise HTTPException(status_code=400, detail={
+            "code": "EMPTY_REORDER",
+            "message": "ids array must contain at least one poll id",
+        })
+    existing = (
+        await db.execute(
+            text("SELECT id FROM polls WHERE session_id = CAST(:sid AS uuid)"),
+            {"sid": str(session_id)},
+        )
+    ).scalars().all()
+    existing_set = {str(uid) for uid in existing}
+    bad = [str(uid) for uid in body.ids if str(uid) not in existing_set]
+    if bad:
+        raise HTTPException(status_code=400, detail={
+            "code": "UNKNOWN_POLL_IDS",
+            "message": f"{len(bad)} id(s) not in this session",
+            "ids": bad[:5],
+        })
+    for pos, pid in enumerate(body.ids, start=1):
+        await db.execute(
+            text(
+                "UPDATE polls SET order_index = :pos "
+                "WHERE id = CAST(:pid AS uuid) AND session_id = CAST(:sid AS uuid)"
+            ),
+            {"pos": pos, "pid": str(pid), "sid": str(session_id)},
+        )
+    import json
+    await db.execute(
+        text(
+            "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
+            "VALUES (CAST(:sid AS uuid), :a, 'polls.reorder', :s, CAST(:d AS jsonb))"
+        ),
+        {
+            "sid": str(session_id),
+            "a":   user.email,
+            "s":   f"reordered {len(body.ids)} poll(s)",
+            "d":   json.dumps({"count": len(body.ids), "first_3": [str(i) for i in body.ids[:3]]}),
+        },
+    )
+    await db.commit()
+    return {"reordered": len(body.ids)}
 
 
 @router.patch("/polls/{poll_id}/anchor")
