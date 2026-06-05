@@ -30,6 +30,7 @@ import HelpAdminToolbar from '@/components/help/HelpAdminToolbar.vue';
 import HelpCoverageReport from '@/components/help/HelpCoverageReport.vue';
 import HelpArticleEditorDialog from '@/components/help/HelpArticleEditorDialog.vue';
 import HelpVersionHistoryDialog from '@/components/help/HelpVersionHistoryDialog.vue';
+import HelpComplianceMeter from '@/components/help/HelpComplianceMeter.vue';
 
 const router = useRouter();
 const isAdmin = useIsAdmin();
@@ -211,6 +212,7 @@ onMounted(() => {
               <span class="hed__pill hed__pill--ghost">{{ a.audience }}</span>
               <span class="hed__pill hed__pill--ghost">{{ a.content_domain }}</span>
               <span class="hed__pill hed__pill--ghost">v{{ a.version }}</span>
+              <HelpComplianceMeter :article="a" />
             </div>
             <p v-if="a.summary" class="hed__row-summary">{{ a.summary }}</p>
             <div class="hed__row-meta">

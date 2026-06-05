@@ -141,3 +141,50 @@ export async function searchArticles(q: string, limit = 20): Promise<HelpArticle
   const params = new URLSearchParams({ q, limit: String(limit) });
   return http<HelpArticleDTO[]>(`/v1/help/search?${params.toString()}`);
 }
+
+// ── Phase 4 admin actions ───────────────────────────────────────────
+
+export interface BulkPublishSkippedRow {
+  id: string;
+  title: string;
+  reason: string;
+  wordsOk?: boolean;
+  summaryOk?: boolean;
+  stepsOk?: boolean;
+  wordCount?: number;
+  summaryLen?: number;
+  stepCount?: number;
+}
+
+export interface BulkPublishResponse {
+  total_attempted: number;
+  published: number;
+  published_ids: string[];
+  skipped: BulkPublishSkippedRow[];
+}
+
+export interface EnqueueResponse {
+  task_id: string;
+  task: string;
+  enqueued: boolean;
+}
+
+/** Inline (non-Celery) compliance-gated bulk publish of all drafts. */
+export async function bulkPublishDrafts(): Promise<BulkPublishResponse> {
+  return http<BulkPublishResponse>('/v1/help/admin/bulk-publish', { method: 'POST' });
+}
+
+/** Enqueue the fix_help_summaries Celery task. */
+export async function fixSummaries(): Promise<EnqueueResponse> {
+  return http<EnqueueResponse>('/v1/help/admin/fix-summaries', { method: 'POST' });
+}
+
+/** Enqueue the expand_help_steps Celery task. */
+export async function expandSteps(): Promise<EnqueueResponse> {
+  return http<EnqueueResponse>('/v1/help/admin/expand-steps', { method: 'POST' });
+}
+
+/** Enqueue the expand_faq_steps Celery task. */
+export async function expandFaqs(): Promise<EnqueueResponse> {
+  return http<EnqueueResponse>('/v1/help/admin/expand-faqs', { method: 'POST' });
+}

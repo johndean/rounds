@@ -819,3 +819,116 @@ async def search_articles(
         return []
 
     return [_row_to_article(r) for r in rows]
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Phase 4 — Admin actions: compliance bulk publish + AI rewrite triggers
+# ════════════════════════════════════════════════════════════════════════
+
+
+@router.post("/admin/bulk-publish")
+async def bulk_publish_drafts(db: DbSession, user: CurrentUser) -> dict:
+    """Inline (not Celery) — iterate every draft, run CC-Rounds compute_compliance,
+    publish only the rows where allPass is True. Returns counts + a skipped list
+    with the per-row failure reasons so the admin can target the next batch."""
+    require_admin(user)
+
+    from app.utils.help_compliance import compute_compliance
+
+    rows = (await db.execute(
+        sql_text(
+            "SELECT id, slug, title, summary, category, audience, feature_tags, steps, "
+            "       related_article_ids, display_order, is_published, content_domain, "
+            "       workflow_slug, version, last_edited_by, created_at, updated_at "
+            "  FROM help_articles WHERE is_published = FALSE"
+        )
+    )).mappings().all()
+
+    published_ids: list[str] = []
+    skipped: list[dict[str, Any]] = []
+
+    for r in rows:
+        a = _row_to_article(r)
+        cc = compute_compliance(a)
+        if cc["allPass"]:
+            try:
+                await db.execute(
+                    sql_text(
+                        "UPDATE help_articles "
+                        "   SET is_published = TRUE, version = version + 1, "
+                        "       last_edited_by = :u, updated_at = now() "
+                        " WHERE id = CAST(:aid AS uuid)"
+                    ),
+                    {"aid": a["id"], "u": user.email},
+                )
+                published_ids.append(a["id"])
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("help.bulk_publish: update failed for %s: %s", a["id"], exc)
+                skipped.append({"id": a["id"], "title": a["title"], "reason": "DB update failed"})
+        else:
+            skipped.append({
+                "id": a["id"],
+                "title": a["title"],
+                "reason": "CC-Rounds fail",
+                "wordsOk": cc["wordsOk"],
+                "summaryOk": cc["summaryOk"],
+                "stepsOk": cc["stepsOk"],
+                "wordCount": cc["wordCount"],
+                "summaryLen": cc["summaryLen"],
+                "stepCount": cc["stepCount"],
+            })
+
+    if published_ids:
+        try:
+            await db.commit()
+        except Exception as exc:  # noqa: BLE001
+            await db.rollback()
+            logger.exception("help.bulk_publish: commit failed: %s", exc)
+            raise HTTPException(status_code=500, detail={"code": "INTERNAL", "message": "bulk publish commit failed"}) from exc
+
+    return {
+        "total_attempted": len(rows),
+        "published": len(published_ids),
+        "published_ids": published_ids,
+        "skipped": skipped,
+    }
+
+
+# ─── Celery trigger endpoints (admin) ───────────────────────────────────
+
+
+def _enqueue(task_name: str) -> dict:
+    """Shared enqueue body. Returns the Celery task_id for operator
+    tracking and the task name. Soft-fails if the broker is unreachable —
+    surfaces a 503 with a clear code."""
+    try:
+        from app.tasks.celery_app import celery_app as _ca
+        result = _ca.send_task(task_name)
+        return {"task_id": result.id, "task": task_name, "enqueued": True}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("help: enqueue %s failed: %s", task_name, exc)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "QUEUE_UNAVAILABLE", "message": f"Could not enqueue {task_name}; broker unreachable."},
+        ) from exc
+
+
+@router.post("/admin/fix-summaries")
+async def admin_fix_summaries(user: CurrentUser) -> dict:
+    """Enqueue fix_help_summaries_task. Returns the Celery task_id so the
+    operator can poll, but the work is fire-and-forget — completion fires
+    the audit_events row(s) which admin can inspect."""
+    require_admin(user)
+    return _enqueue("rounds.tasks.help.fix_summaries")
+
+
+@router.post("/admin/expand-steps")
+async def admin_expand_steps(user: CurrentUser) -> dict:
+    require_admin(user)
+    return _enqueue("rounds.tasks.help.expand_steps")
+
+
+@router.post("/admin/expand-faqs")
+async def admin_expand_faqs(user: CurrentUser) -> dict:
+    require_admin(user)
+    return _enqueue("rounds.tasks.help.expand_faqs")

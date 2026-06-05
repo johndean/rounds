@@ -23,6 +23,7 @@ import { computed, ref, watch } from 'vue';
 import { createArticle, updateArticle, type HelpArticleDTO, type HelpStep } from '@/services/helpArticlesApi';
 import { toast } from '@/composables/useToast';
 import Icon from '@/components/shared/Icon.vue';
+import HelpComplianceMeter from '@/components/help/HelpComplianceMeter.vue';
 
 interface Props {
   open: boolean;
@@ -55,6 +56,14 @@ const saving = ref(false);
 
 const isEdit = computed(() => props.article !== null);
 const canSave = computed(() => title.value.trim().length > 0 && !saving.value);
+
+// Live CC-Rounds preview from current form state (re-evaluates as the
+// admin types). Helps the admin land in a compliant state before saving.
+const compliancePreview = computed(() => ({
+  category: category.value,
+  summary: summary.value,
+  steps: steps.value,
+}));
 
 function resetForm(): void {
   const a = props.article;
@@ -284,6 +293,9 @@ async function save(): Promise<void> {
               </button>
             </div>
           </div>
+
+          <!-- CC-Rounds compliance live preview -->
+          <HelpComplianceMeter :article="compliancePreview" :detailed="true" />
 
           <!-- Display order + workflow slug (advanced) -->
           <details class="art-advanced">

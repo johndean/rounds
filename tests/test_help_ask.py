@@ -185,9 +185,14 @@ def test_extractive_answer_caps_at_three():
 
 
 def test_version_includes_help_ask_ai_enabled_field():
+    """The /v1/version response is wrapped by the envelope middleware in
+    {success, data, error, meta}; the help_ask_ai_enabled boolean lives
+    inside the `data` object."""
     client = _client()
     resp = client.get("/v1/version")
     assert resp.status_code == 200
     body = resp.json()
-    assert "help_ask_ai_enabled" in body
-    assert isinstance(body["help_ask_ai_enabled"], bool)
+    # Envelope-wrapped response shape.
+    data = body.get("data", body)  # tolerate either shape
+    assert "help_ask_ai_enabled" in data
+    assert isinstance(data["help_ask_ai_enabled"], bool)

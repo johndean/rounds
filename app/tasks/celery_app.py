@@ -44,6 +44,7 @@ celery_app = Celery(
         "app.tasks.kp_task",
         "app.tasks.sop_tasks",
         "app.tasks.upload_watchdog",
+        "app.tasks.help_tasks",
     ],
 )
 
