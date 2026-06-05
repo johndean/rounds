@@ -14,6 +14,7 @@ import ToastHost from '@/components/overlays/ToastHost.vue';
 import ConfirmHost from '@/components/overlays/ConfirmHost.vue';
 import ModalHost from '@/components/overlays/ModalHost.vue';
 import CommandPalette from '@/components/overlays/CommandPalette.vue';
+import HelpCenterDrawer from '@/components/HelpCenterDrawer.vue';
 import TweaksPanel from '@/components/TweaksPanel.vue';
 import { useAuthStore } from '@/stores/auth';
 import { useUiStore } from '@/stores/ui';
@@ -102,6 +103,8 @@ watch(
     <ConfirmHost />
     <ModalHost />
     <CommandPalette />
+
+    <HelpCenterDrawer />
 
     <TweaksPanel title="Tweaks">
       <div class="twk-sect">Appearance</div>

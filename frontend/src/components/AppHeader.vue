@@ -11,11 +11,13 @@ import Icon from '@/components/shared/Icon.vue';
 import { commandPalette } from '@/composables/useCommandPalette';
 import { toast } from '@/composables/useToast';
 import { useAuthStore } from '@/stores/auth';
+import { useHelpCenterStore } from '@/stores/helpCenter';
 import { useUiStore } from '@/stores/ui';
 
 const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
+const help = useHelpCenterStore();
 const ui = useUiStore();
 
 // Bundle's bake-time SHA — injected by Dockerfile ARG RAILWAY_GIT_COMMIT_SHA
@@ -142,6 +144,8 @@ void ui;  // silence unused
       <span class="app-header__divider" />
       <button class="app-header__icon-btn app-header__icon-btn--mono" title="Decrease font size" aria-label="Decrease font size" data-test-id="topbar-font-decrease" @click="fontDelta(-1)">A−</button>
       <button class="app-header__icon-btn app-header__icon-btn--mono" title="Increase font size" aria-label="Increase font size" data-test-id="topbar-font-increase" @click="fontDelta(1)">A+</button>
+      <span class="app-header__divider" />
+      <button class="app-header__icon-btn app-header__icon-btn--mono" title="Open Help" aria-label="Open help center" data-test-id="topbar-help" @click="help.toggle">?</button>
     </div>
 
     <div class="app-header__user" :title="auth.email ? `Logged in as ${userName}` : 'Not signed in'">
