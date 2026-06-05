@@ -19,6 +19,7 @@ separate plan).
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 from uuid import UUID
 
@@ -34,6 +35,31 @@ router = APIRouter(prefix="/v1/email-templates", tags=["email-templates"])
 
 # Admin allowlist (matches settings.py / email_debug.py / diagnostics.py).
 ADMIN_EMAIL = "johndean@vin.com"
+
+
+# ── Template variable substitution ────────────────────────────────────
+# Seed templates in migration 048 use {{ var_name }} (Jinja/Mustache
+# style). This module provides a regex-based substitution that works
+# without adding Jinja2 as a dependency — the templates are pure data,
+# not templates with control flow.
+_VAR_PATTERN = re.compile(r"\{\{\s*(\w+)\s*\}\}")
+
+
+def substitute_variables(template_str: str, variables: dict[str, Any]) -> str:
+    """
+    Replace ``{{ var_name }}`` placeholders in ``template_str`` with
+    values from ``variables``. Missing keys substitute as empty string
+    (NOT raised) so a partial variables dict doesn't break a send.
+    Whitespace inside the braces is tolerated: ``{{var}}`` and
+    ``{{ var }}`` and ``{{  var  }}`` all resolve to the same key.
+
+    Pure function — safe to call from any context.
+    """
+    def _replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        value = variables.get(key)
+        return str(value) if value is not None else ""
+    return _VAR_PATTERN.sub(_replace, template_str or "")
 
 
 def _require_admin(user) -> None:
@@ -284,3 +310,72 @@ async def resolve_template(
         detail={"code": "NOT_FOUND",
                 "message": f"No active template for stage={payload.stage_id} locale={payload.locale}."},
     )
+
+
+# ── Sync resolver for non-HTTP callers (Celery tasks, etc.) ───────────
+
+def resolve_template_sync(
+    conn,
+    *,
+    session_type_id: Optional[str] = None,
+    stage_id: str,
+    locale: str = "en-US",
+) -> Optional[dict]:
+    """
+    Sync counterpart to ``POST /v1/email-templates/resolve``, for use by
+    Celery tasks (which run sync and own their own SQLAlchemy
+    ``Connection``).
+
+    Differences from the async HTTP route:
+      * Returns ``None`` instead of raising 404 — callers (Celery tasks)
+        decide their fallback path (e.g. fall back to inline f-strings).
+      * Does NOT validate ``stage_id`` against ``_VALID_STAGES`` — the
+        async route validates because it's a user-input boundary; this
+        helper trusts its caller and returns ``None`` if no row exists
+        for whatever ``stage_id`` is passed. This means future
+        deadline-warning template variants (e.g. ``stage_id='prep_overdue'``)
+        can be used without first relaxing the route validator.
+      * No ``CurrentUser`` dependency — the caller authenticates upstream.
+
+    Resolution order matches the async route:
+      1. Per-type row (if ``session_type_id`` is provided).
+      2. Default row (``session_type_id IS NULL``).
+      3. ``None`` if neither exists.
+
+    The returned dict shape mirrors the async route's response, including
+    the ``resolved_from`` discriminator (``"per_type"`` or ``"default"``).
+
+    Phase 7.1 of the 2026-06-04 stakeholder remediation extracted this
+    helper. **Not yet adopted by ``_maybe_send_deadline_email``** — the
+    existing seed templates (migration 048) are for stage-TRANSITION
+    notifications, not deadline-overdue warnings, so adoption requires
+    a Phase 7.2 follow-up that seeds deadline-specific template variants.
+    """
+    if session_type_id is not None:
+        row = conn.execute(
+            text(
+                "SELECT id, session_type_id, stage_id, locale, subject, body, "
+                "       created_by, created_at, updated_at "
+                "FROM email_templates "
+                "WHERE session_type_id = CAST(:tid AS uuid) AND stage_id = :sid "
+                "  AND locale = :loc AND is_active = TRUE"
+            ),
+            {"tid": str(session_type_id), "sid": stage_id, "loc": locale},
+        ).mappings().first()
+        if row:
+            return {**_row_to_template(row), "resolved_from": "per_type"}
+
+    row = conn.execute(
+        text(
+            "SELECT id, session_type_id, stage_id, locale, subject, body, "
+            "       created_by, created_at, updated_at "
+            "FROM email_templates "
+            "WHERE session_type_id IS NULL AND stage_id = :sid AND locale = :loc "
+            "  AND is_active = TRUE"
+        ),
+        {"sid": stage_id, "loc": locale},
+    ).mappings().first()
+    if row:
+        return {**_row_to_template(row), "resolved_from": "default"}
+
+    return None
