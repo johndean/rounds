@@ -11,16 +11,21 @@ the Phase 8 audit (`docs/audits/permissions-open-builder-2026-06-04.md`).
 identified that `auth_users.role` already exists (migration 045) but is
 never consulted by `get_current_user`. The migration path is:
 
-  1. (this commit) Ship the helper + tests. No endpoint changes. No
-     change to `get_current_user`. Behavior identical to current state.
+  1. (commit 7882348) Ship the helper + tests. No endpoint changes.
+     No change to `get_current_user`.
   2. (future) Extend `get_current_user` to load `auth_users.role` into
      the `User` object.
   3. (future) Replace the five hardcoded `_require_admin` patterns with
      `from app.security.roles import require_admin`.
 
-During step 1 (now), callers can already begin using `require_admin`
-without passing a role — it falls back to the legacy single-admin email
-check, so behavior is a strict superset of what exists today.
+Phase 7.3 (2026-06-05) tightened the helper to byte-identical legacy
+semantics — case-sensitive exact equality on both the role-param and
+legacy-email paths. The pre-tightening implementation accepted
+``JOHNDEAN@VIN.COM`` and whitespace-padded emails as admin, silently
+widening the admit set; the verification workflow flagged this and the
+helper is now a strict drop-in replacement for the existing
+``user.email != ADMIN_EMAIL`` patterns. See ``is_admin`` docstring for
+the formal contract.
 """
 from __future__ import annotations
 

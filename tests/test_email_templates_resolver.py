@@ -11,7 +11,7 @@ _maybe_send_deadline_email — see Phase 7.2.
 """
 import pytest
 
-from app.api.email_templates import substitute_variables
+from app.api.email_templates import substitute_variables, substitute_variables_text
 
 
 class TestSubstituteVariables:
@@ -115,6 +115,53 @@ class TestSubstituteVariables:
         assert substitute_variables(template, {"stage": "prep"}) == (
             '<p style="color:red">Stage <strong>prep</strong> overdue</p>'
         )
+
+
+class TestSubstituteVariablesText:
+    """Phase 7.4 — the no-escape variant for plain-text contexts
+    (email Subject headers, log lines). Adding it fixed the
+    regression where ``substitute_variables`` was being applied to
+    subjects and apostrophes in session titles came out as ``&#x27;``."""
+
+    def test_no_html_escape_in_text_variant(self):
+        # The HTML variant would emit `&#x27;` for the apostrophe;
+        # the text variant must pass it through verbatim.
+        assert substitute_variables_text(
+            "Hello {{ name }}", {"name": "ACVIM's Forum"}
+        ) == "Hello ACVIM's Forum"
+
+    def test_text_variant_preserves_angle_brackets(self):
+        # No escape: < and > stay as-is. Caller is responsible for
+        # NOT routing this output into an HTML context.
+        assert substitute_variables_text(
+            "Subject: {{ s }}", {"s": "<top>"}
+        ) == "Subject: <top>"
+
+    def test_text_variant_missing_key_is_empty_string(self):
+        # Same null-handling as the HTML variant.
+        assert substitute_variables_text(
+            "Hello {{ name }}!", {}
+        ) == "Hello !"
+
+    def test_text_variant_seed_subject_shape(self):
+        # Smoke test against the real seed-template subject pattern
+        # from migration 048 / 051 — substitute_variables_text is what
+        # the SOP deadline task now applies to subject lines.
+        subject = "[VIN] OVERDUE: prep — {{ session_code }} ({{ overdue_hours }}h past SLA)"
+        out = substitute_variables_text(subject, {
+            "session_code":  "SS-123",
+            "overdue_hours": "5.0",
+        })
+        assert out == "[VIN] OVERDUE: prep — SS-123 (5.0h past SLA)"
+
+    def test_text_variant_does_not_corrupt_apostrophe_session_title(self):
+        # The regression that motivated this variant: a session title
+        # containing an apostrophe (e.g. "ACVIM's Forum") must reach
+        # the recipient's inbox as written, not as "ACVIM&#x27;s".
+        assert substitute_variables_text(
+            "[VIN] {{ title }} overdue",
+            {"title": "ACVIM's Forum"},
+        ) == "[VIN] ACVIM's Forum overdue"
 
     def test_seed_template_subject_shape(self):
         # Smoke test against the actual seed template shape from

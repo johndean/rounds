@@ -49,10 +49,14 @@ _VAR_PATTERN = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 def substitute_variables(template_str: str, variables: dict[str, Any]) -> str:
     """
     Replace ``{{ var_name }}`` placeholders in ``template_str`` with
-    values from ``variables``. Missing keys substitute as empty string
-    (NOT raised) so a partial variables dict doesn't break a send.
-    Whitespace inside the braces is tolerated: ``{{var}}`` and
-    ``{{ var }}`` and ``{{  var  }}`` all resolve to the same key.
+    HTML-escaped values from ``variables``. Use this for email **body**
+    rendering or any HTML context. For plain-text contexts (email
+    subjects, log lines), use :func:`substitute_variables_text`.
+
+    Missing keys substitute as empty string (NOT raised) so a partial
+    variables dict doesn't break a send. Whitespace inside the braces
+    is tolerated: ``{{var}}`` and ``{{ var }}`` and ``{{  var  }}``
+    all resolve to the same key.
 
     **Substituted values are HTML-escaped** via
     ``html.escape(str(value), quote=True)``. Templates are HTML bodies
@@ -75,6 +79,32 @@ def substitute_variables(template_str: str, variables: dict[str, Any]) -> str:
         if value is None:
             return ""
         return html.escape(str(value), quote=True)
+    return _VAR_PATTERN.sub(_replace, template_str or "")
+
+
+def substitute_variables_text(template_str: str, variables: dict[str, Any]) -> str:
+    """
+    Same as :func:`substitute_variables` but **without HTML escaping**.
+
+    Use for plain-text contexts where the rendered output is NOT parsed
+    as HTML — most commonly email **subject** lines (RFC 5322 headers
+    are plain text; mail clients render entity strings like ``&#x27;``
+    as literal characters, not as the apostrophe they encode).
+
+    Phase 7.4 (2026-06-05) introduced this variant after the fix-
+    verification workflow flagged that ``substitute_variables`` was
+    being applied to both subject and body — defense-in-depth on the
+    HTML body is right; the same escape on a plain-text subject
+    visibly corrupts the rendered output for any operator-edited
+    subject that contains a value like ``{{ session_title }}``.
+
+    Missing keys substitute as empty string (matching the HTML
+    variant). Pure function.
+    """
+    def _replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        value = variables.get(key)
+        return str(value) if value is not None else ""
     return _VAR_PATTERN.sub(_replace, template_str or "")
 
 

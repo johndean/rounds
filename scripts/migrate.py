@@ -94,6 +94,20 @@ def _bootstrap_from_existing_db(cur, files: list[str]) -> int:
         "INSERT INTO schema_migrations (name) VALUES (%s) ON CONFLICT DO NOTHING",
         [(n,) for n in names],
     )
+    # Operator-visible log: the bootstrap assumes the existing DB is
+    # ALREADY fully migrated through the most recent file in
+    # migrations/. On prod (fully-migrated through 051 as of
+    # 2026-06-05), that assumption holds. On partially-migrated dev /
+    # staging DBs, it silently marks unapplied files as applied —
+    # operator must spot-check the list. Default behavior is preserved
+    # for the prod cutover; a future Phase could replace this with
+    # per-migration sentinel detection.
+    print(
+        f"Bootstrap detail: ledger populated with {len(names)} file(s). "
+        f"Marked-applied list (verify against your DB state if non-prod):"
+    )
+    for n in names:
+        print(f"    - {n}")
     return len(names)
 
 

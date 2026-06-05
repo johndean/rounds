@@ -173,24 +173,32 @@ def _deadline_lock_key(session_id: str, stage: str) -> int:
     return int.from_bytes(h[:8], "big") & 0x7FFFFFFFFFFFFFFF
 
 
-def _html_to_text(html: str) -> str:
-    """Crude HTML → plain-text for the email plain-text alternative part.
+def _html_to_text(html_str: str) -> str:
+    """HTML → plain-text for the email plain-text alternative part.
 
-    Strips tags, collapses whitespace, decodes the few HTML entities our
-    templates use. Not a full HTML parser — fits the flat ProximaNova-
-    style mailer markup seeded in migration 048 / 051 which has minimal
-    nesting and no script/style blocks. Returns "" on empty/None input.
+    Strips tags, collapses whitespace, decodes HTML entities via
+    ``html.unescape`` (stdlib — handles 200+ named + numeric entities).
+    Fits the flat ProximaNova-style mailer markup seeded in migration
+    048 / 051 which has minimal nesting and no script/style blocks.
+
+    Phase 7.4 (2026-06-05) replaced the previous 6-entity decode chain
+    with ``html.unescape``. Reason: ``html.escape(s, quote=True)``
+    (which ``substitute_variables`` now applies for XSS protection)
+    emits ``&#x27;`` for apostrophes — NOT ``&#39;`` — and session
+    titles like ``ACVIM's Forum`` were corrupting the text/plain
+    alternative body. The stdlib decoder covers both forms plus
+    every other entity an operator might write into a template.
+
+    Returns "" on empty/None input.
     """
-    if not html:
+    if not html_str:
         return ""
-    text = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
+    text = re.sub(r"<br\s*/?>", "\n", html_str, flags=re.IGNORECASE)
     text = re.sub(r"</p\s*>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"</tr\s*>", "\n", text, flags=re.IGNORECASE)
     text = re.sub(r"</td\s*>", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", "", text)
-    text = (text.replace("&nbsp;", " ").replace("&amp;", "&")
-                .replace("&lt;", "<").replace("&gt;", ">")
-                .replace("&quot;", '"').replace("&#39;", "'"))
+    text = html.unescape(text)
     text = re.sub(r"\n[ \t]*\n[ \t\n]*", "\n\n", text)
     text = re.sub(r"[ \t]+", " ", text)
     return text.strip()
@@ -234,7 +242,11 @@ def _maybe_send_deadline_email(engine, session_id: str, stage: str, overdue_hour
       • a previous send-or-failure audit row exists within the 23h
         window
     """
-    from app.api.email_templates import resolve_template_sync, substitute_variables
+    from app.api.email_templates import (
+        resolve_template_sync,
+        substitute_variables,
+        substitute_variables_text,
+    )
     from app.services.email import send_smtp_email
 
     with engine.connect() as conn:
@@ -343,8 +355,12 @@ def _maybe_send_deadline_email(engine, session_id: str, stage: str, overdue_hour
         )
 
     if template:
-        subject   = substitute_variables(template["subject"], template_vars)
-        html_body = substitute_variables(template["body"],    template_vars)
+        # Subject is a plain-text RFC 5322 header; use the no-escape
+        # variant so {{ session_title }} containing an apostrophe
+        # doesn't deliver `&#x27;` literally to recipients. Body IS
+        # HTML, so the escaping variant is required there for XSS safety.
+        subject   = substitute_variables_text(template["subject"], template_vars)
+        html_body = substitute_variables(template["body"],         template_vars)
         text_body = _html_to_text(html_body)
     else:
         # Inline fallback — used before migration 051 lands, or when
