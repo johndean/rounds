@@ -120,9 +120,21 @@ async def list_segments(session_id: UUID, db: DbSession, _u: CurrentUser) -> lis
 @router.patch("/{segment_id}", response_model=SegmentOut)
 async def edit_segment(session_id: UUID, segment_id: UUID, payload: SegmentPatch, db: DbSession, user: CurrentUser) -> dict:
     import json
+    # Containment + soft-delete guard. The (id, session_id) join already
+    # prevents cross-session mutation (you can't PATCH segment X under
+    # session Y if X actually belongs to session Z — the row simply
+    # doesn't match). The added sessions.deleted_at IS NULL clause
+    # closes the gap where a session has been soft-deleted but its
+    # segments still exist: previously an authenticated user with the
+    # segment_id could still edit content on a deleted session. Rounds
+    # has no per-session membership model today (single-tenant
+    # operator pool), so "require_session_member" reduces to "session
+    # is live." If a membership table lands later, extend this join.
     prior = (await db.execute(text(
-        "SELECT text, flags, slide_id, speaker_id, start_ms, end_ms FROM segments "
-        "WHERE id = :id AND session_id = :s"
+        "SELECT seg.text, seg.flags, seg.slide_id, seg.speaker_id, seg.start_ms, seg.end_ms "
+        "FROM segments seg "
+        "JOIN sessions s ON s.id = seg.session_id "
+        "WHERE seg.id = :id AND seg.session_id = :s AND s.deleted_at IS NULL"
     ), {"id": str(segment_id), "s": str(session_id)})).mappings().first()
     if not prior:
         raise HTTPException(status_code=404, detail="Segment not found")
