@@ -259,7 +259,7 @@ HELP_CONTENT: _HelpContentShape = {
         {"q": "Where can I learn more?", "a": "Click 'Full docs' at the bottom of this panel for the detailed user guide. For bug reports or feature ideas, reach your admin."},
     ],
     "contact": {
-        "email": "rounds-help@vin.com",
+        "email": "johndean@vin.com",
         "slack": "#rounds-help",
         "docs": "rounds.vin/docs",
     },

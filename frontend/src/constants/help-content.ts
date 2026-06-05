@@ -271,7 +271,7 @@ export const HELP_CONTENT: HelpContentShape = {
 
   // ── Contact ───────────────────────────────────────────────
   contact: {
-    email: 'rounds-help@vin.com',
+    email: 'johndean@vin.com',
     slack: '#rounds-help',
     docs:  'rounds.vin/docs',
   },
