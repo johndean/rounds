@@ -28,16 +28,27 @@ import { toast } from '@/composables/useToast';
 
 const emit = defineEmits<{ (e: 'back'): void }>();
 
-interface StageOpt { id: string; label: string }
+interface StageOpt { id: string; label: string; kind?: 'transition' | 'overdue' }
 const stages: StageOpt[] = [
-  { id: 'prep',       label: '1 Prep' },
-  { id: 'copy_draft', label: '2 Copy edit — draft' },
-  { id: 'medical',    label: '3 Medical review' },
-  { id: 'copy_final', label: '4 Copy edit — final' },
-  { id: 'cms',        label: '5 CMS published' },
-  { id: 'captions',   label: '6 Captions on video' },
-  { id: 'qa',         label: '7 QA' },
-  { id: 'complete',   label: '8 Complete' },
+  // Stage-transition templates (migration 048) — fire on stage entry
+  { id: 'prep',       label: '1 Prep',                    kind: 'transition' },
+  { id: 'copy_draft', label: '2 Copy edit — draft',       kind: 'transition' },
+  { id: 'medical',    label: '3 Medical review',          kind: 'transition' },
+  { id: 'copy_final', label: '4 Copy edit — final',       kind: 'transition' },
+  { id: 'cms',        label: '5 CMS published',           kind: 'transition' },
+  { id: 'captions',   label: '6 Captions on video',       kind: 'transition' },
+  { id: 'qa',         label: '7 QA',                      kind: 'transition' },
+  { id: 'complete',   label: '8 Complete',                kind: 'transition' },
+  // Deadline-overdue templates (migration 051, Phase 7.2) — fire when
+  // SOP_DEADLINE_EMAIL_ENABLED is true AND a stage sits past its SLA.
+  // 'complete' has no overdue variant (terminal, SLA=0).
+  { id: 'prep_overdue',       label: '⚠ Prep — overdue',          kind: 'overdue' },
+  { id: 'copy_draft_overdue', label: '⚠ Copy edit draft — overdue', kind: 'overdue' },
+  { id: 'medical_overdue',    label: '⚠ Medical review — overdue',  kind: 'overdue' },
+  { id: 'copy_final_overdue', label: '⚠ Copy edit final — overdue', kind: 'overdue' },
+  { id: 'cms_overdue',        label: '⚠ CMS publish — overdue',     kind: 'overdue' },
+  { id: 'captions_overdue',   label: '⚠ Captions — overdue',        kind: 'overdue' },
+  { id: 'qa_overdue',         label: '⚠ QA — overdue',              kind: 'overdue' },
 ];
 
 // Real session types from /v1/settings/types so the Type dropdown shows

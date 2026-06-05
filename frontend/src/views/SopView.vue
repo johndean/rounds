@@ -73,9 +73,41 @@ const palette: StageMeta[] = [
   { assignee: 'QA Group',        role: 'QA',                avatar: 'QA', color: '#007D61' },
   { assignee: '—',               role: '—',                 avatar: '—',  color: '#002855' },
 ];
+// Phase 7-broader (2026-06-05): the palette above is decorative
+// fallback only. Live assignees come from sop_state.assignees JSONB,
+// which is written by the reassign endpoint. Pre-fix, this view
+// displayed palette values regardless of what was actually assigned —
+// reassign writes were invisible. Now we overlay the live assignee
+// onto the palette entry so the side card / KPI / stepper all reflect
+// reality. Colors/roles/avatar initials stay from the palette since
+// the JSONB only carries the assignee identifier.
+function _deriveAssigneeDisplay(raw: string): { assignee: string; avatar: string } {
+  if (raw.startsWith('group:')) {
+    return { assignee: raw.slice(6), avatar: 'GR' };
+  }
+  if (raw.includes('@')) {
+    const local = raw.split('@', 1)[0] || raw;
+    const parts = local.split(/[._-]/).filter(Boolean);
+    const display = parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ') || raw;
+    const avatar = (parts.map(p => p.charAt(0)).join('').slice(0, 2) || raw.slice(0, 2)).toUpperCase();
+    return { assignee: display, avatar };
+  }
+  return { assignee: raw, avatar: raw.slice(0, 2).toUpperCase() };
+}
+
 const stageMeta = computed<Record<string, StageMeta>>(() => {
   const out: Record<string, StageMeta> = {};
-  stages.forEach((s, i) => { out[s.id] = palette[i] || palette[palette.length - 1]!; });
+  const live = sopState.value?.assignees ?? {};
+  stages.forEach((s, i) => {
+    const base = palette[i] || palette[palette.length - 1]!;
+    const liveValue = live[s.id];
+    if (typeof liveValue === 'string' && liveValue.length > 0) {
+      const { assignee, avatar } = _deriveAssigneeDisplay(liveValue);
+      out[s.id] = { ...base, assignee, avatar };
+    } else {
+      out[s.id] = base;
+    }
+  });
   return out;
 });
 

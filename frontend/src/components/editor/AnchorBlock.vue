@@ -92,6 +92,7 @@ function startEdit(): void {
             v-model="draft"
             class="segment-editor__textarea"
             wrap="soft"
+            spellcheck="true"
             :style="{ width: '100%', minHeight: kind === 'poll' ? '60px' : '110px' }"
             :rows="kind === 'poll' ? 2 : 4"
             @click.stop

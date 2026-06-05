@@ -431,6 +431,7 @@ watch(() => props.activeSegmentId, (id, prev) => {
                 class="segment-editor__textarea"
                 :value="inline.draft"
                 wrap="soft"
+                spellcheck="true"
                 :style="{ width: '100%' }"
                 :rows="rows()"
                 @input="(e) => mutate((e.target as HTMLTextAreaElement).value)"
