@@ -129,7 +129,7 @@ function onLiveClick(idx: number, e: MouseEvent): void {
 </script>
 
 <template>
-  <span class="segment__text">
+  <span class="segment__text" :style="{ whiteSpace: 'pre-wrap' }">
     <template v-if="useAlignment">
       <span
         v-for="(item, i) in items"

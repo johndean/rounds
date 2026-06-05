@@ -155,11 +155,29 @@ def to_docx(session: SessionForExport) -> bytes:
         if seg.slide_index != last_slide and seg.slide_title:
             doc.add_heading(f"Slide {seg.slide_index}: {seg.slide_title}", level=2)
             last_slide = seg.slide_index
-        para = doc.add_paragraph()
-        if seg.speaker_name:
-            run = para.add_run(f"{seg.speaker_name}: ")
-            run.bold = True
-        para.add_run(seg.text or "")
+        # Phase 5 (2026-06-05) — preserve segment formatting in the
+        # DOCX export. Previously every segment collapsed to a single
+        # paragraph regardless of embedded \n, so an editor who hard-
+        # wrapped a long quote into 3 paragraphs would see one wall of
+        # text in the exported Word doc.
+        # Convention: '\n\n' (hard return) = new paragraph,
+        #             '\n'   (soft return) = line break within paragraph
+        # (matches what MS Word emits for Enter vs Shift+Enter).
+        seg_text = seg.text or ""
+        paragraphs = seg_text.split("\n\n")
+        for p_idx, para_text in enumerate(paragraphs):
+            para = doc.add_paragraph()
+            if p_idx == 0 and seg.speaker_name:
+                speaker_run = para.add_run(f"{seg.speaker_name}: ")
+                speaker_run.bold = True
+            lines = para_text.split("\n")
+            for l_idx, line in enumerate(lines):
+                if l_idx > 0:
+                    # Soft line break — python-docx exposes it via
+                    # add_break() on a run (no arg = WD_BREAK.LINE).
+                    para.add_run().add_break()
+                if line:
+                    para.add_run(line)
 
     buf = io.BytesIO()
     doc.save(buf)
