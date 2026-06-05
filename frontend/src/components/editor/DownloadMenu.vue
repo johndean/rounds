@@ -2,15 +2,22 @@
 /**
  * DownloadMenu — verbatim port of editor.jsx::DownloadMenu (938-970).
  * Dropdown of export formats (docx / srt / txt / zip). Closes on outside click.
+ *
+ * Phase A1 (2026-06-05): wired to GET /v1/sessions/{id}/exports/{format}.
+ * Replaces the previous toast-only stub. The exportsApi helper streams
+ * the artifact bytes as a Blob and triggers a browser save dialog via
+ * a transient <a download> element.
  */
 import { ref, onMounted, onUnmounted } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
 import { toast } from '@/composables/useToast';
+import { exportsApi } from '@/services/api';
 
-defineProps<{ code: string }>();
+const props = defineProps<{ code: string; sessionId: string }>();
 
 const open = ref(false);
 const wrapRef = ref<HTMLElement | null>(null);
+const downloading = ref<string | null>(null);
 
 interface Format { ext: 'docx' | 'srt' | 'txt' | 'zip'; label: string; sub: string }
 const formats: Format[] = [
@@ -28,9 +35,19 @@ function onDoc(e: MouseEvent): void {
 onMounted(() => document.addEventListener('mousedown', onDoc));
 onUnmounted(() => document.removeEventListener('mousedown', onDoc));
 
-function pick(f: Format, code: string): void {
+async function pick(f: Format): Promise<void> {
+  if (downloading.value) return;
   open.value = false;
-  toast.push(`Downloading ${f.label} (.${f.ext}) for ${code}`, { tone: 'info' });
+  downloading.value = f.ext;
+  toast.push(`Preparing ${f.label} (.${f.ext})…`, { tone: 'info' });
+  try {
+    await exportsApi.download(props.sessionId, f.ext);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'Download failed';
+    toast.push(`Could not download ${f.label}: ${msg}`, { tone: 'error' });
+  } finally {
+    downloading.value = null;
+  }
 }
 </script>
 
@@ -48,7 +65,8 @@ function pick(f: Format, code: string): void {
         class="dl-menu__item"
         role="menuitem"
         :data-test-id="`dl-${f.ext}`"
-        @click="pick(f, code)"
+        :disabled="downloading !== null"
+        @click="pick(f)"
       >
         <div class="dl-menu__label">{{ f.label }} <code>(.{{ f.ext }})</code></div>
         <div class="dl-menu__sub">{{ f.sub }}</div>

@@ -621,10 +621,18 @@ body.is-col-resizing .editor__resizer::before {
   width: 10px; height: 10px; border-radius: 50%; background: #fff;
   border: 2px solid var(--color-navy); box-shadow: var(--shadow-sm);
 }
-.vstrip__chapter-marks { position: absolute; inset: 5px 0 5px 0; }
+.vstrip__chapter-marks { position: absolute; inset: 5px 0 5px 0; pointer-events: none; }
 .vstrip__chapter-marks > span {
   position: absolute; top: 0; bottom: 0; width: 1px;
   background: rgba(0,0,0,0.18);
+  pointer-events: auto;
+  cursor: pointer;
+  transition: width 0.12s, background 0.12s;
+}
+.vstrip__chapter-marks > span:hover {
+  width: 3px;
+  background: var(--color-blue, #0861CE);
+  transform: translateX(-1px);
 }
 .vstrip__time {
   font-family: var(--font-mono); font-size: 10.5px; font-weight: 600;
@@ -813,6 +821,46 @@ body.is-col-resizing .editor__resizer::before {
   font-weight: var(--weight-bold);
 }
 .editor__tab.is-active .count { background: var(--color-navy); color: #fff; }
+.editor__tab .count--amber { background: var(--color-amber, #B45A1A); color: #fff; }
+.editor__tab.is-active .count--amber { background: var(--color-amber, #B45A1A); color: #fff; }
+
+/* Phase A7 — per-stage loading progress strip at top of editor. */
+.editor__loadbar {
+  position: relative;
+  background: var(--surface-card, #fff);
+  border-bottom: 1px solid var(--border-subtle, #e5e7eb);
+  padding: 6px 16px 4px;
+  font-family: var(--font-family);
+}
+.editor__loadbar-fill {
+  position: absolute; left: 0; top: 0; height: 2px;
+  background: var(--color-green, #16A34A);
+  transition: width 0.18s ease-out;
+}
+.editor__loadbar--has-error .editor__loadbar-fill { background: var(--color-amber, #B45A1A); }
+.editor__loadbar-stages {
+  display: flex; gap: 10px; flex-wrap: wrap;
+  font-size: 10.5px; color: var(--fg2, #6b7280);
+  text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600;
+}
+.editor__loadbar-stage { display: inline-flex; align-items: center; gap: 4px; }
+.editor__loadbar-stage::before {
+  content: ''; display: inline-block;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--color-light-steel, #d4d4d8);
+  flex-shrink: 0;
+}
+.editor__loadbar-stage.is-done       { color: var(--fg1, #002855); }
+.editor__loadbar-stage.is-done::before  { background: var(--color-green, #16A34A); }
+.editor__loadbar-stage.is-error      { color: var(--color-amber, #B45A1A); }
+.editor__loadbar-stage.is-error::before { background: var(--color-amber, #B45A1A); }
+.editor__loadbar-stage.is-pending::before {
+  animation: editor-loadbar-pulse 1.2s ease-in-out infinite;
+}
+@keyframes editor-loadbar-pulse {
+  0%, 100% { opacity: 0.4; }
+  50%      { opacity: 1; }
+}
 .editor__tab .tab-indicator {
   display: inline-block;
   width: 6px; height: 6px;

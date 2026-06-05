@@ -80,6 +80,38 @@ const ALIGNMENT_BY_SEGMENT = ref<Map<string, WordAlignmentEntry[]>>(new Map());
 const pipelineCfg = ref<{ ai_pipeline: string; ai_mode: string; ai_model: string } | null>(null);
 const loading = ref(true);
 
+// Phase A7 — per-stage loading progress. Each stage is independently
+// observable so a slow / failed dependency doesn't hide the rest of the
+// load behind a generic spinner. Stages flip 'pending' → 'done' | 'error'
+// as their fetch settles; the strip renders only while `loading` is true
+// and the helper below wraps each fetch in a track() that returns the
+// fallback on rejection (preserves the existing .catch(() => []) semantics).
+type LoadStageState = 'pending' | 'done' | 'error';
+type LoadStageKey = 'session' | 'segments' | 'slides' | 'speakers'
+  | 'chat' | 'polls' | 'discrepancies' | 'corrections' | 'words' | 'pipeline' | 'alignment';
+const _initialStages = (): Record<LoadStageKey, LoadStageState> => ({
+  session: 'pending', segments: 'pending', slides: 'pending', speakers: 'pending',
+  chat: 'pending', polls: 'pending', discrepancies: 'pending', corrections: 'pending',
+  words: 'pending', pipeline: 'pending', alignment: 'pending',
+});
+const loadStages = ref<Record<LoadStageKey, LoadStageState>>(_initialStages());
+const LOAD_STAGE_LABELS: Record<LoadStageKey, string> = {
+  session: 'Session', segments: 'Segments', slides: 'Slides', speakers: 'Speakers',
+  chat: 'Chat', polls: 'Polls', discrepancies: 'Discrepancies', corrections: 'Audit',
+  words: 'Words', pipeline: 'Pipeline', alignment: 'Alignment',
+};
+function _trackLoad<T>(stage: LoadStageKey, p: Promise<T>, fallback: T): Promise<T> {
+  return p
+    .then((r) => { loadStages.value[stage] = 'done'; return r; })
+    .catch(() => { loadStages.value[stage] = 'error'; return fallback; });
+}
+const loadProgressPct = computed(() => {
+  const states = Object.values(loadStages.value);
+  const settled = states.filter((s) => s !== 'pending').length;
+  return Math.round((settled / states.length) * 100);
+});
+const loadHasError = computed(() => Object.values(loadStages.value).some((s) => s === 'error'));
+
 const TOTAL_DURATION = ref<number>(0);
 const mediaUrl = ref<string | null>(null);
 const mediaKind = ref<'video' | 'audio' | null>(null);
@@ -87,20 +119,26 @@ const sessionCode = computed(() => session.value?.code || props.id);
 const sessionStage = computed(() => 'prep'); // until /sop wiring lands per-editor
 
 async function load(opts: { silent?: boolean } = {}): Promise<void> {
-  if (!opts.silent) loading.value = true;
+  if (!opts.silent) {
+    loading.value = true;
+    loadStages.value = _initialStages();
+  }
   try {
+    // Each fetch is wrapped in _trackLoad so its stage state flips
+    // 'pending' → 'done' on resolve, → 'error' on reject (with the
+    // fallback preserved so existing call-site assumptions hold).
     const [s, sg, sl, sp, ch, po, di, co, wd, pc, al] = await Promise.all([
-      sessionsApi.get(props.id).catch(() => null),
-      segmentsApi.list(props.id).catch(() => []),
-      http<Slide[]>(`/v1/sessions/${encodeURIComponent(props.id)}/slides`).catch(() => []),
-      http<ApiSpeaker[]>(`/v1/sessions/${encodeURIComponent(props.id)}/speakers`).catch(() => []),
-      http<ChatMessage[]>(`/v1/sessions/${encodeURIComponent(props.id)}/chat`).catch(() => []),
-      http<Poll[]>(`/v1/sessions/${encodeURIComponent(props.id)}/polls`).catch(() => []),
-      discrepanciesApi.list(props.id).catch(() => ({ session_id: props.id, count: 0, classified_count: 0, classification_status: 'pending' as const, discrepancies: [] as DiscrepancyRow[] })),
-      auditApi.corrections(props.id).catch(() => []),
-      wordsApi.listBySession(props.id).catch(() => [] as WordRow[]),
-      sessionsApi.pipelineConfig(props.id).catch(() => null),
-      wordAlignmentApi.get(props.id).catch(() => ({ session_id: props.id, count: 0, matched: 0, segments: {} as Record<string, WordAlignmentEntry[]> })),
+      _trackLoad('session',       sessionsApi.get(props.id),                                                                     null),
+      _trackLoad('segments',      segmentsApi.list(props.id),                                                                    [] as Array<{ id: string; seq: number; start_ms: number; end_ms: number; text: string; confidence: number | null; flags: string[]; slide_id: string | null; speaker_id: string | null }>),
+      _trackLoad('slides',        http<Array<{ id: string; slide_index: number; title: string | null }>>(`/v1/sessions/${encodeURIComponent(props.id)}/slides`), [] as Array<{ id: string; slide_index: number; title: string | null }>),
+      _trackLoad('speakers',      http<ApiSpeaker[]>(`/v1/sessions/${encodeURIComponent(props.id)}/speakers`),                   [] as ApiSpeaker[]),
+      _trackLoad('chat',          http<ChatMessage[]>(`/v1/sessions/${encodeURIComponent(props.id)}/chat`),                      [] as ChatMessage[]),
+      _trackLoad('polls',         http<Poll[]>(`/v1/sessions/${encodeURIComponent(props.id)}/polls`),                            [] as Poll[]),
+      _trackLoad('discrepancies', discrepanciesApi.list(props.id),                                                               { session_id: props.id, count: 0, classified_count: 0, classification_status: 'pending' as const, discrepancies: [] as DiscrepancyRow[] }),
+      _trackLoad('corrections',   auditApi.corrections(props.id),                                                                [] as Array<{ id: string; segment_id: string; correction_type: string; created_at: string; created_by: string; old_text: string; new_text: string }>),
+      _trackLoad('words',         wordsApi.listBySession(props.id),                                                              [] as WordRow[]),
+      _trackLoad('pipeline',      sessionsApi.pipelineConfig(props.id),                                                          null),
+      _trackLoad('alignment',     wordAlignmentApi.get(props.id),                                                                { session_id: props.id, count: 0, matched: 0, segments: {} as Record<string, WordAlignmentEntry[]> }),
     ]);
     session.value = s;
     pipelineCfg.value = pc;
@@ -612,6 +650,42 @@ const flagCounts = computed<FlagCounts>(() => {
 
 const flagFilter = ref<string | null>(null);
 
+// Phase A4 — actually filter the segment list when a flag chip is
+// clicked. Two-source matching: a segment matches if either its
+// ai_flags include the chip's kind OR a Discrepancy with category
+// equal to the chip has segment_id == segment.id.
+//
+// chipId → predicate on (segment, discrepancyCategoriesForSegment Set).
+// Chips with no data source (name / number / date / style) return an
+// empty Set — the filter yields zero segments, which the UI renders as
+// "No segments match this filter."
+const visibleSegments = computed(() => {
+  const f = flagFilter.value;
+  if (!f) return SEGMENTS.value;
+
+  // Build a per-segment Set of discrepancy categories for fast lookup.
+  const catsBySeg = new Map<string, Set<string>>();
+  DISCREPANCIES.value.forEach((d) => {
+    if (!d.segment_id || !d.category) return;
+    let s = catsBySeg.get(d.segment_id);
+    if (!s) { s = new Set(); catsBySeg.set(d.segment_id, s); }
+    s.add(d.category);
+  });
+
+  return SEGMENTS.value.filter((seg) => {
+    const cats = catsBySeg.get(seg.id);
+    if (f === 'uncertain')   return seg.ai_flags.some((af) => af.kind === 'uncertain');
+    if (f === 'drift')       return seg.ai_flags.some((af) => af.kind === 'drift') || (cats?.has('drift') ?? false);
+    if (f === 'low_conf')    return seg.ai_flags.some((af) => af.kind === 'low_confidence') || (cats?.has('low_confidence') ?? false);
+    // Discrepancy-only categories.
+    if (f === 'filler' || f === 'punctuation' || f === 'medication' || f === 'terminology' || f === 'other') {
+      return cats?.has(f) ?? false;
+    }
+    // name / number / date / style — no data source today; empty filter result.
+    return false;
+  });
+});
+
 const sessStageIdx = computed(() => SOP_STAGES.findIndex((x) => x.id === sessionStage.value));
 const sessStageName = computed(() => SOP_STAGES.find((x) => x.id === sessionStage.value)?.name || '');
 
@@ -746,10 +820,66 @@ const auditSessionRef = computed(() => ({ id: session.value?.id || props.id }));
 
 onMounted(() => { document.body.classList.add('has-editor'); });
 onUnmounted(() => { document.body.classList.remove('has-editor'); });
+
+// ── Keyboard shortcuts (Phase A2) ────────────────────────────────────
+// Cmd/Ctrl+Z      → onUndo()
+// Shift+Cmd/Ctrl+Z → onRedo()
+// Cmd/Ctrl+F      → openFind()
+//
+// Guarded against input/textarea focus so the browser's native undo
+// inside a focused segment-edit textarea still works. The toolbar's
+// own undo/redo (inline.history / inline.redo) manages the segment
+// draft separately and shouldn't be hijacked by the global handler.
+function onEditorKeydown(e: KeyboardEvent): void {
+  // Modifier required for all three shortcuts.
+  const mod = e.metaKey || e.ctrlKey;
+  if (!mod) return;
+
+  // Let textareas / inputs / contenteditable own their native shortcuts.
+  const target = e.target as HTMLElement | null;
+  if (target) {
+    const tag = target.tagName;
+    if (tag === 'TEXTAREA' || tag === 'INPUT' || target.isContentEditable) return;
+  }
+
+  const k = e.key.toLowerCase();
+  if (k === 'z' && !e.shiftKey) {
+    e.preventDefault();
+    void onUndo();
+  } else if ((k === 'z' && e.shiftKey) || k === 'y') {
+    // Cmd+Shift+Z (mac convention) OR Ctrl+Y (windows convention) → redo
+    e.preventDefault();
+    void onRedo();
+  } else if (k === 'f') {
+    e.preventDefault();
+    openFind();
+  }
+}
+
+onMounted(() => { window.addEventListener('keydown', onEditorKeydown); });
+onUnmounted(() => { window.removeEventListener('keydown', onEditorKeydown); });
 </script>
 
 <template>
   <div class="editor" :data-screen-label="`Editor / ${props.id}`">
+    <!-- Phase A7 — per-stage load progress strip. Shows only during the
+         initial load; non-blocking, error-tolerant per stage. -->
+    <div
+      v-if="loading"
+      class="editor__loadbar"
+      :class="loadHasError ? 'editor__loadbar--has-error' : ''"
+      data-test-id="editor-loadbar"
+    >
+      <div class="editor__loadbar-fill" :style="{ width: `${loadProgressPct}%` }" />
+      <div class="editor__loadbar-stages">
+        <span
+          v-for="(state, key) in loadStages"
+          :key="key"
+          :class="['editor__loadbar-stage', `is-${state}`]"
+          :title="`${LOAD_STAGE_LABELS[key]}: ${state}`"
+        >{{ LOAD_STAGE_LABELS[key] }}</span>
+      </div>
+    </div>
     <div class="editor__topbar">
       <div class="page-eyebrow" :style="{ marginBottom: '6px' }">
         <RouterLink to="/sessions">Sessions</RouterLink><span class="sep">/</span>
@@ -804,7 +934,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
           <span class="stage-badge stage-badge--prep" :style="{ textTransform: 'uppercase' }">{{ sessStageName }}</span>
           <RouterLink :to="`/e/${props.id}/sop`" class="btn btn--ghost btn--sm"><Icon name="branch" /> Workflow</RouterLink>
           <RouterLink :to="`/e/${props.id}/audit`" class="btn btn--ghost btn--sm"><Icon name="history" /> Audit</RouterLink>
-          <DownloadMenu :code="sessionCode" />
+          <DownloadMenu :code="sessionCode" :session-id="props.id" />
         </span>
       </div>
 
@@ -839,7 +969,12 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
       </button>
       <button :class="['editor__tab', tab === 'disc' ? 'is-active' : '']" role="tab" @click="tab = 'disc'">
         <Icon name="git" /> Discrepancies
-        <span v-if="counts.disc > 0" class="tab-indicator" aria-label="Has meaningful diffs"></span>
+        <span
+          v-if="counts.disc > 0"
+          class="count count--amber"
+          :aria-label="`${counts.disc} unresolved discrepanc${counts.disc === 1 ? 'y' : 'ies'}`"
+          data-test-id="disc-tab-count"
+        >{{ counts.disc }}</span>
       </button>
       <button :class="['editor__tab', tab === 'audit' ? 'is-active' : '']" role="tab" @click="tab = 'audit'">
         <Icon name="history" /> Audit
@@ -870,6 +1005,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
           @update:playing="(v) => (playing = v)"
           @update:total="onMediaDurationLoaded"
           @scrub-click="onScrubClick"
+          @seek-to="(s: number) => { time = TOTAL_DURATION > 0 ? Math.max(0, Math.min(TOTAL_DURATION, s)) : Math.max(0, s); }"
         />
         <SlideRail
           :slides="SLIDES"
@@ -886,7 +1022,7 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
 
       <TranscriptPane
         v-if="tab === 'ai'"
-        :segments="SEGMENTS"
+        :segments="visibleSegments"
         :active-segment-id="activeSegment?.id"
         :active-word-idx="activeWordIdx"
         :focused-slide-id="focusedSlideId"

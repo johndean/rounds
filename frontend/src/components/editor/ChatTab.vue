@@ -138,7 +138,7 @@ function trim32(t: string): string {
       <div
         v-else
         :class="['chat-msg', placements[row.msg.id] ? 'is-placed' : '', dropTargetId === row.msg.id ? 'is-reorder-target' : '']"
-        :draggable="!placements[row.msg.id]"
+        :draggable="true"
         @dragstart="(e) => onDragStart(e as DragEvent, row.msg.id)"
         @dragover="(e) => onReorderOver(e as DragEvent, row.msg.id)"
         @dragleave="() => onReorderLeave(row.msg.id)"

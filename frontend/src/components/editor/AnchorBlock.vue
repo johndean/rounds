@@ -52,6 +52,20 @@ function startEdit(): void {
   draft.value = props.kind === 'chat' ? (props.item as ChatMessage).text : (props.item as Poll).question;
   editing.value = true;
 }
+
+// Phase B5 (2026-06-05): re-anchor by drag. Setting the placement MIME
+// with the item id makes TranscriptPane's segment drop handler treat
+// this drag exactly like a fresh drop from the right-rail ChatTab /
+// PollsTab — handleDropOnSegment(itemId, newSegId) → placementsApi
+// upserts anchor_segment. No unplace needed; backend is upsert-style.
+// stopPropagation keeps the segment that owns this anchor block from
+// also firing its own dragstart.
+function onAnchorDragStart(e: DragEvent): void {
+  if (editing.value || !e.dataTransfer) return;
+  e.stopPropagation();
+  e.dataTransfer.setData('application/vnd.mic.anchor', props.item.id);
+  e.dataTransfer.effectAllowed = 'move';
+}
 </script>
 
 <template>
@@ -59,7 +73,7 @@ function startEdit(): void {
     :class="['segment', 'segment--anchor', `segment--anchor-${kind}`]"
     :data-anchor-id="item.id"
     :draggable="!editing"
-    @dragstart.stop
+    @dragstart="onAnchorDragStart"
   >
     <header class="segment__header">
       <span class="segment__slide-chip">

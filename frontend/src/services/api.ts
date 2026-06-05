@@ -382,6 +382,46 @@ export const placements = {
 };
 
 
+// ─── Exports (Phase A1 — wire DownloadMenu) ───────────────────────────
+// Backend: GET /v1/sessions/{id}/exports/{format} returns the artifact
+// bytes with Content-Disposition: attachment. The http() wrapper assumes
+// JSON, so this helper does a raw fetch + blob conversion + manual
+// JWT header, then streams the blob through a transient <a download>
+// element. The object URL is revoked immediately after click to free
+// memory.
+export const exports_ = {
+  /** Download an export artifact and trigger a browser save dialog. */
+  download: async (sessionId: string, format: 'docx' | 'srt' | 'vtt' | 'txt' | 'zip'): Promise<void> => {
+    const token = getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const url = `/v1/sessions/${encodeURIComponent(sessionId)}/exports/${encodeURIComponent(format)}`;
+    const resp = await fetch(url, { headers });
+    if (!resp.ok) {
+      let envelope: unknown = null;
+      try { envelope = await resp.json(); } catch { /* non-JSON */ }
+      throw new ApiError(resp.status, envelope);
+    }
+    // Filename from Content-Disposition; fall back to session_id.format.
+    const cd = resp.headers.get('content-disposition') || '';
+    const match = cd.match(/filename="?([^";]+)"?/i);
+    const filename = match?.[1] || `${sessionId}.${format}`;
+    const blob = await resp.blob();
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(objUrl);
+  },
+};
+// Re-export under the canonical name; `exports` is a reserved-ish JS word
+// in some bundlers, so the internal symbol uses an underscore suffix.
+export { exports_ as exportsApi };
+
+
 // ─── Corrections (Phase 4 — append-only ledger with undo/redo pointer) ──
 export interface CorrectionRow {
   correction_id: string;

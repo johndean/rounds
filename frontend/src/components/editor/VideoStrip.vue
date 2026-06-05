@@ -49,6 +49,7 @@ const emit = defineEmits<{
   (e: 'update:playing', v: boolean): void;
   (e: 'update:total', t: number): void;
   (e: 'scrubClick', ev: MouseEvent): void;
+  (e: 'seekTo', seconds: number): void;
 }>();
 
 const mediaEl = ref<HTMLMediaElement | null>(null);
@@ -75,13 +76,14 @@ const trackWidth = computed(() => {
   return `${Math.min(100, Math.max(0, pct))}%`;
 });
 
-interface ChapterMark { id: string; n: number; left: string }
+interface ChapterMark { id: string; n: number; left: string; start: number }
 const chapterMarks = computed<ChapterMark[]>(() =>
   props.slides
     .map((sl) => {
       const segs = props.segmentsBySlide.get(sl.id);
       if (!segs || !segs.length || props.total <= 0) return null;
-      return { id: sl.id, n: sl.n, left: `${(segs[0]!.start / props.total) * 100}%` };
+      const start = segs[0]!.start;
+      return { id: sl.id, n: sl.n, left: `${(start / props.total) * 100}%`, start };
     })
     .filter((x): x is ChapterMark => x != null)
 );
@@ -245,7 +247,15 @@ onUnmounted(() => {
       >
         <div class="vstrip__track"><span :style="{ width: trackWidth }" /></div>
         <div class="vstrip__chapter-marks">
-          <span v-for="m in chapterMarks" :key="m.id" :style="{ left: m.left }" :title="`Slide ${m.n}`" />
+          <span
+            v-for="m in chapterMarks"
+            :key="m.id"
+            class="vstrip__chapter-mark"
+            :style="{ left: m.left }"
+            :title="`Jump to Slide ${m.n}`"
+            :data-test-id="`chapter-mark-${m.n}`"
+            @click.stop="emit('seekTo', m.start)"
+          />
         </div>
         <div class="vstrip__head" :style="{ left: trackWidth }" />
       </div>

@@ -105,7 +105,7 @@ function onReorderEnd(): void {
       v-for="p in polls"
       :key="p.id"
       :class="['poll-card', placements[p.id] ? 'is-placed' : '', dropTargetId === p.id ? 'is-reorder-target' : '']"
-      :draggable="!placements[p.id]"
+      :draggable="true"
       @dragstart="(e) => onDragStart(e as DragEvent, p.id)"
       @dragover="(e) => onReorderOver(e as DragEvent, p.id)"
       @dragleave="() => onReorderLeave(p.id)"
