@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from app.tasks.celery_app import RoundsTask, celery_app
@@ -134,30 +135,61 @@ def sop_auto_init_task(self, session_id: str) -> dict:
         engine.dispose()
 
 
+def _html_to_text(html: str) -> str:
+    """Crude HTML → plain-text for the email plain-text alternative part.
+
+    Strips tags, collapses whitespace, decodes the few HTML entities our
+    templates use. Not a full HTML parser — fits the flat ProximaNova-
+    style mailer markup seeded in migration 048 / 051 which has minimal
+    nesting and no script/style blocks. Returns "" on empty/None input.
+    """
+    if not html:
+        return ""
+    text = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
+    text = re.sub(r"</p\s*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</tr\s*>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</td\s*>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = (text.replace("&nbsp;", " ").replace("&amp;", "&")
+                .replace("&lt;", "<").replace("&gt;", ">")
+                .replace("&quot;", '"').replace("&#39;", "'"))
+    text = re.sub(r"\n[ \t]*\n[ \t\n]*", "\n\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return text.strip()
+
+
 def _maybe_send_deadline_email(engine, session_id: str, stage: str, overdue_hours: float) -> None:
     """
     Look up the stage assignee from sop_state, throttle-check against
     audit_events, and send via app.services.email.send_smtp_email.
 
-    Throttle: a single email per (session_id, stage) per 23 hours. Lookup
-    is via audit_events of kind 'sop.deadline_email_sent' (written by this
-    function after a successful send). 23h chosen so the next hourly Beat
-    tick after a 24h-after-overdue moment will re-send.
+    Phase 7.2 (2026-06-04): resolves subject/body from the
+    email_templates table by querying stage_id='<stage>_overdue'.
+    Migration 051 seeds these variants. Falls back to the F1.E inline
+    f-strings when no template resolves — keeps the path running even
+    if migration 051 hasn't applied yet or an operator soft-deleted
+    the overdue variants.
+
+    Throttle: a single email per (session_id, stage) per 23 hours.
+    Lookup via audit_events of kind 'sop.deadline_email_sent' (written
+    by this function after a successful send). 23h chosen so the next
+    hourly Beat tick after a 24h-after-overdue moment will re-send.
 
     Skips silently when:
       • the assignees JSONB is missing the stage entry
-      • the assignee value is a group ("group:NAME") — group expansion is
-        deferred (no per-group roster table wired yet)
+      • the assignee value is a group ("group:NAME") — group expansion
+        is deferred (no per-group roster table wired yet)
       • the assignee doesn't look like an email address
       • a previous sop.deadline_email_sent exists for (session_id, stage)
         within the 23h window
     """
+    from app.api.email_templates import resolve_template_sync, substitute_variables
     from app.services.email import send_smtp_email
 
     with engine.connect() as conn:
         row = conn.execute(
             text(
-                "SELECT s.assignees, sess.title, sess.code "
+                "SELECT s.assignees, sess.title, sess.code, sess.session_type_id "
                 "FROM sop_state s "
                 "LEFT JOIN sessions sess ON sess.id = s.session_id "
                 "WHERE s.session_id = CAST(:sid AS uuid)"
@@ -169,6 +201,7 @@ def _maybe_send_deadline_email(engine, session_id: str, stage: str, overdue_hour
     assignees = row[0] if isinstance(row[0], dict) else (json.loads(row[0]) if row[0] else {})
     title = row[1] or "(untitled)"
     code = row[2] or session_id[:8]
+    session_type_id = row[3]
     raw = assignees.get(stage) if isinstance(assignees, dict) else None
     if not isinstance(raw, str) or raw.startswith("group:") or "@" not in raw:
         return
@@ -192,19 +225,59 @@ def _maybe_send_deadline_email(engine, session_id: str, stage: str, overdue_hour
         if datetime.now(timezone.utc) - last < timedelta(hours=23):
             return
 
-    subject = f"[Rounds] {code} — {stage} stage overdue by {overdue_hours}h"
-    text_body = (
-        f"Session: {title} ({code})\n"
-        f"Stage: {stage}\n"
-        f"Overdue: {overdue_hours} hours past SLA\n\n"
-        f"Open in editor: https://rounds.vin/#/e/{session_id}/sop\n"
-    )
-    html_body = (
-        f"<p>Session: <strong>{title}</strong> ({code})</p>"
-        f"<p>Stage: <code>{stage}</code></p>"
-        f"<p style='color:#b00'>Overdue: <strong>{overdue_hours}h</strong> past SLA</p>"
-        f"<p><a href='https://rounds.vin/#/e/{session_id}/sop'>Open in editor</a></p>"
-    )
+    editor_url = f"https://rounds.vin/#/e/{session_id}/sop"
+    # Derive a reasonable first-name from the assignee email's local part
+    # (e.g. "jane.doe@vin.com" → "Jane"). Templates show this as a
+    # greeting prefix; fall back to "team" if local-part is empty.
+    first_name = (raw.split("@", 1)[0] or "").split(".")[0].title() or "team"
+    template_vars = {
+        "session_code":        code,
+        "session_title":       title,
+        "assignee_first_name": first_name,
+        "stage":               stage,
+        "overdue_hours":       overdue_hours,
+        "editor_url":          editor_url,
+        "results_url":         editor_url,
+        "session_id":          session_id,
+    }
+
+    # Try the deadline-specific template first (migration 051 seeds it).
+    # Catch any DB error and fall through to the inline f-string path so
+    # a SQL hiccup never blocks a deadline notification.
+    template = None
+    try:
+        with engine.connect() as conn:
+            template = resolve_template_sync(
+                conn,
+                session_type_id=(str(session_type_id) if session_type_id else None),
+                stage_id=f"{stage}_overdue",
+                locale="en-US",
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            f"sop_check_deadlines: template resolve failed for {stage}_overdue: {exc}"
+        )
+
+    if template:
+        subject   = substitute_variables(template["subject"], template_vars)
+        html_body = substitute_variables(template["body"],    template_vars)
+        text_body = _html_to_text(html_body)
+    else:
+        # Inline fallback — used before migration 051 lands, or when
+        # an operator soft-deletes the overdue template variants.
+        subject = f"[Rounds] {code} — {stage} stage overdue by {overdue_hours}h"
+        text_body = (
+            f"Session: {title} ({code})\n"
+            f"Stage: {stage}\n"
+            f"Overdue: {overdue_hours} hours past SLA\n\n"
+            f"Open in editor: {editor_url}\n"
+        )
+        html_body = (
+            f"<p>Session: <strong>{title}</strong> ({code})</p>"
+            f"<p>Stage: <code>{stage}</code></p>"
+            f"<p style='color:#b00'>Overdue: <strong>{overdue_hours}h</strong> past SLA</p>"
+            f"<p><a href='{editor_url}'>Open in editor</a></p>"
+        )
     result = send_smtp_email(raw, subject, text_body, html_body=html_body)
 
     # Record outcome regardless of success/failure so retries can be observed.
