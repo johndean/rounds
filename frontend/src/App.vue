@@ -14,15 +14,18 @@ import ToastHost from '@/components/overlays/ToastHost.vue';
 import ConfirmHost from '@/components/overlays/ConfirmHost.vue';
 import ModalHost from '@/components/overlays/ModalHost.vue';
 import CommandPalette from '@/components/overlays/CommandPalette.vue';
-import HelpCenterDrawer from '@/components/HelpCenterDrawer.vue';
+import HelpPanel from '@/components/help/HelpPanel.vue';
 import TweaksPanel from '@/components/TweaksPanel.vue';
 import { useAuthStore } from '@/stores/auth';
+import { useHelpStore } from '@/stores/help';
 import { useUiStore } from '@/stores/ui';
 import { useRouter } from 'vue-router';
+import '@/styles/help.css';
 
 const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
+const help = useHelpStore();
 const ui = useUiStore();
 
 const QUICK_NAV = [
@@ -93,18 +96,20 @@ watch(
 </script>
 
 <template>
-  <div class="app">
-    <AppHeader v-if="!isLogin" />
-    <RouterView v-slot="{ Component, route: r }">
-      <component :is="Component" :key="r.fullPath" />
-    </RouterView>
+  <div class="app" :data-help-open="help.open ? 'true' : undefined">
+    <AppHeader v-if="!isLogin" class="app__header" />
+    <main class="app__main">
+      <RouterView v-slot="{ Component, route: r }">
+        <component :is="Component" :key="r.fullPath" />
+      </RouterView>
+    </main>
+
+    <HelpPanel v-if="!isLogin" />
 
     <ToastHost />
     <ConfirmHost />
     <ModalHost />
     <CommandPalette />
-
-    <HelpCenterDrawer />
 
     <TweaksPanel title="Tweaks">
       <div class="twk-sect">Appearance</div>

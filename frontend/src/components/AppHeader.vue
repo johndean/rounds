@@ -11,13 +11,13 @@ import Icon from '@/components/shared/Icon.vue';
 import { commandPalette } from '@/composables/useCommandPalette';
 import { toast } from '@/composables/useToast';
 import { useAuthStore } from '@/stores/auth';
-import { useHelpCenterStore } from '@/stores/helpCenter';
+import { useHelpStore } from '@/stores/help';
 import { useUiStore } from '@/stores/ui';
 
 const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
-const help = useHelpCenterStore();
+const help = useHelpStore();
 const ui = useUiStore();
 
 // Bundle's bake-time SHA — injected by Dockerfile ARG RAILWAY_GIT_COMMIT_SHA

@@ -67,6 +67,10 @@ defineProps<{
         <animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite" />
       </path>
     </template>
+    <template v-else-if="name === 'help-circle'"><circle cx="12" cy="12" r="10" /><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" /><line x1="12" y1="17" x2="12.01" y2="17" /></template>
+    <template v-else-if="name === 'sparkles'"><path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z" fill="currentColor" fill-opacity="0.2" /><path d="M5 18l.75 2.25L8 21l-2.25.75L5 24l-.75-2.25L2 21l2.25-.75L5 18z" /><path d="M19 14l1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3z" /></template>
+    <template v-else-if="name === 'book-open'"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" /><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" /></template>
+    <template v-else-if="name === 'send'"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" fill="currentColor" fill-opacity="0.18" /></template>
     <template v-else><circle cx="12" cy="12" r="4" /></template>
   </svg>
 </template>

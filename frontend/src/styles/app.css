@@ -17,10 +17,22 @@ body {
 
 /* ── Shell ─────────────────────────────────────────────── */
 .app {
+  --app-header-h: 60px;
   min-height: 100vh;
   display: grid;
+  grid-template-areas:
+    "header header"
+    "main   help";
   grid-template-rows: auto 1fr;
+  grid-template-columns: minmax(0, 1fr) 0;
+  transition: grid-template-columns var(--duration-normal) var(--easing-out);
 }
+.app[data-help-open="true"] {
+  grid-template-columns: minmax(0, 1fr) 420px;
+}
+.app__header { grid-area: header; }
+.app__main   { grid-area: main; min-width: 0; }
+.help-drawer { grid-area: help; min-width: 0; }
 
 .app-header {
   background: var(--surface-nav);
