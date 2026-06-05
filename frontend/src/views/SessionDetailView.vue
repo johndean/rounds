@@ -529,7 +529,7 @@ function pubLink(p: string): void {
               <h3>Stage Assignments</h3>
               <select
                 class="btn btn--secondary btn--sm"
-                :style="{ paddingRight: '24px', fontSize: '11px' }"
+                :style="{ paddingRight: '24px', fontSize: '11px', maxWidth: '170px', minWidth: 0, textOverflow: 'ellipsis' }"
                 :value="session.session_type_id || ''"
                 @change="onTypePickerChange"
               >
