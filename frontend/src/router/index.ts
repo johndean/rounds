@@ -41,9 +41,14 @@ export const router = createRouter({
     { path: '/audit',               component: () => import('@/views/AuditView.vue'),           name: 'audit' },
     { path: '/gcs',                 component: () => import('@/views/GcsView.vue'),             name: 'gcs' },
     { path: '/queue',               component: () => import('@/views/QueueView.vue'),           name: 'queue' },
+    { path: '/admin/help',          component: () => import('@/views/admin/HelpEditor.vue'),    name: 'admin-help', meta: { adminOnly: true } },
     { path: '/:catchAll(.*)',       redirect: '/dashboard' },
   ],
 });
+
+// Mirror of backend LEGACY_ADMIN_EMAIL gate (BR-001). UI-only — the
+// server is the authoritative check on every /v1/help/articles* route.
+const LEGACY_ADMIN_EMAIL = 'johndean@vin.com';
 
 router.beforeEach((to, _from, next) => {
   if (to.meta.public) {
@@ -51,9 +56,13 @@ router.beforeEach((to, _from, next) => {
     return;
   }
   const auth = useAuthStore();
-  if (auth.isAuthenticated) {
-    next();
+  if (!auth.isAuthenticated) {
+    next({ name: 'login', query: { next: to.fullPath } });
     return;
   }
-  next({ name: 'login', query: { next: to.fullPath } });
+  if (to.meta.adminOnly && auth.email !== LEGACY_ADMIN_EMAIL) {
+    next({ name: 'dashboard' });
+    return;
+  }
+  next();
 });
