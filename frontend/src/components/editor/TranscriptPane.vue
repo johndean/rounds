@@ -428,8 +428,13 @@ watch(() => props.activeSegmentId, (id, prev) => {
           <div class="segment__gutter">
             <span class="segment__time">{{ fmtTime(seg.start) }}</span>
             <span
-              :class="['segment__speaker-pill', `speaker-${seg.speaker}`]"
+              :class="[
+                'segment__speaker-pill',
+                `speaker-${seg.speaker}`,
+                segSpeaker(seg).role === 'primary' ? 'segment__speaker-pill--primary' : '',
+              ]"
               :style="{ background: `${segSpeaker(seg).color}22`, color: segSpeaker(seg).color, borderColor: `${segSpeaker(seg).color}55` }"
+              :title="segSpeaker(seg).role === 'primary' ? 'Rounds speaker' : segSpeaker(seg).role"
             >{{ segSpeaker(seg).short }}</span>
           </div>
           <div class="segment__main">

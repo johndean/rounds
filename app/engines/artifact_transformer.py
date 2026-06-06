@@ -32,6 +32,13 @@ class SegmentForExport:
     slide_index: int | None
     slide_title: str | None
     speaker_name: str | None
+    # Phase 5 (2026-06-05) — speaker.role plumbed through so to_docx
+    # can render the Rounds speaker ('primary') in navy + bold per D2.
+    # Optional with None default so older callers / fixtures / golden
+    # tests that don't set it fall back to the existing bold-only
+    # behavior. Closes D2 + E14 + TR3 in one slice — speaker.role was
+    # in the DB the whole time, just never SELECTed.
+    speaker_role: str | None = None
 
 
 @dataclass
@@ -145,6 +152,13 @@ def to_vtt(session: SessionForExport) -> bytes:
 
 def to_docx(session: SessionForExport) -> bytes:
     from docx import Document
+    from docx.shared import RGBColor
+
+    # Phase 5 (2026-06-05) — Rounds-speaker color. role='primary' renders
+    # in navy + bold; 'moderator'/'guest'/None stay bold-only. Constants
+    # at function scope so the RGBColor object isn't reconstructed per
+    # segment (600-segment session = 600 microseconds saved).
+    _ROUNDS_SPEAKER_COLOR = RGBColor(0x00, 0x28, 0x55)  # rounds navy
 
     doc = Document()
     doc.add_heading(session.title or session.code, level=1)
@@ -173,6 +187,10 @@ def to_docx(session: SessionForExport) -> bytes:
             if p_idx == 0 and seg.speaker_name:
                 speaker_run = para.add_run(f"{seg.speaker_name}: ")
                 speaker_run.bold = True
+                # Phase 5 — Rounds speaker (role='primary') gets navy.
+                # Falls through to bold-only for moderator/guest/None.
+                if seg.speaker_role == "primary":
+                    speaker_run.font.color.rgb = _ROUNDS_SPEAKER_COLOR
             lines = para_text.split("\n")
             for l_idx, line in enumerate(lines):
                 if l_idx > 0:
@@ -552,7 +570,8 @@ def load_session_for_export(session_id: str) -> SessionForExport:
                     """
                     SELECT seg.seq, seg.start_ms, seg.end_ms, seg.text,
                            sl.slide_index, sl.title,
-                           sp.name AS speaker_name
+                           sp.name AS speaker_name,
+                           sp.role AS speaker_role
                       FROM segments seg
                       LEFT JOIN slides sl   ON sl.id = seg.slide_id
                       LEFT JOIN speakers sp ON sp.id = seg.speaker_id
@@ -651,6 +670,7 @@ def load_session_for_export(session_id: str) -> SessionForExport:
                 seq=r[0], start_ms=r[1] or 0, end_ms=r[2] or 0,
                 text=r[3] or "", slide_index=r[4],
                 slide_title=r[5], speaker_name=r[6],
+                speaker_role=r[7] if len(r) > 7 else None,
             )
             for r in segments
         ],

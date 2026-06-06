@@ -840,6 +840,16 @@ body.is-col-resizing .editor__resizer::before {
 .editor__tab .count--amber { background: var(--color-amber, #B45A1A); color: #fff; }
 .editor__tab.is-active .count--amber { background: var(--color-amber, #B45A1A); color: #fff; }
 
+/* Phase 5 (2026-06-05) — Rounds-speaker styling. role='primary' renders
+   the speaker pill in navy + bold to match the published transcript
+   style (D2 + E14 + TR3 — single root cause, single change set). */
+.segment__speaker-pill--primary {
+  color: var(--color-navy, #002855) !important;
+  background: rgba(0, 40, 85, 0.10) !important;
+  border-color: var(--color-navy, #002855) !important;
+  font-weight: 700;
+}
+
 /* Phase 2 (2026-06-05) — per-segment autosave status badge. shallowRef
    driven; only re-renders for segments whose status actually changed. */
 .autosave-badge {
