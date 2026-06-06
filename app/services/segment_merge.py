@@ -173,7 +173,7 @@ async def execute_merge(db, session_id: str, body, user) -> dict:
                end_ms = :end_ms,
                flags = CAST(:flags AS jsonb),
                metadata = (CAST(:meta AS jsonb)
-                   || jsonb_build_object('merged_from', :rid, 'merged_at_ms', :rstart)),
+                   || jsonb_build_object('merged_from', CAST(:rid AS text), 'merged_at_ms', CAST(:rstart AS bigint))),
                updated_at = now()
          WHERE id = CAST(:lid AS uuid)
     """), {
