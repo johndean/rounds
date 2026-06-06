@@ -27,6 +27,7 @@ Related business rules: BR-006 (confidence-priority scoring), BR-018 (auto-close
 """
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from typing import Optional
@@ -38,6 +39,8 @@ from sqlalchemy import text
 
 from app.auth import CurrentUser
 from app.db import DbSession
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/sessions", tags=["corrections"])
 
@@ -366,39 +369,72 @@ async def apply_correction(
                 cached = await _replay_existing(db, sid, str(body.action_id))
                 if cached:
                     return cached
-            if body.correction_type == "split":
-                from app.services import segment_split as _svc_split
-                result = await _svc_split.execute_split(db, sid, body, user)
-            else:
-                from app.services import segment_merge as _svc_merge
-                result = await _svc_merge.execute_merge(db, sid, body, user)
-            # Append ledger row carrying the invert_payload in new_text.
-            import json as _json
-            current_ptr = await _ensure_pointer(db, sid)
-            await _truncate_redo_tail(db, sid, current_ptr)
-            seq = await _next_seq(db, sid)
-            action_id = str(body.action_id or uuid.uuid4())
-            applied_by = getattr(user, "email", None) or "(unknown)"
-            row = (await db.execute(text(
-                """
-                INSERT INTO correction_ledger
-                    (session_id, segment_id, correction_type,
-                     old_text, new_text, applied_by, action_id, sequence_number)
-                VALUES
-                    (CAST(:sid AS uuid), CAST(:seg AS uuid), :ctype,
-                     NULL, :payload, :by, CAST(:aid AS uuid), :seq)
-                RETURNING id, applied_at
-                """
-            ), {
-                "sid": sid, "seg": seg_id, "ctype": body.correction_type,
-                "payload": _json.dumps(result["invert_payload"]),
-                "by": applied_by, "aid": action_id, "seq": seq,
-            })).mappings().one()
-            await db.execute(text(
-                "UPDATE ledger_pointers SET current_pointer = :p, updated_at = now() "
-                "WHERE session_id = CAST(:sid AS uuid)"
-            ), {"sid": sid, "p": seq})
-            await db.commit()
+            # 2026-06-06 instrumentation: every initial split/merge attempt
+            # in production has 500'd with no traceback surfacing in Railway
+            # logs because FastAPI's default 500 handler doesn't propagate
+            # the inner traceback to stderr at INFO level (only at ERROR,
+            # which the uvicorn formatter suppresses for the access-log
+            # middleware). Wrap the executor + ledger write so any unhandled
+            # exception is (a) logged with full traceback via _log.exception
+            # so it surfaces in `railway logs --service api --deployment`
+            # and (b) returned as a structured 500 with the exception class
+            # + message so DevTools / the toast can read it. HTTPException
+            # propagates unchanged (4xx codes shouldn't be remapped).
+            try:
+                if body.correction_type == "split":
+                    from app.services import segment_split as _svc_split
+                    result = await _svc_split.execute_split(db, sid, body, user)
+                else:
+                    from app.services import segment_merge as _svc_merge
+                    result = await _svc_merge.execute_merge(db, sid, body, user)
+                # Append ledger row carrying the invert_payload in new_text.
+                import json as _json
+                current_ptr = await _ensure_pointer(db, sid)
+                await _truncate_redo_tail(db, sid, current_ptr)
+                seq = await _next_seq(db, sid)
+                action_id = str(body.action_id or uuid.uuid4())
+                applied_by = getattr(user, "email", None) or "(unknown)"
+                row = (await db.execute(text(
+                    """
+                    INSERT INTO correction_ledger
+                        (session_id, segment_id, correction_type,
+                         old_text, new_text, applied_by, action_id, sequence_number)
+                    VALUES
+                        (CAST(:sid AS uuid), CAST(:seg AS uuid), :ctype,
+                         NULL, :payload, :by, CAST(:aid AS uuid), :seq)
+                    RETURNING id, applied_at
+                    """
+                ), {
+                    "sid": sid, "seg": seg_id, "ctype": body.correction_type,
+                    "payload": _json.dumps(result["invert_payload"]),
+                    "by": applied_by, "aid": action_id, "seq": seq,
+                })).mappings().one()
+                await db.execute(text(
+                    "UPDATE ledger_pointers SET current_pointer = :p, updated_at = now() "
+                    "WHERE session_id = CAST(:sid AS uuid)"
+                ), {"sid": sid, "p": seq})
+                await db.commit()
+            except HTTPException:
+                # Structured 4xx errors from executors propagate unchanged.
+                raise
+            except Exception as _exc:  # noqa: BLE001
+                _log.exception(
+                    "split/merge dispatch failed: op=%s session=%s segment=%s",
+                    body.correction_type, sid, seg_id,
+                )
+                try:
+                    await db.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
+                raise HTTPException(
+                    status_code=500,
+                    detail={
+                        "code": "SPLIT_MERGE_EXEC_ERROR",
+                        "operation": body.correction_type,
+                        "error_class": type(_exc).__name__,
+                        "error_message": (str(_exc) or repr(_exc))[:500],
+                    },
+                )
             await _emit_ws(sid, {
                 "type": "correction_applied",
                 "action_id": action_id,
