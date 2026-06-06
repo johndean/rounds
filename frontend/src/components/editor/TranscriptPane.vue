@@ -124,7 +124,20 @@ interface InlineEdit {
 
 const inline = ref<InlineEdit | null>(null);
 const scrollRef = useTemplateRef<HTMLElement>('scrollRef');
-const textareaRef = useTemplateRef<HTMLTextAreaElement>('textareaRef');
+// textareaRef can NOT use useTemplateRef('textareaRef') here because the
+// <textarea> lives inside a v-for over segments. Vue 3.5+ collects every
+// ref="textareaRef" hit in a v-for into an ARRAY, even when v-if guarantees
+// at most one element actually mounts. The toolbar handlers (tbWrap etc.)
+// expect a single HTMLTextAreaElement, and arrays have no `.value` or
+// `.focus()` (the crashes were "x.focus is not a function" and
+// "Cannot read properties of undefined (reading 'slice')"). Callback-ref
+// form sidesteps the v-for array semantics: the callback fires for the
+// one mounted instance, sets the ref to that element, and fires with
+// null on unmount.
+const textareaRef = ref<HTMLTextAreaElement | null>(null);
+function setTextareaRef(el: Element | unknown): void {
+  textareaRef.value = el instanceof HTMLTextAreaElement ? el : null;
+}
 
 const visible = computed<readonly Segment[]>(() => {
   if (props.slideRailMode === 'filter' && props.focusedSlideId) {
@@ -527,7 +540,7 @@ watch(() => props.activeSegmentId, (id, prev) => {
                 <button type="button" class="segment-editor__btn" title="Insert poll reference" @mousedown.prevent @click="tbInsert(' {{poll}}')"><Icon name="list" :size="12" /></button>
               </div>
               <textarea
-                ref="textareaRef"
+                :ref="setTextareaRef"
                 class="segment-editor__textarea"
                 :value="inline.draft"
                 wrap="soft"
