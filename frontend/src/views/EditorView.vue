@@ -45,6 +45,9 @@ import SpeakerEditPanel from '@/components/editor/SpeakerEditPanel.vue';
 import ChatTab from '@/components/editor/ChatTab.vue';
 import PollsTab from '@/components/editor/PollsTab.vue';
 import DownloadMenu from '@/components/editor/DownloadMenu.vue';
+import EditorSkeleton from '@/components/shared/EditorSkeleton.vue';
+import { useSessionLock } from '@/composables/useSessionLock';
+import { useIsAdmin } from '@/composables/useIsAdmin';
 import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, words as wordsApi, discrepancies as discrepanciesApi, wordAlignment as wordAlignmentApi, media as mediaApi, placements as placementsApi, type SessionSummary, type WordRow, type DiscrepancyRow, type WordAlignmentEntry } from '@/services/api';
 import { toast } from '@/composables/useToast';
 import { ApiError } from '@/services/http';
@@ -65,6 +68,13 @@ type RightTabId = 'admin' | 'chat' | 'polls';
 
 const props = defineProps<{ id: string; initialTab?: TabId }>();
 const router = useRouter();
+
+// Phase 1 (2026-06-05): concurrent-edit lock. Banner renders read-only state
+// when another operator holds the session. Phase 2's autosave will gate its
+// writes on `isHolder.value === true` (fail-closed when null or false).
+const { isHolder, holder, lockError, forceTake } = useSessionLock(props.id);
+const isAdmin = useIsAdmin();
+const isReadOnly = computed(() => isHolder.value !== true);
 
 // ── Data refs (empty until backend populates) ─────────────────────────
 const session = ref<SessionSummary | null>(null);
@@ -920,11 +930,53 @@ onUnmounted(() => { window.removeEventListener('keydown', onEditorKeydown); });
 </script>
 
 <template>
-  <div class="editor" :data-screen-label="`Editor / ${props.id}`">
+  <div class="editor" :data-screen-label="`Editor / ${props.id}`" :data-readonly="isReadOnly">
+    <!-- Phase 1 (2026-06-05): concurrent-edit lock banners. Fail-closed —
+         when lockError is set OR another user holds the lock, the editor
+         enters read-only mode. The autosave gate (Phase 2) consumes
+         isReadOnly to skip writes. -->
+    <div
+      v-if="lockError"
+      class="editor__lock-banner editor__lock-banner--error"
+      role="alert"
+      data-test-id="editor-lock-banner-error"
+    >
+      <Icon name="alert" :size="14" />
+      <span>
+        <strong>Lock service unavailable</strong> — edits are disabled until the lock service is reachable.
+        Click Retry to try again.
+      </span>
+      <button type="button" class="btn btn--ghost btn--sm" @click="() => { void forceTake(); }">Retry</button>
+    </div>
+    <div
+      v-else-if="isReadOnly && holder"
+      class="editor__lock-banner editor__lock-banner--warn"
+      role="status"
+      data-test-id="editor-lock-banner-readonly"
+    >
+      <Icon name="lock" :size="14" />
+      <span>
+        <strong>In use by {{ holder.user_email }}</strong> — you have read-only access. The lock auto-expires at
+        {{ new Date(holder.expires_at).toLocaleTimeString() }}.
+      </span>
+      <button
+        v-if="isAdmin"
+        type="button"
+        class="btn btn--secondary btn--sm"
+        data-test-id="editor-lock-force-take"
+        @click="() => { void forceTake(); }"
+      >Force-take (admin)</button>
+    </div>
+
+    <!-- Phase 1 (2026-06-05): editor skeleton renders while the very first
+         data load is in flight. The existing per-stage loadbar still
+         renders for granular progress once SEGMENTS start arriving. -->
+    <EditorSkeleton v-if="loading && SEGMENTS.length === 0" />
+
     <!-- Phase A7 — per-stage load progress strip. Shows only during the
          initial load; non-blocking, error-tolerant per stage. -->
     <div
-      v-if="loading"
+      v-if="loading && SEGMENTS.length > 0"
       class="editor__loadbar"
       :class="loadHasError ? 'editor__loadbar--has-error' : ''"
       data-test-id="editor-loadbar"

@@ -840,6 +840,27 @@ body.is-col-resizing .editor__resizer::before {
 .editor__tab .count--amber { background: var(--color-amber, #B45A1A); color: #fff; }
 .editor__tab.is-active .count--amber { background: var(--color-amber, #B45A1A); color: #fff; }
 
+/* Phase 1 (2026-06-05) — concurrent-edit lock banner. Fail-closed:
+   when displayed, the editor enters read-only mode. */
+.editor__lock-banner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px;
+  font-size: 13px; font-weight: 500;
+  border-bottom: 1px solid transparent;
+}
+.editor__lock-banner--warn {
+  background: var(--surface-warn-soft, #FEF3C7);
+  color: #92400E;
+  border-bottom-color: var(--color-amber, #B45A1A);
+}
+.editor__lock-banner--error {
+  background: var(--surface-danger-soft, #FEE2E2);
+  color: #991B1B;
+  border-bottom-color: #DC2626;
+}
+.editor__lock-banner > strong { font-weight: 700; }
+.editor__lock-banner button { margin-left: auto; }
+
 /* Phase A7 — per-stage loading progress strip at top of editor. */
 .editor__loadbar {
   position: relative;

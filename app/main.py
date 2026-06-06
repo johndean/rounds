@@ -40,6 +40,7 @@ from app.api import exports as exports_router
 from app.api import gcs_upload as gcs_router
 from app.api import help as help_router
 from app.api import improvements as improvements_router
+from app.api import locks as locks_router
 from app.api import queue as queue_router
 from app.api import segments as segments_router
 from app.api import session_resources as session_resources_router
@@ -206,6 +207,7 @@ async def session_ws(websocket: WebSocket, session_id: str):
 app.include_router(auth_router.router)
 app.include_router(gcs_router.router)
 app.include_router(sessions_router.router)
+app.include_router(locks_router.router)
 app.include_router(add_to_session_router.router)
 app.include_router(session_resources_router.router)
 app.include_router(corrections_router.router)

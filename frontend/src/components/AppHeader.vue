@@ -105,10 +105,10 @@ void ui;  // silence unused
 
 <template>
   <header class="app-header" data-screen-label="App Header">
-    <RouterLink to="/sessions" class="app-header__brand" aria-label="transcript.software home">
+    <RouterLink to="/sessions" class="app-header__brand" aria-label="rounds.vin home">
       <img src="/assets/VIN-light.svg" alt="VIN" />
       <span class="app-header__divider" />
-      <span class="app-header__product">transcript<strong>.software</strong></span>
+      <span class="app-header__product">rounds<strong>.vin</strong></span>
     </RouterLink>
     <span
       class="app-header__build"
