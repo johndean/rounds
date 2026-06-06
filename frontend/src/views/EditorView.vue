@@ -49,6 +49,7 @@ import EditorSkeleton from '@/components/shared/EditorSkeleton.vue';
 import { useSessionLock } from '@/composables/useSessionLock';
 import { useIsAdmin } from '@/composables/useIsAdmin';
 import { useAutosave, AUTOSAVE_STATUS_KEY } from '@/composables/useAutosave';
+import { useEditorPersistence } from '@/composables/useEditorPersistence';
 import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, words as wordsApi, discrepancies as discrepanciesApi, wordAlignment as wordAlignmentApi, media as mediaApi, placements as placementsApi, type SessionSummary, type WordRow, type DiscrepancyRow, type WordAlignmentEntry } from '@/services/api';
 import { toast } from '@/composables/useToast';
 import { ApiError } from '@/services/http';
@@ -386,17 +387,49 @@ const segmentsBySlide = computed<Map<string, Segment[]>>(() => {
   return m;
 });
 
-const time = ref<number>((() => {
-  const v = parseFloat(localStorage.getItem(`mic_playback_${props.id}`) ?? '');
-  return isNaN(v) ? 0 : v;
-})());
+const time = ref<number>(0);
 const playing = ref(false);
 const rate = ref(1);
 const cc = ref(true);
+// Phase 3 — explicit "follow video" toggle so the user can disable
+// the auto-scroll heuristic when it fights them (touchpad inertia,
+// screen reader navigation). Default ON to match operator expectation.
+const followVideo = ref(true);
+const transcriptScrollTop = ref(0);
 
-// Playback is driven by the <audio> element inside VideoStrip via update:time /
-// update:playing emits. Time still persists across reloads via localStorage.
-watch(time, (t) => { localStorage.setItem(`mic_playback_${props.id}`, String(t)); });
+// Phase 3 (2026-06-05) — refresh persistence (E20, E21). localStorage
+// keyed by (session_id, tabRole) from Phase 1 lock state so a read-only
+// tab does not clobber the writer's saved state. Schema-versioned blob;
+// older versions are silently discarded.
+//
+// activeSegmentId intentionally derived from `time` post-restore rather
+// than persisted — the binary-search lookup in activeSegment already
+// resolves it deterministically from playback time, and keeping it out
+// of the persisted blob avoids a TDZ ordering hazard (activeSegment
+// computed is declared after this block).
+const persistedActiveSegmentId = ref<string | null>(null);
+const persistence = useEditorPersistence({
+  sessionId:        props.id,
+  isHolder,
+  time,
+  rate,
+  scrollTop:        transcriptScrollTop,
+  activeSegmentId:  persistedActiveSegmentId,
+});
+
+// Restore once on mount, before the first <video> play. Rate restore
+// also re-applies after the media element mounts (its load resets
+// playbackRate to 1 by default — without re-apply, the dropdown shows
+// 1.5× while the video plays 1× per audit E21).
+onMounted(() => {
+  const saved = persistence.restore();
+  if (saved) {
+    time.value = saved.t;
+    rate.value = saved.r;
+    transcriptScrollTop.value = saved.s;
+    persistedActiveSegmentId.value = saved.a;
+  }
+});
 
 function onMediaDurationLoaded(t: number): void {
   if (TOTAL_DURATION.value <= 0 && Number.isFinite(t) && t > 0) TOTAL_DURATION.value = t;
@@ -458,6 +491,10 @@ const activeWordIdx = computed(() => {
 });
 
 const activeSlide = computed(() => SLIDES.value.find((sl) => sl.id === activeSegment.value?.slide_id));
+
+// Phase 3 — keep the persistence layer's activeSegmentId ref in sync.
+// Declared after activeSegment to avoid the TDZ ordering hazard.
+watch(activeSegment, (seg) => { persistedActiveSegmentId.value = seg?.id ?? null; });
 
 // MIC-parity alignment count (mic/frontend/src/views/EditorView.vue:3218-3220).
 // Counts segments that actually got a slide_id from the aligner — not the
@@ -925,10 +962,6 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
 // own undo/redo (inline.history / inline.redo) manages the segment
 // draft separately and shouldn't be hijacked by the global handler.
 function onEditorKeydown(e: KeyboardEvent): void {
-  // Modifier required for all three shortcuts.
-  const mod = e.metaKey || e.ctrlKey;
-  if (!mod) return;
-
   // Let textareas / inputs / contenteditable own their native shortcuts.
   const target = e.target as HTMLElement | null;
   if (target) {
@@ -936,7 +969,29 @@ function onEditorKeydown(e: KeyboardEvent): void {
     if (tag === 'TEXTAREA' || tag === 'INPUT' || target.isContentEditable) return;
   }
 
+  const mod = e.metaKey || e.ctrlKey;
   const k = e.key.toLowerCase();
+
+  // Phase 3 (2026-06-05) — YouTube-style J / K / L shortcuts for video
+  // nav (audit E10, E22). Single-key, no modifier. Skipped when a
+  // textarea / input has focus (handled above).
+  if (!mod && (k === 'j' || k === 'k' || k === 'l')) {
+    e.preventDefault();
+    if (k === 'j') {
+      time.value = Math.max(0, time.value - 10);
+    } else if (k === 'l') {
+      time.value = TOTAL_DURATION.value > 0
+        ? Math.min(TOTAL_DURATION.value, time.value + 10)
+        : time.value + 10;
+    } else {
+      // K toggles play/pause.
+      playing.value = !playing.value;
+    }
+    return;
+  }
+
+  // Modifier-required shortcuts (Undo / Redo / Find).
+  if (!mod) return;
   if (k === 'z' && !e.shiftKey) {
     e.preventDefault();
     void onUndo();
@@ -1066,6 +1121,19 @@ onUnmounted(() => { window.removeEventListener('keydown', onEditorKeydown); });
         <button class="btn btn--secondary btn--sm" data-test-id="editor-find-replace" @click="openFind">
           <Icon name="search" /> Find &amp; Replace
         </button>
+        <!-- Phase 3 (2026-06-05) — explicit follow-video toggle. When OFF
+             the transcript stops auto-scrolling with playback (user
+             scroll wins). Default ON. -->
+        <button
+          :class="['btn', 'btn--sm', followVideo ? 'btn--secondary' : 'btn--ghost']"
+          :title="followVideo ? 'Auto-scroll transcript with video (click to disable)' : 'Auto-scroll disabled (click to re-enable)'"
+          :aria-pressed="followVideo"
+          data-test-id="editor-follow-toggle"
+          @click="followVideo = !followVideo"
+        >
+          <Icon :name="followVideo ? 'check' : 'x'" :size="11" />
+          Follow video
+        </button>
         <span :style="{ marginLeft: 'auto', display: 'inline-flex', gap: '8px', alignItems: 'center' }">
           <span class="stage-badge stage-badge--prep" :style="{ textTransform: 'uppercase' }">{{ sessStageName }}</span>
           <RouterLink :to="`/e/${props.id}/sop`" class="btn btn--ghost btn--sm"><Icon name="branch" /> Workflow</RouterLink>
@@ -1168,6 +1236,8 @@ onUnmounted(() => { window.removeEventListener('keydown', onEditorKeydown); });
         :live-slides="SLIDES"
         :live-alignment="ALIGNMENT_BY_SEGMENT"
         :time="time"
+        :follow-video="followVideo"
+        :initial-scroll-top="transcriptScrollTop"
         @segment-click="onSegmentClick"
         @word-click="onWordClick"
         @clear-focus="focusedSlideId = null"
@@ -1178,6 +1248,7 @@ onUnmounted(() => { window.removeEventListener('keydown', onEditorKeydown); });
         @flush-autosave="onFlushAutosave"
         @reassign-segment="onReassignSegment"
         @reassign-speaker-live="onReassignSpeakerLive"
+        @scroll-top-change="(t: number) => (transcriptScrollTop = t)"
       />
       <STTPane
         v-else-if="tab === 'stt'"

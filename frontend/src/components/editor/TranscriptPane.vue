@@ -5,7 +5,7 @@
  * Edit/Reassign/Speaker modes, drop targets for chat/poll anchors, and
  * the rich edit toolbar (B/I/U/list/marks/link/poll-ref).
  */
-import { ref, computed, watch, nextTick, useTemplateRef, inject } from 'vue';
+import { ref, computed, watch, nextTick, useTemplateRef, inject, onMounted } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
 import SegmentText from '@/components/editor/SegmentText.vue';
 import { AUTOSAVE_STATUS_KEY, type AutosaveStatus } from '@/composables/useAutosave';
@@ -58,6 +58,14 @@ const props = defineProps<{
   // watcher below passes through them in zero time.
   liveAlignment?: Map<string, readonly AlignmentEntry[]>;
   time?: number;
+  // Phase 3 (2026-06-05) — gates reverse-jump auto-scroll. When false,
+  // the active-segment-change watcher skips its scrollTo and the user's
+  // manual scroll position stays put. Default true matches prior behavior.
+  followVideo?: boolean;
+  // Phase 3 — initial scrollTop (px) restored from localStorage by the
+  // parent (useEditorPersistence). Applied once on mount; subsequent
+  // scroll changes are owned by the user / reverse-jump.
+  initialScrollTop?: number;
 }>();
 
 // Real slides only — no fixture fallback. If liveSlides isn't passed, slide
@@ -89,6 +97,9 @@ const emit = defineEmits<{
   // (Phase 1.5) short-circuits when nothing changed.
   (e: 'autosaveSegment', segId: string, before: string, after: string): void;
   (e: 'flushAutosave', segId?: string): void;
+  // Phase 3 — debounced scrollTop emission so the parent can persist
+  // it via useEditorPersistence. Fires on user scroll AND reverse-jump.
+  (e: 'scrollTopChange', scrollTop: number): void;
 }>();
 
 interface InlineEdit {
@@ -111,20 +122,59 @@ const visible = computed<readonly Segment[]>(() => {
   return props.segments;
 });
 
+// Phase 3 (2026-06-05) — guard auto-scroll so manual scroll is not
+// fought by reverse-jump. Updated on wheel / touchmove; checked in
+// the activeSegmentId watcher below. 1.5s window — long enough for
+// the user to settle, short enough not to feel unresponsive.
+let lastUserScrollAt = 0;
+const USER_SCROLL_PAUSE_MS = 1500;
+
 watch(
   () => props.activeSegmentId,
   async (id) => {
     if (!id || !scrollRef.value) return;
+    // Phase 3: respect the follow-video toggle (defaults true) AND the
+    // user-scroll grace window. Either condition disables auto-scroll.
+    if (props.followVideo === false) return;
+    if (Date.now() - lastUserScrollAt < USER_SCROLL_PAUSE_MS) return;
     await nextTick();
     const el = scrollRef.value.querySelector(`[data-seg-id="${id}"]`) as HTMLElement | null;
     if (!el) return;
     const box = scrollRef.value.getBoundingClientRect();
     const eb = el.getBoundingClientRect();
     if (eb.top < box.top + 60 || eb.bottom > box.bottom - 60) {
-      scrollRef.value.scrollTo({ top: el.offsetTop - 80, behavior: 'smooth' });
+      // Reviewer note: 'auto' (not 'smooth') for follow-mode scroll
+      // because multiple in-flight smooth scrolls stack + burn paint
+      // budget on a long session. Smooth stays on explicit user
+      // clicks where the visual cue is welcome.
+      scrollRef.value.scrollTo({ top: el.offsetTop - 80, behavior: 'auto' });
     }
   }
 );
+
+// Phase 3 — emit scrollTop on debounced scroll for persistence; also
+// mark user-scrolled so reverse-jump pauses momentarily. Apply
+// initialScrollTop once on mount before the first activeSegment-change
+// watcher fires.
+let scrollEmitTimer: ReturnType<typeof setTimeout> | null = null;
+function onTranscriptScroll(): void {
+  if (!scrollRef.value) return;
+  lastUserScrollAt = Date.now();
+  if (scrollEmitTimer) clearTimeout(scrollEmitTimer);
+  scrollEmitTimer = setTimeout(() => {
+    if (scrollRef.value) emit('scrollTopChange', scrollRef.value.scrollTop);
+  }, 250);
+}
+
+onMounted(() => {
+  const init = props.initialScrollTop;
+  if (init && init > 0 && scrollRef.value) {
+    // Restore on next tick so the DOM has finished initial layout.
+    void nextTick(() => {
+      if (scrollRef.value) scrollRef.value.scrollTo({ top: init, behavior: 'auto' });
+    });
+  }
+});
 
 function startEdit(seg: Segment): void {
   inline.value = {
@@ -382,6 +432,9 @@ watch(() => props.activeSegmentId, (id, prev) => {
     role="region"
     aria-label="Transcript"
     data-screen-label="Transcript"
+    @scroll.passive="onTranscriptScroll"
+    @wheel.passive="onTranscriptScroll"
+    @touchmove.passive="onTranscriptScroll"
   >
     <div v-if="slideRailMode === 'filter' && focusedSlideId" class="transcript__filter-banner" role="status">
       <Icon name="filter" :size="14" />

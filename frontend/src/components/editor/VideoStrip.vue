@@ -318,11 +318,28 @@ onUnmounted(() => {
       </div>
     </div>
     <div class="vstrip__bar">
+      <!-- Phase 3 (2026-06-05): ±10s seek buttons (audit E10). Keyboard
+           shortcuts J / L are registered globally by EditorView so they
+           work even when the toolbar isn't focused. -->
       <button
         class="vstrip__play"
-        :title="playing ? 'Pause' : 'Play'"
+        :title="'Back 10 seconds (J)'"
+        aria-label="Back 10 seconds"
+        data-test-id="vstrip-seek-back-10"
+        @click="emit('seekTo', Math.max(0, time - 10))"
+      ><Icon name="skip-back" :size="12" /></button>
+      <button
+        class="vstrip__play"
+        :title="playing ? 'Pause (K)' : 'Play (K)'"
         @click="emit('togglePlay')"
       ><Icon :name="playing ? 'pause' : 'play'" :size="12" /></button>
+      <button
+        class="vstrip__play"
+        :title="'Forward 10 seconds (L)'"
+        aria-label="Forward 10 seconds"
+        data-test-id="vstrip-seek-forward-10"
+        @click="emit('seekTo', Math.min(total || 0, time + 10))"
+      ><Icon name="skip-forward" :size="12" /></button>
       <select
         class="vstrip__rate"
         :value="rate"
