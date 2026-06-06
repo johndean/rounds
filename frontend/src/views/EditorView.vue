@@ -1155,18 +1155,6 @@ onUnmounted(() => { globalThis.removeEventListener('keydown', onEditorKeydown); 
       >Force-take (admin)</button>
     </div>
 
-    <!-- Phase 1 (2026-06-05): editor skeleton renders while the SEGMENTS
-         endpoint specifically is still pending. The other 10 parallel
-         fetches (slides, chat, polls, discrepancies, words, alignment,
-         pipeline, etc.) populate progressively via the per-stage loadbar
-         (rendered below when loadStages.segments === 'done'). Previously
-         we gated on the entire load() Promise.all — a single slow call
-         pinned the skeleton up for the wall-clock of the slowest
-         endpoint, which is the wrong UX when segments are what the
-         operator needs to see first. Bug fix 2026-06-06: gate on the
-         segments stage state, not the aggregate `loading` ref. -->
-    <EditorSkeleton v-if="loadStages.segments === 'pending' && SEGMENTS.length === 0" />
-
     <!-- Phase A7 — per-stage load progress strip. Shows only during the
          initial load; non-blocking, error-tolerant per stage. -->
     <div
@@ -1302,7 +1290,15 @@ onUnmounted(() => { globalThis.removeEventListener('keydown', onEditorKeydown); 
       <div class="editor__tab-meta"><FlagLegend /></div>
     </div>
 
-    <div class="editor__grid" :style="gridStyle">
+    <!-- Phase 1 (2026-06-05): editor skeleton renders in the GRID slot
+         while the SEGMENTS endpoint specifically is still pending. Topbar
+         + stepper + FLAGGED chips above still render normally so the
+         operator sees the editor chrome, not a page-pushed-down state.
+         Bug fix 2026-06-06: skeleton was placed BEFORE the topbar, which
+         vertically shoved breadcrumb/stepper/FLAGGED below it; moved here
+         to be the mutual-exclusive twin of `.editor__grid`. -->
+    <EditorSkeleton v-if="loadStages.segments === 'pending' && SEGMENTS.length === 0" />
+    <div v-else class="editor__grid" :style="gridStyle">
       <aside class="editor__leftcol">
         <VideoStrip
           :session="sessionForChildren"
