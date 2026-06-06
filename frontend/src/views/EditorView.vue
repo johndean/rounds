@@ -28,7 +28,7 @@
  * Related business rules: BR-001 (Admin tab gate), BR-006 (discrepancy
  * priority order), BR-018 (Mark OK auto-closes discrepancies).
  */
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted, provide } from 'vue';
 import { RouterLink, useRouter } from 'vue-router';
 import Icon from '@/components/shared/Icon.vue';
 import FlagLegend from '@/components/editor/FlagLegend.vue';
@@ -48,6 +48,7 @@ import DownloadMenu from '@/components/editor/DownloadMenu.vue';
 import EditorSkeleton from '@/components/shared/EditorSkeleton.vue';
 import { useSessionLock } from '@/composables/useSessionLock';
 import { useIsAdmin } from '@/composables/useIsAdmin';
+import { useAutosave, AUTOSAVE_STATUS_KEY } from '@/composables/useAutosave';
 import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, words as wordsApi, discrepancies as discrepanciesApi, wordAlignment as wordAlignmentApi, media as mediaApi, placements as placementsApi, type SessionSummary, type WordRow, type DiscrepancyRow, type WordAlignmentEntry } from '@/services/api';
 import { toast } from '@/composables/useToast';
 import { ApiError } from '@/services/http';
@@ -70,11 +71,18 @@ const props = defineProps<{ id: string; initialTab?: TabId }>();
 const router = useRouter();
 
 // Phase 1 (2026-06-05): concurrent-edit lock. Banner renders read-only state
-// when another operator holds the session. Phase 2's autosave will gate its
+// when another operator holds the session. Phase 2's autosave gates its
 // writes on `isHolder.value === true` (fail-closed when null or false).
 const { isHolder, holder, lockError, forceTake } = useSessionLock(props.id);
 const isAdmin = useIsAdmin();
 const isReadOnly = computed(() => isHolder.value !== true);
+
+// Phase 2 (2026-06-05): debounced autosave gated by the Phase 1 lock.
+// Per-segment status is provided to TranscriptPane / SegmentText via
+// inject(AUTOSAVE_STATUS_KEY) so children can render their own badge
+// without reactive thrash on the 600-segment v-for.
+const autosave = useAutosave(props.id, isHolder);
+provide(AUTOSAVE_STATUS_KEY, autosave.status);
 
 // ── Data refs (empty until backend populates) ─────────────────────────
 const session = ref<SessionSummary | null>(null);
@@ -814,6 +822,23 @@ async function onEditSegment(segId: string, before: string, after: string): Prom
   }
 }
 
+// Phase 2 — autosave on textarea blur / segment-switch. Backend
+// _is_noop_correction (Phase 1.5) short-circuits when nothing changed,
+// so calling on every blur is safe for the redo tail. Optimistic local
+// update mirrors the manual-save path so the UI keeps the edited text
+// even if the next refresh hasn't run yet.
+function onAutosaveSegment(segId: string, before: string, after: string): void {
+  if (before === after) return;
+  const idx = SEGMENTS.value.findIndex((s) => s.id === segId);
+  if (idx >= 0) {
+    SEGMENTS.value[idx] = { ...SEGMENTS.value[idx]!, text: after, has_user_override: true };
+  }
+  autosave.schedule(segId, before, after);
+}
+function onFlushAutosave(segId?: string): void {
+  autosave.flush(segId);
+}
+
 async function onReassignSegment(segId: string, beforeSlide: string | null, afterSlide: string): Promise<void> {
   try {
     await correctionsApi.apply(props.id, {
@@ -1149,6 +1174,8 @@ onUnmounted(() => { window.removeEventListener('keydown', onEditorKeydown); });
         @drop-on-segment="handleDropOnSegment"
         @remove-anchor="handleRemoveAnchor"
         @edit-segment="onEditSegment"
+        @autosave-segment="onAutosaveSegment"
+        @flush-autosave="onFlushAutosave"
         @reassign-segment="onReassignSegment"
         @reassign-speaker-live="onReassignSpeakerLive"
       />

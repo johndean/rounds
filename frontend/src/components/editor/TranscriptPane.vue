@@ -5,9 +5,10 @@
  * Edit/Reassign/Speaker modes, drop targets for chat/poll anchors, and
  * the rich edit toolbar (B/I/U/list/marks/link/poll-ref).
  */
-import { ref, computed, watch, nextTick, useTemplateRef } from 'vue';
+import { ref, computed, watch, nextTick, useTemplateRef, inject } from 'vue';
 import Icon from '@/components/shared/Icon.vue';
 import SegmentText from '@/components/editor/SegmentText.vue';
+import { AUTOSAVE_STATUS_KEY, type AutosaveStatus } from '@/composables/useAutosave';
 import AnchorBlock from '@/components/editor/AnchorBlock.vue';
 import {
   slideAccent,
@@ -82,6 +83,12 @@ const emit = defineEmits<{
   (e: 'editSegment', segId: string, before: string, after: string): void;
   (e: 'reassignSegment', segId: string, beforeSlide: string | null, afterSlide: string): void;
   (e: 'reassignSpeakerLive', segId: string, beforeSpeakerId: string | null, afterSpeakerId: string): void;
+  // Phase 2 — fired on textarea blur OR when the user switches to a
+  // different segment WITHOUT clicking Save. EditorView debounces +
+  // calls /v1/sessions/{id}/corrections; backend anti-no-op guard
+  // (Phase 1.5) short-circuits when nothing changed.
+  (e: 'autosaveSegment', segId: string, before: string, after: string): void;
+  (e: 'flushAutosave', segId?: string): void;
 }>();
 
 interface InlineEdit {
@@ -149,6 +156,30 @@ function saveEdit(seg: Segment): void {
     emit('editSegment', seg.id, seg.text, stripped);
   }
   closeInline();
+}
+
+// ── Phase 2 — autosave wiring ────────────────────────────────────────
+// shallowRef map provided by EditorView (useAutosave). When this slot
+// isn't provided (older surfaces / Storybook), inject returns null and
+// the badge stays idle — graceful no-op.
+const autosaveStatus = inject(AUTOSAVE_STATUS_KEY, null);
+
+function _stripSpeakerPrefix(draft: string): string {
+  return draft.replace(/^\*\*[^*]+:\*\*\s*/, '');
+}
+
+function onAutosaveInput(seg: Segment, raw: string): void {
+  const stripped = _stripSpeakerPrefix(raw);
+  if (stripped === seg.text) return;
+  emit('autosaveSegment', seg.id, seg.text, stripped);
+}
+function onAutosaveBlur(seg: Segment): void {
+  // Flush whatever this segment has pending so the user gets the
+  // latest-saved-state when they leave the field.
+  emit('flushAutosave', seg.id);
+}
+function segStatus(segId: string): AutosaveStatus {
+  return autosaveStatus?.value.get(segId) ?? 'idle';
 }
 function saveReassign(seg: Segment, slideId: string): void {
   if (slideId !== seg.slide_id) {
@@ -434,10 +465,20 @@ watch(() => props.activeSegmentId, (id, prev) => {
                 spellcheck="true"
                 :style="{ width: '100%' }"
                 :rows="rows()"
-                @input="(e) => mutate((e.target as HTMLTextAreaElement).value)"
+                @input="(e) => { const v = (e.target as HTMLTextAreaElement).value; mutate(v); onAutosaveInput(seg, v); }"
+                @blur="onAutosaveBlur(seg)"
                 @click.stop
               />
               <div class="segment-editor__foot">
+                <span
+                  v-if="segStatus(seg.id) !== 'idle'"
+                  :class="['autosave-badge', `autosave-badge--${segStatus(seg.id)}`]"
+                  :data-test-id="`autosave-${seg.id}`"
+                >
+                  <template v-if="segStatus(seg.id) === 'saving'">Saving…</template>
+                  <template v-else-if="segStatus(seg.id) === 'saved'">Saved</template>
+                  <template v-else-if="segStatus(seg.id) === 'error'">Unsaved — retry</template>
+                </span>
                 <button class="btn btn--secondary btn--sm" @click.stop="closeInline">Cancel</button>
                 <button class="btn btn--sm" :style="{ background: 'var(--color-green)', color: '#fff' }" @click.stop="saveEdit(seg)">Save</button>
               </div>

@@ -840,6 +840,19 @@ body.is-col-resizing .editor__resizer::before {
 .editor__tab .count--amber { background: var(--color-amber, #B45A1A); color: #fff; }
 .editor__tab.is-active .count--amber { background: var(--color-amber, #B45A1A); color: #fff; }
 
+/* Phase 2 (2026-06-05) — per-segment autosave status badge. shallowRef
+   driven; only re-renders for segments whose status actually changed. */
+.autosave-badge {
+  display: inline-flex; align-items: center;
+  font-size: 11px; font-weight: 600;
+  padding: 2px 8px; border-radius: 999px;
+  font-family: var(--font-family);
+  margin-right: auto;
+}
+.autosave-badge--saving { background: var(--surface-elevated, #f3f4f6); color: var(--fg2, #6b7280); }
+.autosave-badge--saved  { background: rgba(22, 163, 74, 0.12); color: var(--color-green, #16A34A); }
+.autosave-badge--error  { background: rgba(220, 38, 38, 0.12); color: #DC2626; }
+
 /* Phase 1 (2026-06-05) — concurrent-edit lock banner. Fail-closed:
    when displayed, the editor enters read-only mode. */
 .editor__lock-banner {
