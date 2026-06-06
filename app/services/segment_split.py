@@ -135,7 +135,7 @@ async def execute_split(db, session_id: str, body, user) -> dict:
                CAST(:slide_id AS uuid),
                CAST(:speaker_id AS uuid),
                :seq_b,
-               :split_ms,
+               CAST(:split_ms AS integer),
                :end_ms,
                :text_b,
                :confidence,
@@ -143,8 +143,8 @@ async def execute_split(db, session_id: str, body, user) -> dict:
                FALSE,
                NULL,
                (CAST(:meta AS jsonb)
-                   || jsonb_build_object('split_from', CAST(:orig_id AS text), 'split_at_ms', CAST(:split_ms AS bigint))),
-               encode(sha256(CAST(:sid || CAST(:split_ms AS text) || CAST(new_id.id AS text) AS bytea)), 'hex')
+                   || jsonb_build_object('split_from', CAST(:orig_id AS text), 'split_at_ms', CAST(:split_ms AS integer))),
+               encode(sha256(CAST(:sid || :split_ms_text || CAST(new_id.id AS text) AS bytea)), 'hex')
           FROM new_id
         RETURNING id
     """), {
@@ -153,6 +153,7 @@ async def execute_split(db, session_id: str, body, user) -> dict:
         "speaker_id": str(seg["speaker_id"]) if seg["speaker_id"] else None,
         "seq_b": orig_seq + 1,
         "split_ms": split_ms,
+        "split_ms_text": str(split_ms),
         "end_ms": original_end_ms_before,
         "text_b": text_b,
         "confidence": seg["confidence"],

@@ -120,15 +120,16 @@ async def _redo_split(db, payload: dict) -> None:
             flags, is_anchor, anchor_kind, metadata, content_hash
         )
         SELECT CAST(:new AS uuid), s.session_id, s.slide_id, s.speaker_id,
-               :seq_b, :split_ms, :end_ms, :text_b, s.confidence,
+               :seq_b, CAST(:split_ms AS integer), :end_ms, :text_b, s.confidence,
                s.flags, FALSE, NULL,
-               (s.metadata || jsonb_build_object('split_from', CAST(:orig AS text), 'split_at_ms', CAST(:split_ms AS bigint))),
-               encode(sha256(CAST(CAST(s.session_id AS text) || CAST(:split_ms AS text) || CAST(:new AS text) AS bytea)), 'hex')
+               (s.metadata || jsonb_build_object('split_from', CAST(:orig AS text), 'split_at_ms', CAST(:split_ms AS integer))),
+               encode(sha256(CAST(CAST(s.session_id AS text) || :split_ms_text || CAST(:new AS text) AS bytea)), 'hex')
           FROM segments s
          WHERE s.id = CAST(:orig AS uuid)
     """), {
         "new": new_id, "seq_b": int(seg["seq"]) + 1,
-        "split_ms": split_ms, "end_ms": original_end_ms_before,
+        "split_ms": split_ms, "split_ms_text": str(split_ms),
+        "end_ms": original_end_ms_before,
         "text_b": text_b, "orig": orig_id,
     })
 
