@@ -1048,10 +1048,17 @@ onUnmounted(() => { window.removeEventListener('keydown', onEditorKeydown); });
       >Force-take (admin)</button>
     </div>
 
-    <!-- Phase 1 (2026-06-05): editor skeleton renders while the very first
-         data load is in flight. The existing per-stage loadbar still
-         renders for granular progress once SEGMENTS start arriving. -->
-    <EditorSkeleton v-if="loading && SEGMENTS.length === 0" />
+    <!-- Phase 1 (2026-06-05): editor skeleton renders while the SEGMENTS
+         endpoint specifically is still pending. The other 10 parallel
+         fetches (slides, chat, polls, discrepancies, words, alignment,
+         pipeline, etc.) populate progressively via the per-stage loadbar
+         (rendered below when loadStages.segments === 'done'). Previously
+         we gated on the entire load() Promise.all — a single slow call
+         pinned the skeleton up for the wall-clock of the slowest
+         endpoint, which is the wrong UX when segments are what the
+         operator needs to see first. Bug fix 2026-06-06: gate on the
+         segments stage state, not the aggregate `loading` ref. -->
+    <EditorSkeleton v-if="loadStages.segments === 'pending' && SEGMENTS.length === 0" />
 
     <!-- Phase A7 — per-stage load progress strip. Shows only during the
          initial load; non-blocking, error-tolerant per stage. -->
