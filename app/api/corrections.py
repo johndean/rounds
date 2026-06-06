@@ -60,6 +60,29 @@ ALLOWED_CORRECTION_TYPES = frozenset({
 CLOSES_DISCREPANCY_TYPES = frozenset({"text_edit", "mark_ok"})
 
 
+# ─── Phase 1.5 — anti-no-op guard ───────────────────────────────────────
+#
+# Plan ref: docs/plans/2026-06-05-010-zero-gap-parity-plan.md §Phase 1.5.
+# Reviewer-flagged: every append calls _truncate_redo_tail (line ~188).
+# Phase 2 autosave fires on blur — a blur with no actual edit would post a
+# text_edit with new_text == effective_text, truncate the redo tail, and
+# silently destroy undone work. _is_noop_correction returns True for any
+# correction whose payload would not change the segment's effective state.
+def _is_noop_correction(body: "CorrectionRequest") -> bool:
+    """True when this correction would not change the segment."""
+    if body.correction_type == "text_edit":
+        if body.old_text is None or body.new_text is None:
+            return False  # malformed payload; let the existing path 400 it
+        return body.old_text == body.new_text
+    if body.correction_type == "slide_reassignment":
+        if body.old_slide_id is None or body.new_slide_id is None:
+            return False
+        return body.old_slide_id == body.new_slide_id
+    # speaker_reassignment / chat_*/poll_*/split/merge/mark_ok all have side
+    # effects beyond text comparison; treat as never-no-op.
+    return False
+
+
 # ─── Pydantic schemas ───────────────────────────────────────────────────
 class CorrectionRequest(BaseModel):
     segment_id: UUID
@@ -183,6 +206,21 @@ async def apply_correction(
         raise HTTPException(status_code=404, detail=f"Session {sid} not found")
     if not await _segment_belongs(db, sid, seg_id):
         raise HTTPException(status_code=404, detail=f"Segment {seg_id} not in session {sid}")
+
+    # Phase 1.5 — skip no-op corrections so autosave-on-blur (Phase 2)
+    # can't silently truncate the redo tail with a write that doesn't
+    # change segment state. Return the current pointer + a noop=True
+    # flag so the frontend can show "Saved" without bumping anything.
+    if _is_noop_correction(body):
+        current_ptr = await _ensure_pointer(db, sid)
+        return {
+            "correction_id":   None,
+            "sequence_number": current_ptr,
+            "action_id":       str(body.action_id) if body.action_id else None,
+            "segment_id":      seg_id,
+            "correction_type": body.correction_type,
+            "noop":            True,
+        }
 
     current_ptr = await _ensure_pointer(db, sid)
     await _truncate_redo_tail(db, sid, current_ptr)
