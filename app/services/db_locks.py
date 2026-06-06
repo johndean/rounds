@@ -18,12 +18,22 @@ Lock-key derivation:
     Each call MUST use the same stage_name; otherwise sibling stages
     will collide pointlessly.
 
-Lock SCOPE (per the perf reviewer):
-    We use the SESSION-scoped lock (pg_try_advisory_lock) released
-    explicitly at exit, NOT the transaction-scoped variant
-    (pg_try_advisory_xact_lock). xact-scoped locks held across a long
-    ai_process pipeline would serialize all concurrent re-ingests on
-    the same session and neutralize the worker-concurrency win.
+Lock SCOPE (two helpers, two scopes):
+    - `try_advisory_lock` (SYNC, ingest workers): SESSION-scoped
+      (pg_try_advisory_lock) released explicitly at exit. Used by the
+      long-running ai_process / slide_extract Celery tasks — these hold
+      the lock across many statements without a single commit boundary,
+      so xact-scope would either neutralize the worker-concurrency win
+      or release prematurely at the first internal commit.
+    - `try_advisory_lock_async` (ASYNC, FastAPI handlers): TRANSACTION-
+      scoped (pg_try_advisory_xact_lock), auto-released at COMMIT or
+      ROLLBACK. The correction-ledger handlers (split/merge apply, undo,
+      redo) acquire → short DB work → commit → exit; xact-scope is the
+      right fit because SQLAlchemy's async pool returns the connection
+      after commit, which makes explicit pg_advisory_unlock unsafe (it
+      runs on a different pooled connection, silently returns false,
+      leaks the original lock until pool_recycle). See the
+      `try_advisory_lock_async` docstring for the full rationale.
 
 Usage:
 
@@ -86,25 +96,54 @@ async def try_advisory_lock_async(db, *, session_id: str, stage: str):
     """
     Async variant for SQLAlchemy AsyncSession (used inside FastAPI routes).
 
-    `db` is an AsyncSession; uses sqlalchemy.text. Releases on exit; safe
-    for use across awaits because the lock is bound to the underlying
-    Postgres SESSION (the connection-pool connection), not the
-    transaction.
+    `db` is an AsyncSession; uses sqlalchemy.text. The lock is acquired
+    with the TRANSACTION-scoped variant (pg_try_advisory_xact_lock) and
+    auto-releases when the surrounding transaction COMMITs or ROLLBACKs.
+    There is NO explicit unlock in finally — that would be a no-op (the
+    lock is already gone) and, worse, would run on whatever connection
+    the AsyncSession lazily checks out next (post-commit the connection
+    has been returned to the pool).
+
+    Why xact_lock and not session_lock here:
+        The FastAPI correction handlers (split/merge apply, undo, redo)
+        follow the pattern: acquire → short DB work → commit → exit.
+        With the session-scoped variant, COMMIT returns the underlying
+        connection to the SQLAlchemy pool *while the advisory lock is
+        still held on that backend*. The unlock-in-finally then ran on a
+        potentially different connection, silently returned false, and
+        the original lock leaked until pool_recycle (30 min) or
+        connection close — effectively bypassing serialization for
+        subsequent requests that landed on the still-locked backend
+        (because session-scoped locks are reentrant within the same
+        backend). pg_try_advisory_xact_lock auto-releases at COMMIT, so
+        the connection returns to the pool clean.
+
+    Caller contract:
+        - The caller MUST `await db.commit()` (or let an exception
+          trigger ROLLBACK) inside the `async with` block — the lock
+          lives only as long as the open transaction.
+        - Do NOT use this helper to hold a lock across multiple
+          transactions or across an async boundary that begins a new
+          transaction; for that, see the sync `try_advisory_lock` (long-
+          running ingest pipeline) or refactor to acquire xact_lock per
+          stage.
+
+    Yields True if the lock was acquired, False if it was already held
+    (by any other connection, transaction- or session-scoped — both
+    variants contend on the same Postgres advisory-lock namespace).
+    Caller decides what to do on contention (typically 409).
     """
     from sqlalchemy import text as sql_text
 
     k1, k2 = _stage_keys(session_id, stage)
     acquired_row = (await db.execute(
-        sql_text("SELECT pg_try_advisory_lock(:k1, :k2) AS got"),
+        sql_text("SELECT pg_try_advisory_xact_lock(:k1, :k2) AS got"),
         {"k1": k1, "k2": k2},
     )).mappings().first()
     acquired = bool(acquired_row["got"]) if acquired_row else False
 
-    try:
-        yield acquired
-    finally:
-        if acquired:
-            await db.execute(
-                sql_text("SELECT pg_advisory_unlock(:k1, :k2)"),
-                {"k1": k1, "k2": k2},
-            )
+    # No try/finally with pg_advisory_unlock: the xact-scoped lock auto-
+    # releases on COMMIT or ROLLBACK of the surrounding transaction. An
+    # explicit unlock here would either no-op (lock already released) or
+    # run on the wrong pooled connection (see docstring).
+    yield acquired

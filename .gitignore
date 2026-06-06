@@ -67,3 +67,4 @@ coverage/
 # --- pgsql dumps ---
 *.sql.gz
 *.dump
+.gstack/

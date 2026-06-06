@@ -554,6 +554,49 @@ export const corrections = {
         slide_id: string | null; priority_score: number;
       }>;
     }>(`/v1/sessions/${encodeURIComponent(sessionId)}/review-queue`),
+
+  // Phase 3.5 + 4 (split/merge) — typed convenience wrappers for the two
+  // correction types that the generic apply() helper above can't model
+  // ergonomically. Both POST to the same /v1/sessions/{sid}/corrections
+  // endpoint with the structural payload the backend executor expects.
+  // Behind backend feature flag SPLIT_MERGE_ENABLED — disabled flag yields
+  // 503 SPLIT_MERGE_DISABLED. Frontend gates via featureFlags store too.
+  splitSegment: (
+    sessionId: string,
+    segmentId: string,
+    afterWordIndex: number,
+    actionId?: string,
+  ) =>
+    http<CorrectionApplied>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/corrections`,
+      {
+        body: {
+          segment_id: segmentId,
+          correction_type: 'split',
+          after_word_index: afterWordIndex,
+          ...(actionId ? { action_id: actionId } : {}),
+        },
+        method: 'POST',
+      },
+    ),
+  mergeSegment: (
+    sessionId: string,
+    segmentId: string,
+    expectedRightSegmentId: string,
+    actionId?: string,
+  ) =>
+    http<CorrectionApplied>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/corrections`,
+      {
+        body: {
+          segment_id: segmentId,
+          correction_type: 'merge',
+          expected_right_segment_id: expectedRightSegmentId,
+          ...(actionId ? { action_id: actionId } : {}),
+        },
+        method: 'POST',
+      },
+    ),
 };
 
 

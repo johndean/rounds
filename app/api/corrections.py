@@ -92,6 +92,21 @@ class CorrectionRequest(BaseModel):
     old_text: Optional[str] = None
     new_text: Optional[str] = None
     action_id: Optional[UUID] = None
+    # Phase 3.5/4 (2026-06-06) — split/merge structural args.
+    # Only consulted when correction_type is "split" or "merge".
+    after_word_index: Optional[int] = None
+    expected_right_segment_id: Optional[UUID] = None
+    # Phase 3.5/4 (2026-06-06) — autosave-vs-split race guard. When a
+    # frontend captures `new_text` from an editor blur, it can also
+    # capture the segment's current content_hash and ship it with the
+    # request. If the segment's content_hash has changed server-side
+    # since (e.g. a split committed first and rewrote the left half's
+    # text), we treat this autosave as stale and drop it on the floor
+    # instead of clobbering the post-split text. Opt-in: callers that
+    # omit this field get the legacy behavior.
+    # TODO(frontend): the editor's autosave-on-blur needs to start
+    #   passing the segment's content_hash here. Out of scope for this fix.
+    expected_content_hash: Optional[str] = None
 
 
 class FindReplaceRequest(BaseModel):
@@ -133,7 +148,27 @@ async def _ensure_pointer(db, session_id: str) -> int:
 
 
 async def _next_seq(db, session_id: str) -> int:
-    """Next sequence_number for this session. 0 if no rows exist."""
+    """Next sequence_number for this session. 0 if no rows exist.
+
+    Bug fix (H3, 2026-06-06): the original implementation did a bare
+    SELECT MAX(sequence_number)+1 with no locking. Concurrent writers
+    (e.g. text_edit autosave running alongside a split) could compute
+    the same value and both INSERT, violating UNIQUE(session_id,
+    sequence_number). We now take a row-level FOR UPDATE lock on
+    ledger_pointers FIRST, which serializes all ledger writes for
+    this session through the pointer row. The split_merge advisory
+    lock is independent and continues to serve its own purpose.
+    """
+    # Lock the pointer row first so we serialize all subsequent ledger
+    # writes for this session. _ensure_pointer guarantees the row exists.
+    await db.execute(
+        text(
+            "SELECT current_pointer FROM ledger_pointers "
+            "WHERE session_id = CAST(:sid AS uuid) "
+            "FOR UPDATE"
+        ),
+        {"sid": session_id},
+    )
     row = (
         await db.execute(
             text(
@@ -220,6 +255,76 @@ async def _segment_belongs(db, session_id: str, segment_id: str) -> bool:
     return row is not None
 
 
+# ─── Phase 3.5/4 — split/merge dedup replay ─────────────────────────────
+async def _replay_existing(db, session_id: str, action_id: str) -> Optional[dict]:
+    """Return the cached response for a prior action_id, or None.
+
+    Bug fix (C2, 2026-06-06): the first call to apply_correction for a
+    split returns ``affected_segment_ids = [original_id, new_segment_id]``
+    and for a merge returns ``deleted_segment_id = right_id``. The replay
+    path used to hardcode ``[segment_id]`` + ``deleted_segment_id=None``,
+    so two requests with the same action_id disagreed on shape. We now
+    parse the invert_payload stored in ``new_text`` and reconstruct the
+    same shape the first call returned. Also preserves ``applied_by``
+    from the original ledger row (low-severity finding on this path).
+    """
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT id, segment_id, correction_type, applied_at,
+                       sequence_number, new_text, applied_by
+                  FROM correction_ledger
+                 WHERE session_id = CAST(:sid AS uuid)
+                   AND action_id  = CAST(:aid AS uuid)
+                 ORDER BY sequence_number
+                 LIMIT 1
+                """
+            ),
+            {"sid": session_id, "aid": action_id},
+        )
+    ).mappings().first()
+    if not row:
+        return None
+
+    ctype = row["correction_type"]
+    seg_id = str(row["segment_id"])
+    affected_segment_ids: list[str] = [seg_id]
+    deleted_segment_id: Optional[str] = None
+
+    # Structural ops store the invert_payload as JSON in new_text. Parse
+    # it to recover the new_segment_id (split) / deleted_segment_id
+    # (merge) so replay matches the original response shape.
+    if ctype in {"split", "merge"} and row["new_text"]:
+        import json as _json
+        try:
+            payload = _json.loads(row["new_text"])
+        except Exception:  # noqa: BLE001
+            payload = None
+        if isinstance(payload, dict):
+            if ctype == "split":
+                new_id = payload.get("new_segment_id")
+                if new_id:
+                    affected_segment_ids = [seg_id, str(new_id)]
+            elif ctype == "merge":
+                del_id = payload.get("deleted_segment_id")
+                if del_id:
+                    deleted_segment_id = str(del_id)
+
+    return {
+        "correction_id": str(row["id"]),
+        "sequence_number": int(row["sequence_number"]),
+        "action_id": action_id,
+        "segment_id": seg_id,
+        "correction_type": ctype,
+        "affected_segment_ids": affected_segment_ids,
+        "deleted_segment_id": deleted_segment_id,
+        "applied_at": row["applied_at"].isoformat() if row["applied_at"] else None,
+        "applied_by": row["applied_by"],
+        "deduped": True,
+    }
+
+
 # ─── POST /v1/sessions/{id}/corrections ─────────────────────────────────
 @router.post("/{session_id}/corrections")
 async def apply_correction(
@@ -244,6 +349,74 @@ async def apply_correction(
     if not await _segment_belongs(db, sid, seg_id):
         raise HTTPException(status_code=404, detail=f"Segment {seg_id} not in session {sid}")
 
+    # Phase 3.5/4 (2026-06-06) — structural split/merge pre-branch. Gated
+    # by SPLIT_MERGE_ENABLED, serialized on (session_id, "split_merge")
+    # advisory lock. action_id dedup happens INSIDE the lock so two
+    # concurrent identical requests don't both execute. The 11 other
+    # correction types fall through to the existing flow below.
+    if body.correction_type in {"split", "merge"}:
+        from app.config import settings as _settings
+        if not _settings.SPLIT_MERGE_ENABLED:
+            raise HTTPException(status_code=503, detail={"code": "SPLIT_MERGE_DISABLED"})
+        from app.services import db_locks
+        async with db_locks.try_advisory_lock_async(db, session_id=sid, stage="split_merge") as acquired:
+            if not acquired:
+                raise HTTPException(status_code=409, detail={"code": "SPLIT_MERGE_BUSY"})
+            if body.action_id:
+                cached = await _replay_existing(db, sid, str(body.action_id))
+                if cached:
+                    return cached
+            if body.correction_type == "split":
+                from app.services import segment_split as _svc_split
+                result = await _svc_split.execute_split(db, sid, body, user)
+            else:
+                from app.services import segment_merge as _svc_merge
+                result = await _svc_merge.execute_merge(db, sid, body, user)
+            # Append ledger row carrying the invert_payload in new_text.
+            import json as _json
+            current_ptr = await _ensure_pointer(db, sid)
+            await _truncate_redo_tail(db, sid, current_ptr)
+            seq = await _next_seq(db, sid)
+            action_id = str(body.action_id or uuid.uuid4())
+            applied_by = getattr(user, "email", None) or "(unknown)"
+            row = (await db.execute(text(
+                """
+                INSERT INTO correction_ledger
+                    (session_id, segment_id, correction_type,
+                     old_text, new_text, applied_by, action_id, sequence_number)
+                VALUES
+                    (CAST(:sid AS uuid), CAST(:seg AS uuid), :ctype,
+                     NULL, :payload, :by, CAST(:aid AS uuid), :seq)
+                RETURNING id, applied_at
+                """
+            ), {
+                "sid": sid, "seg": seg_id, "ctype": body.correction_type,
+                "payload": _json.dumps(result["invert_payload"]),
+                "by": applied_by, "aid": action_id, "seq": seq,
+            })).mappings().one()
+            await db.execute(text(
+                "UPDATE ledger_pointers SET current_pointer = :p, updated_at = now() "
+                "WHERE session_id = CAST(:sid AS uuid)"
+            ), {"sid": sid, "p": seq})
+            await db.commit()
+            await _emit_ws(sid, {
+                "type": "correction_applied",
+                "action_id": action_id,
+                "segment_ids": result["affected_segment_ids"],
+                "correction_type": body.correction_type,
+            })
+            return {
+                "correction_id":        str(row["id"]),
+                "sequence_number":      seq,
+                "action_id":            action_id,
+                "segment_id":           seg_id,
+                "correction_type":      body.correction_type,
+                "affected_segment_ids": result["affected_segment_ids"],
+                "deleted_segment_id":   result.get("deleted_segment_id"),
+                "applied_at":           row["applied_at"].isoformat() if row["applied_at"] else None,
+                "applied_by":           applied_by,
+            }
+
     # Phase 1.5 — skip no-op corrections so autosave-on-blur (Phase 2)
     # can't silently truncate the redo tail with a write that doesn't
     # change segment state. Return the current pointer + a noop=True
@@ -260,6 +433,61 @@ async def apply_correction(
         }
 
     current_ptr = await _ensure_pointer(db, sid)
+
+    # Phase 3.5/4 (2026-06-06) — autosave-vs-split race guard (C6).
+    # If the caller supplied expected_content_hash with a text_edit,
+    # the segment write is conditional on the hash still matching. We
+    # do the conditional UPDATE FIRST so that a stale autosave can be
+    # detected before we truncate the redo tail or append a ledger row.
+    # If the precondition fails, we treat the autosave as best-effort
+    # and silently no-op: no ledger row, no redo-tail truncation, no
+    # WS event. This preserves any structural op (split/merge) that
+    # already advanced the segment past the caller's snapshot.
+    stale_autosave = False
+    if (
+        body.correction_type == "text_edit"
+        and body.new_text is not None
+        and body.expected_content_hash is not None
+    ):
+        updated = (await db.execute(
+            text(
+                """
+                UPDATE segments
+                   SET text = :t, updated_at = now()
+                 WHERE id = CAST(:seg AS uuid)
+                   AND session_id = CAST(:sid AS uuid)
+                   AND content_hash = :expected_hash
+                RETURNING id
+                """
+            ),
+            {
+                "t": body.new_text,
+                "seg": seg_id,
+                "sid": sid,
+                "expected_hash": body.expected_content_hash,
+            },
+        )).first()
+        if updated is None:
+            stale_autosave = True
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "text_edit autosave dropped as stale (content_hash mismatch): "
+                "session=%s segment=%s expected_hash=%s",
+                sid, seg_id, body.expected_content_hash,
+            )
+            # Best-effort write: return without truncating the redo tail
+            # or writing a ledger row. We must still commit any open
+            # transaction state cleanly.
+            await db.commit()
+            return {
+                "correction_id":   None,
+                "sequence_number": current_ptr,
+                "action_id":       str(body.action_id) if body.action_id else None,
+                "segment_id":      seg_id,
+                "correction_type": body.correction_type,
+                "stale":           True,
+            }
+
     await _truncate_redo_tail(db, sid, current_ptr)
 
     seq = await _next_seq(db, sid)
@@ -314,7 +542,14 @@ async def apply_correction(
     # pre-autosave snapshot. Only text_edit needs this; other types
     # (slide_reassignment, speaker_reassignment, etc.) already write
     # the canonical column via their own existing endpoints.
-    if body.correction_type == "text_edit" and body.new_text is not None:
+    # Note (C6, 2026-06-06): when expected_content_hash was supplied we
+    # already performed the conditional UPDATE above; the unconditional
+    # write below is the legacy path for callers that don't ship a hash.
+    if (
+        body.correction_type == "text_edit"
+        and body.new_text is not None
+        and body.expected_content_hash is None
+    ):
         await db.execute(
             text(
                 "UPDATE segments SET text = :t, updated_at = now() "
@@ -323,6 +558,9 @@ async def apply_correction(
             ),
             {"t": body.new_text, "seg": seg_id, "sid": sid},
         )
+    # stale_autosave path returns early above; reference kept to silence
+    # static analyzers that don't see the early return.
+    _ = stale_autosave
 
     resolved_discrepancy_id: Optional[str] = None
     if body.correction_type in CLOSES_DISCREPANCY_TYPES:
@@ -613,17 +851,39 @@ async def undo_correction(session_id: UUID, db: DbSession, _u: CurrentUser) -> d
     if current_ptr < 0:
         return {"session_id": sid, "pointer": -1, "action": "nothing_to_undo"}
     new_ptr = current_ptr - 1
-    await db.execute(
-        text(
-            "UPDATE ledger_pointers SET current_pointer = :p, updated_at = now() "
-            "WHERE session_id = CAST(:sid AS uuid)"
-        ),
-        {"sid": sid, "p": new_ptr},
-    )
-    # Phase 2a — keep segments.text in lock-step with the pointer so
-    # downstream exports show the post-undo state.
-    await _materialize_segments_for_session(db, sid, up_to_pointer=new_ptr)
-    await db.commit()
+    # Phase 3.5/4 (2026-06-06) — undo structural ops between new_ptr+1
+    # and current_ptr (inclusive) BEFORE moving the pointer + materializing
+    # text. We walk newest-to-oldest so split→merge→text chains unwind in
+    # reverse order. Held under split_merge advisory lock to serialize
+    # against any in-flight forward op.
+    from app.services import db_locks
+    from app.services import segment_inverse
+    async with db_locks.try_advisory_lock_async(db, session_id=sid, stage="split_merge") as acquired:
+        if not acquired:
+            raise HTTPException(status_code=409, detail={"code": "SPLIT_MERGE_BUSY"})
+        rows = (await db.execute(text(
+            """
+            SELECT id, segment_id, correction_type, new_text, sequence_number
+              FROM correction_ledger
+             WHERE session_id = CAST(:sid AS uuid)
+               AND sequence_number BETWEEN :lo AND :hi
+               AND correction_type IN ('split', 'merge')
+             ORDER BY sequence_number DESC
+            """
+        ), {"sid": sid, "lo": new_ptr + 1, "hi": current_ptr})).mappings().all()
+        for r in rows:
+            await segment_inverse.apply_inverse_for_correction(db, r)
+        await db.execute(
+            text(
+                "UPDATE ledger_pointers SET current_pointer = :p, updated_at = now() "
+                "WHERE session_id = CAST(:sid AS uuid)"
+            ),
+            {"sid": sid, "p": new_ptr},
+        )
+        # Phase 2a — keep segments.text in lock-step with the pointer so
+        # downstream exports show the post-undo state.
+        await _materialize_segments_for_session(db, sid, up_to_pointer=new_ptr)
+        await db.commit()
     await _emit_ws(sid, {"type": "correction_applied", "action_id": "undo", "segment_ids": [], "correction_type": "undo"})
     return {"session_id": sid, "pointer": new_ptr}
 
@@ -644,17 +904,36 @@ async def redo_correction(session_id: UUID, db: DbSession, _u: CurrentUser) -> d
     if current_ptr >= max_seq:
         return {"session_id": sid, "pointer": current_ptr, "action": "nothing_to_redo"}
     new_ptr = current_ptr + 1
-    await db.execute(
-        text(
-            "UPDATE ledger_pointers SET current_pointer = :p, updated_at = now() "
-            "WHERE session_id = CAST(:sid AS uuid)"
-        ),
-        {"sid": sid, "p": new_ptr},
-    )
-    # Phase 2a — keep segments.text in lock-step with the pointer so
-    # downstream exports show the post-redo state.
-    await _materialize_segments_for_session(db, sid, up_to_pointer=new_ptr)
-    await db.commit()
+    # Phase 3.5/4 (2026-06-06) — redo structural ops between current_ptr+1
+    # and new_ptr (inclusive), oldest-first, under the split_merge lock.
+    from app.services import db_locks
+    from app.services import segment_inverse
+    async with db_locks.try_advisory_lock_async(db, session_id=sid, stage="split_merge") as acquired:
+        if not acquired:
+            raise HTTPException(status_code=409, detail={"code": "SPLIT_MERGE_BUSY"})
+        rows = (await db.execute(text(
+            """
+            SELECT id, segment_id, correction_type, new_text, sequence_number
+              FROM correction_ledger
+             WHERE session_id = CAST(:sid AS uuid)
+               AND sequence_number BETWEEN :lo AND :hi
+               AND correction_type IN ('split', 'merge')
+             ORDER BY sequence_number ASC
+            """
+        ), {"sid": sid, "lo": current_ptr + 1, "hi": new_ptr})).mappings().all()
+        for r in rows:
+            await segment_inverse.apply_forward_for_correction(db, r)
+        await db.execute(
+            text(
+                "UPDATE ledger_pointers SET current_pointer = :p, updated_at = now() "
+                "WHERE session_id = CAST(:sid AS uuid)"
+            ),
+            {"sid": sid, "p": new_ptr},
+        )
+        # Phase 2a — keep segments.text in lock-step with the pointer so
+        # downstream exports show the post-redo state.
+        await _materialize_segments_for_session(db, sid, up_to_pointer=new_ptr)
+        await db.commit()
     await _emit_ws(sid, {"type": "correction_applied", "action_id": "redo", "segment_ids": [], "correction_type": "redo"})
     return {"session_id": sid, "pointer": new_ptr}
 

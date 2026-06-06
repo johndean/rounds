@@ -122,6 +122,17 @@ class Settings(BaseSettings):
     # Per-user hourly cap. 0 disables. Soft cap — guards LLM cost surface.
     HELP_ASK_AI_RATE_LIMIT_PER_HOUR: int = 30
 
+    # ── Phase 3.5/4 — segment split + merge (2026-06-06) ─────────────
+    # SSOT backend kill-switch for the split/merge executor wired into
+    # POST /v1/sessions/{id}/corrections. Default OFF so enabling
+    # structural edits is an intentional production action — flip
+    # SPLIT_MERGE_ENABLED=true in Railway api + worker env vars to
+    # activate. Frontend reads this flag from /v1/version at app mount
+    # and hides the "Split here" right-click + merge-up keystroke when
+    # false. With the flag off the executor returns 503
+    # SPLIT_MERGE_DISABLED so a stale UI cannot silently no-op.
+    SPLIT_MERGE_ENABLED: bool = False
+
     # ── Validators ─────────────────────────────────────────────────────
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

@@ -181,6 +181,11 @@ async def version() -> JSONResponse:
         # broken Phase-0 VITE_HELP_ASK_AI_ENABLED build-time flag is no
         # longer consulted by the frontend.
         "help_ask_ai_enabled": settings.HELP_ASK_AI_ENABLED,
+        # Phase 3.5/4 (2026-06-06): SegmentText.vue reads this at app
+        # mount and hides the "Split here" context-menu item + the
+        # merge-up keystroke when false. SSOT lives on the backend
+        # (settings.SPLIT_MERGE_ENABLED).
+        "split_merge_enabled": settings.SPLIT_MERGE_ENABLED,
     })
 
 

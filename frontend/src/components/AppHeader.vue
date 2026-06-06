@@ -11,12 +11,14 @@ import Icon from '@/components/shared/Icon.vue';
 import { commandPalette } from '@/composables/useCommandPalette';
 import { toast } from '@/composables/useToast';
 import { useAuthStore } from '@/stores/auth';
+import { useFeatureFlagsStore } from '@/stores/featureFlags';
 import { useHelpStore } from '@/stores/help';
 import { useUiStore } from '@/stores/ui';
 
 const route = useRoute();
 const router = useRouter();
 const auth = useAuthStore();
+const featureFlags = useFeatureFlagsStore();
 const help = useHelpStore();
 const ui = useUiStore();
 
@@ -42,13 +44,15 @@ onMounted(async () => {
     const r = await fetch('/v1/version');
     if (!r.ok) return;
     const data = await r.json().catch(() => null) as
-      | { commit?: string; help_ask_ai_enabled?: boolean }
+      | { commit?: string; help_ask_ai_enabled?: boolean; split_merge_enabled?: boolean }
       | null;
     apiSha.value = data?.commit || '';
     // Phase 2 — Help Center Ask AI tab visibility (backend SSOT).
     if (typeof data?.help_ask_ai_enabled === 'boolean') {
       help.setAskEnabled(data.help_ask_ai_enabled);
     }
+    // Phase 3.5 + 4 — split/merge UI gating (backend SSOT).
+    featureFlags.setSplitMergeEnabled(data?.split_merge_enabled ?? false);
   } catch {
     /* silent — version chip is non-essential */
   }
