@@ -136,6 +136,37 @@ function _trackLoad<T>(stage: LoadStageKey, p: Promise<T>, fallback: T): Promise
     .then((r) => { loadStages.value[stage] = 'done'; return r; })
     .catch(() => { loadStages.value[stage] = 'error'; return fallback; });
 }
+
+// Backend wire-shapes for chat + polls. These were previously declared inside
+// load() and re-parsed on every invocation; lifted here so the type surface is
+// visible from outside the function (Phase 3 will use them in extracted
+// adapters) and load() stays focused on orchestration, not type plumbing.
+interface ApiChat { id: string; author: string; body: string; sent_at_ms: number; anchor_segment: string | null; placed: boolean }
+interface ApiPollOption { id: string; label: string; seq: number; votes: number }
+interface ApiPoll {
+  id: string; question: string; status: 'open' | 'closed';
+  opened_at_ms: number; closed_at_ms: number | null;
+  total_votes: number; anchor_segment: string | null; placed: boolean;
+  options: ApiPollOption[]; metadata?: { slide_n?: number };
+}
+
+// Poll anchor inference: prefer the backend's explicit anchor_segment;
+// fall back to the first segment of the slide named in metadata.slide_n
+// (the MIC parity rule — polls land on their declared slide even when the
+// backend didn't auto-place them). Dependencies passed explicitly so the
+// function is pure and testable.
+function _inferAnchor(
+  p: ApiPoll,
+  slidesByIndex: Map<number, string>,
+  firstSegBySlide: Map<string, string>,
+): string {
+  if (p.anchor_segment) return p.anchor_segment;
+  const slideN = p.metadata?.slide_n;
+  if (typeof slideN !== 'number') return '';
+  const slideId = slidesByIndex.get(slideN);
+  if (!slideId) return '';
+  return firstSegBySlide.get(slideId) ?? '';
+}
 const loadProgressPct = computed(() => {
   const states = Object.values(loadStages.value);
   const settled = states.filter((s) => s !== 'pending').length;
@@ -223,7 +254,6 @@ async function load(opts: { silent?: boolean } = {}): Promise<void> {
     // Adapt backend chat shape (anchor_segment, sent_at_ms, body) → editor
     // ChatMessage shape (anchor, t, text) so ChatTab can render real DB rows
     // using the same template as the fixture demo.
-    interface ApiChat { id: string; author: string; body: string; sent_at_ms: number; anchor_segment: string | null; placed: boolean }
     CHAT.value = (ch as unknown as ApiChat[]).map((c): ChatMessage => ({
       id:     c.id,
       author: c.author,
@@ -239,13 +269,6 @@ async function load(opts: { silent?: boolean } = {}): Promise<void> {
     // surfaced so we can auto-place polls onto the first segment of that
     // slide (Bug 2 — MIC's polls land on their declared slide; Rounds
     // wasn't doing that on its own).
-    interface ApiPollOption { id: string; label: string; seq: number; votes: number }
-    interface ApiPoll {
-      id: string; question: string; status: 'open' | 'closed';
-      opened_at_ms: number; closed_at_ms: number | null;
-      total_votes: number; anchor_segment: string | null; placed: boolean;
-      options: ApiPollOption[]; metadata?: { slide_n?: number };
-    }
     const slidesByIndex = new Map<number, string>();
     SLIDES.value.forEach((sl) => slidesByIndex.set(sl.n, sl.id));
     const firstSegBySlide = new Map<string, string>();
@@ -254,23 +277,11 @@ async function load(opts: { silent?: boolean } = {}): Promise<void> {
         firstSegBySlide.set(seg.slide_id, seg.id);
       }
     });
-    function _inferAnchor(p: ApiPoll): string {
-      if (p.anchor_segment) return p.anchor_segment;
-      const slideN = p.metadata?.slide_n;
-      if (typeof slideN === 'number') {
-        const slideId = slidesByIndex.get(slideN);
-        if (slideId) {
-          const segId = firstSegBySlide.get(slideId);
-          if (segId) return segId;
-        }
-      }
-      return '';
-    }
     POLLS.value = (po as unknown as ApiPoll[]).map((p): Poll => ({
       id:       p.id,
-      anchor:   _inferAnchor(p),
+      anchor:   _inferAnchor(p, slidesByIndex, firstSegBySlide),
       t:        (p.opened_at_ms ?? 0) / 1000,
-      placed:   p.placed || !!_inferAnchor(p),
+      placed:   p.placed || !!_inferAnchor(p, slidesByIndex, firstSegBySlide),
       question: p.question,
       options:  (p.options || []).map((o) => ({ id: o.id, label: o.label, votes: o.votes })),
       total:    p.total_votes ?? 0,
