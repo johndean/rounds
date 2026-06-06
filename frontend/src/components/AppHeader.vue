@@ -43,9 +43,16 @@ onMounted(async () => {
     // Plain fetch — /v1/version is unauthenticated, no need for the http() wrapper.
     const r = await fetch('/v1/version');
     if (!r.ok) return;
-    const data = await r.json().catch(() => null) as
-      | { commit?: string; help_ask_ai_enabled?: boolean; split_merge_enabled?: boolean }
+    // The API returns the standard envelope `{success, data, error, meta}`
+    // (see app/api/wrappers.py). Unwrap before reading flags. The pre-2026-06-06
+    // code read `data?.commit` / `data?.split_merge_enabled` against the
+    // ENVELOPE, which always resolved to undefined → flags never lit up in
+    // the browser even when the backend had them on. Bug fix: read from
+    // envelope.data.
+    const env = await r.json().catch(() => null) as
+      | { data?: { commit?: string; help_ask_ai_enabled?: boolean; split_merge_enabled?: boolean } }
       | null;
+    const data = env?.data;
     apiSha.value = data?.commit || '';
     // Phase 2 — Help Center Ask AI tab visibility (backend SSOT).
     if (typeof data?.help_ask_ai_enabled === 'boolean') {
