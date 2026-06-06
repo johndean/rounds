@@ -66,6 +66,11 @@ const props = defineProps<{
   // parent (useEditorPersistence). Applied once on mount; subsequent
   // scroll changes are owned by the user / reverse-jump.
   initialScrollTop?: number;
+  // Phase 3.5 — passed through to SegmentText so split/merge can call
+  // correctionsApi.splitSegment / mergeSegment with the right session.
+  // When undefined, SegmentText's splitMergeActive computed stays false
+  // and the new right-click + keystroke surface is inert.
+  sessionId?: string;
 }>();
 
 // Real slides only — no fixture fallback. If liveSlides isn't passed, slide
@@ -100,6 +105,12 @@ const emit = defineEmits<{
   // Phase 3 — debounced scrollTop emission so the parent can persist
   // it via useEditorPersistence. Fires on user scroll AND reverse-jump.
   (e: 'scrollTopChange', scrollTop: number): void;
+  // Phase 3.5 — relayed from SegmentText after a successful split/merge
+  // (segments-changed) or when the segment list must be re-fetched due
+  // to a stale-neighbor 409 (reload-required). EditorView wires both to
+  // its load() handler.
+  (e: 'segmentsChanged'): void;
+  (e: 'reloadRequired'): void;
 }>();
 
 interface InlineEdit {
@@ -442,7 +453,7 @@ watch(() => props.activeSegmentId, (id, prev) => {
       <button class="btn btn--tertiary btn--sm" @click="emit('clearFocus')">Clear filter</button>
     </div>
 
-    <template v-for="seg in visible" :key="seg.id">
+    <template v-for="(seg, segIdx) in visible" :key="seg.id">
       <article
         :data-seg-id="seg.id"
         :class="segClass(seg)"
@@ -587,7 +598,13 @@ watch(() => props.activeSegmentId, (id, prev) => {
                 :flags="seg.ai_flags"
                 :active-word-idx="seg.id === activeSegmentId ? activeWordIdx : -1"
                 :live-alignment="liveAlignment?.get(seg.id)"
+                :session-id="sessionId"
+                :segment-id="seg.id"
+                :prev-segment-id="visible[segIdx - 1]?.id ?? null"
+                :next-segment-id="visible[segIdx + 1]?.id ?? null"
                 @word-click="(w) => emit('wordClick', seg.id, w)"
+                @segments-changed="emit('segmentsChanged')"
+                @reload-required="emit('reloadRequired')"
               />
               <div class="segment__chiprow">
                 <span

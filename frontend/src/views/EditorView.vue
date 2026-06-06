@@ -1238,6 +1238,7 @@ onUnmounted(() => { window.removeEventListener('keydown', onEditorKeydown); });
         :time="time"
         :follow-video="followVideo"
         :initial-scroll-top="transcriptScrollTop"
+        :session-id="props.id"
         @segment-click="onSegmentClick"
         @word-click="onWordClick"
         @clear-focus="focusedSlideId = null"
@@ -1249,6 +1250,8 @@ onUnmounted(() => { window.removeEventListener('keydown', onEditorKeydown); });
         @reassign-segment="onReassignSegment"
         @reassign-speaker-live="onReassignSpeakerLive"
         @scroll-top-change="(t: number) => (transcriptScrollTop = t)"
+        @segments-changed="() => void load()"
+        @reload-required="() => void load()"
       />
       <STTPane
         v-else-if="tab === 'stt'"
