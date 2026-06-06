@@ -28,7 +28,7 @@
  * Related business rules: BR-001 (Admin tab gate), BR-006 (discrepancy
  * priority order), BR-018 (Mark OK auto-closes discrepancies).
  */
-import { ref, computed, watch, onMounted, onUnmounted, provide } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted, provide, type Ref } from 'vue';
 import { RouterLink, useRouter } from 'vue-router';
 import Icon from '@/components/shared/Icon.vue';
 import FlagLegend from '@/components/editor/FlagLegend.vue';
@@ -167,6 +167,175 @@ function _inferAnchor(
   if (!slideId) return '';
   return firstSegBySlide.get(slideId) ?? '';
 }
+
+// ── Backend row shapes (the wire-format types load() consumes) ────────
+type ApiSegmentRow = {
+  id: string; seq: number; start_ms: number; end_ms: number; text: string;
+  confidence: number | null; flags: string[];
+  slide_id: string | null; speaker_id: string | null;
+};
+type ApiSlideRow = { id: string; slide_index: number; title: string | null };
+type ApiCorrectionRow = {
+  id: string; segment_id: string; correction_type: string;
+  created_at: string; created_by: string; old_text: string; new_text: string;
+};
+type ApiDiscrepancyEnvelope = {
+  session_id: string; count: number; classified_count: number;
+  classification_status: 'pending' | 'partial' | 'complete';
+  discrepancies: DiscrepancyRow[];
+};
+type ApiAlignmentEnvelope = {
+  session_id: string; count: number; matched: number;
+  segments: Record<string, WordAlignmentEntry[]>;
+};
+
+// ── Pure adapters (one shape transform per function) ─────────────────
+// All functions below are pure: no ref/component-state access. They take
+// raw wire-shaped input and return the editor-shaped output. Extracted
+// from load() so the orchestration step reads top-to-bottom without
+// embedded type plumbing or shape-adapter literals.
+
+function _indexSpeakers(rows: ApiSpeaker[]): Map<string, ApiSpeaker> {
+  const m = new Map<string, ApiSpeaker>();
+  rows.forEach((row) => m.set(row.id, row));
+  return m;
+}
+
+// Map API segment shape → editor Segment shape. Real speaker name + color
+// are embedded so TranscriptPane/DiscrepanciesPane can render the real
+// roster via speakerDisplay(seg) without fixture fallback. The legacy
+// fixture key (`speaker: 'presenter'`) stays for backward-compat with any
+// code that still keys off it.
+function _adaptSegments(rows: ApiSegmentRow[], speakersById: Map<string, ApiSpeaker>): Segment[] {
+  return rows.map((row, i): Segment => {
+    const sp = row.speaker_id ? speakersById.get(row.speaker_id) : undefined;
+    return {
+      id: row.id,
+      idx: typeof row.seq === 'number' ? row.seq : i,
+      start: (row.start_ms ?? 0) / 1000,
+      end: (row.end_ms ?? 0) / 1000,
+      speaker: 'presenter',
+      slide_id: row.slide_id,
+      text: row.text || '',
+      ai_flags: (row.flags || []).map((kind) => ({ w: 0, kind: kind as 'drift' | 'uncertain' | 'low_confidence' })),
+      needs_review: (row.flags || []).length > 0,
+      has_user_override: false,
+      confidence: typeof row.confidence === 'number' && row.confidence < 0.75 ? 'low' : 'normal',
+      corrections: [],
+      speaker_id: row.speaker_id ?? null,
+      speaker_name: sp?.name ?? null,
+      speaker_short: sp?.short ?? null,
+      speaker_role: sp?.role ?? null,
+      speaker_color: sp?.avatar_color ?? null,
+    };
+  });
+}
+
+function _adaptSlides(rows: ApiSlideRow[]): Slide[] {
+  return rows.map((row): Slide => ({
+    id: row.id,
+    n: row.slide_index + 1,
+    title: row.title || '',
+    kind: 'data',
+  }));
+}
+
+// Adapt backend chat shape (anchor_segment, sent_at_ms, body) → editor
+// ChatMessage shape (anchor, t, text) so ChatTab can render real DB rows
+// using the same template as the fixture demo.
+function _adaptChat(rows: ApiChat[]): ChatMessage[] {
+  return rows.map((c): ChatMessage => ({
+    id:     c.id,
+    author: c.author,
+    anchor: c.anchor_segment || '',
+    t:      (c.sent_at_ms ?? 0) / 1000,
+    text:   c.body,
+    placed: c.placed,
+  }));
+}
+
+// Build the two indexes _inferAnchor needs to auto-place polls onto the
+// first segment of their declared slide. Must run AFTER segments + slides
+// have been adapted into editor shape (depends on Slide.n and Segment.id).
+function _buildSlideAnchorIndex(slides: Slide[], segments: Segment[]): {
+  slidesByIndex: Map<number, string>;
+  firstSegBySlide: Map<string, string>;
+} {
+  const slidesByIndex = new Map<number, string>();
+  slides.forEach((sl) => slidesByIndex.set(sl.n, sl.id));
+  const firstSegBySlide = new Map<string, string>();
+  segments.forEach((seg) => {
+    if (seg.slide_id && !firstSegBySlide.has(seg.slide_id)) {
+      firstSegBySlide.set(seg.slide_id, seg.id);
+    }
+  });
+  return { slidesByIndex, firstSegBySlide };
+}
+
+// Adapt backend poll shape (total_votes, anchor_segment, opened_at_ms,
+// options[{seq, votes, label}]) → editor Poll shape (total, anchor, t,
+// options[{id, label, votes}]). Backend's `metadata.slide_n` is also
+// surfaced so we can auto-place polls onto the first segment of that
+// slide (Bug 2 — MIC's polls land on their declared slide; Rounds
+// wasn't doing that on its own).
+function _adaptPolls(
+  rows: ApiPoll[],
+  slidesByIndex: Map<number, string>,
+  firstSegBySlide: Map<string, string>,
+): Poll[] {
+  return rows.map((p): Poll => {
+    const anchor = _inferAnchor(p, slidesByIndex, firstSegBySlide);
+    return {
+      id:       p.id,
+      anchor,
+      t:        (p.opened_at_ms ?? 0) / 1000,
+      placed:   p.placed || !!anchor,
+      question: p.question,
+      options:  (p.options || []).map((o) => ({ id: o.id, label: o.label, votes: o.votes })),
+      total:    p.total_votes ?? 0,
+      status:   p.status,
+    };
+  });
+}
+
+// Pre-populate the placement map so anchored chat/polls render in their
+// segment positions on first load (otherwise placements is empty and
+// anchorsBySegment shows nothing).
+function _initialPlacements(chat: ChatMessage[], polls: Poll[]): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  chat.forEach((c) => { if (c.anchor) out[c.id] = c.anchor; });
+  polls.forEach((p) => { if (p.anchor) out[p.id] = p.anchor; });
+  return out;
+}
+
+// di is the new envelope {session_id, count, classification_status, classified_count, discrepancies}.
+// Store the inner array; the envelope's totals are derivable from .length.
+function _unwrapDiscrepancies(envelope: ApiDiscrepancyEnvelope | { discrepancies?: DiscrepancyRow[] }): DiscrepancyRow[] {
+  return envelope.discrepancies ?? [];
+}
+
+// Group real Google STT words by segment_id so STTPane can render real
+// per-word tokens with real timestamps + confidences. Empty Map when
+// stt_background hasn't completed yet — STTPane shows its placeholder.
+function _groupWordsBySegment(rows: WordRow[]): Map<string, WordRow[]> {
+  const m = new Map<string, WordRow[]>();
+  rows.forEach((w) => {
+    const arr = m.get(w.segment_id);
+    if (arr) arr.push(w);
+    else m.set(w.segment_id, [w]);
+  });
+  return m;
+}
+
+// L2 word alignment: convert the {segments: {seg_id: [entries…]}} envelope
+// to a Map keyed by segment_id. Each segment_id maps to a positional array
+// where index N is the alignment for the Nth Gemini word (seg.text.split()).
+function _unwrapAlignment(envelope: ApiAlignmentEnvelope | { segments?: Record<string, WordAlignmentEntry[]> }): Map<string, WordAlignmentEntry[]> {
+  const m = new Map<string, WordAlignmentEntry[]>();
+  const segs = envelope.segments ?? {};
+  Object.entries(segs).forEach(([segId, entries]) => { m.set(segId, entries); });
+  return m;
+}
 const loadProgressPct = computed(() => {
   const states = Object.values(loadStages.value);
   const settled = states.filter((s) => s !== 'pending').length;
@@ -191,20 +360,23 @@ async function load(opts: { silent?: boolean } = {}): Promise<void> {
     // fallback preserved so existing call-site assumptions hold).
     const [s, sg, sl, sp, ch, po, di, co, wd, pc, al] = await Promise.all([
       _trackLoad('session',       sessionsApi.get(props.id),                                                                     null),
-      _trackLoad('segments',      segmentsApi.list(props.id),                                                                    [] as Array<{ id: string; seq: number; start_ms: number; end_ms: number; text: string; confidence: number | null; flags: string[]; slide_id: string | null; speaker_id: string | null }>),
-      _trackLoad('slides',        http<Array<{ id: string; slide_index: number; title: string | null }>>(`/v1/sessions/${encodeURIComponent(props.id)}/slides`), [] as Array<{ id: string; slide_index: number; title: string | null }>),
+      _trackLoad('segments',      segmentsApi.list(props.id),                                                                    [] as ApiSegmentRow[]),
+      _trackLoad('slides',        http<ApiSlideRow[]>(`/v1/sessions/${encodeURIComponent(props.id)}/slides`),                    [] as ApiSlideRow[]),
       _trackLoad('speakers',      http<ApiSpeaker[]>(`/v1/sessions/${encodeURIComponent(props.id)}/speakers`),                   [] as ApiSpeaker[]),
       _trackLoad('chat',          http<ChatMessage[]>(`/v1/sessions/${encodeURIComponent(props.id)}/chat`),                      [] as ChatMessage[]),
       _trackLoad('polls',         http<Poll[]>(`/v1/sessions/${encodeURIComponent(props.id)}/polls`),                            [] as Poll[]),
       _trackLoad('discrepancies', discrepanciesApi.list(props.id),                                                               { session_id: props.id, count: 0, classified_count: 0, classification_status: 'pending' as const, discrepancies: [] as DiscrepancyRow[] }),
-      _trackLoad('corrections',   auditApi.corrections(props.id),                                                                [] as Array<{ id: string; segment_id: string; correction_type: string; created_at: string; created_by: string; old_text: string; new_text: string }>),
+      _trackLoad('corrections',   auditApi.corrections(props.id),                                                                [] as ApiCorrectionRow[]),
       _trackLoad('words',         wordsApi.listBySession(props.id),                                                              [] as WordRow[]),
       _trackLoad('pipeline',      sessionsApi.pipelineConfig(props.id),                                                          null),
       _trackLoad('alignment',     wordAlignmentApi.get(props.id),                                                                { session_id: props.id, count: 0, matched: 0, segments: {} as Record<string, WordAlignmentEntry[]> }),
     ]);
+
+    // Scalars first.
     session.value = s;
     pipelineCfg.value = pc;
     if (s?.duration_sec) TOTAL_DURATION.value = s.duration_sec;
+
     // Fetch playback URL in parallel; failure is non-fatal (poster + scrubber stay static).
     // Request video first — backend's ORDER BY (role = :preferred) DESC falls through
     // to audio for sessions that don't have a video source.
@@ -215,111 +387,30 @@ async function load(opts: { silent?: boolean } = {}): Promise<void> {
         if (m.duration_sec && TOTAL_DURATION.value <= 0) TOTAL_DURATION.value = m.duration_sec;
       })
       .catch(() => { mediaUrl.value = null; mediaKind.value = null; });
+
+    // Speakers first — segments adapter needs the index for chip metadata.
     SPEAKERS_API.value = sp as ApiSpeaker[];
-    const speakersById = new Map<string, ApiSpeaker>();
-    SPEAKERS_API.value.forEach((row) => speakersById.set(row.id, row));
-    // Map API segment shape → editor Segment shape. Real speaker name + color
-    // are embedded so TranscriptPane/DiscrepanciesPane can render the real
-    // roster via speakerDisplay(seg) without fixture fallback. The legacy
-    // fixture key (`speaker: 'presenter'`) stays for backward-compat with any
-    // code that still keys off it.
-    SEGMENTS.value = (sg as Array<{ id: string; seq: number; start_ms: number; end_ms: number; text: string; confidence: number | null; flags: string[]; slide_id: string | null; speaker_id: string | null }>).map((row, i): Segment => {
-      const sp = row.speaker_id ? speakersById.get(row.speaker_id) : undefined;
-      return {
-        id: row.id,
-        idx: typeof row.seq === 'number' ? row.seq : i,
-        start: (row.start_ms ?? 0) / 1000,
-        end: (row.end_ms ?? 0) / 1000,
-        speaker: 'presenter',
-        slide_id: row.slide_id,
-        text: row.text || '',
-        ai_flags: (row.flags || []).map((kind) => ({ w: 0, kind: kind as 'drift' | 'uncertain' | 'low_confidence' })),
-        needs_review: (row.flags || []).length > 0,
-        has_user_override: false,
-        confidence: typeof row.confidence === 'number' && row.confidence < 0.75 ? 'low' : 'normal',
-        corrections: [],
-        speaker_id: row.speaker_id ?? null,
-        speaker_name: sp?.name ?? null,
-        speaker_short: sp?.short ?? null,
-        speaker_role: sp?.role ?? null,
-        speaker_color: sp?.avatar_color ?? null,
-      };
-    });
-    SLIDES.value = (sl as Array<{ id: string; slide_index: number; title: string | null }>).map((row): Slide => ({
-      id: row.id,
-      n: row.slide_index + 1,
-      title: row.title || '',
-      kind: 'data',
-    }));
-    // Adapt backend chat shape (anchor_segment, sent_at_ms, body) → editor
-    // ChatMessage shape (anchor, t, text) so ChatTab can render real DB rows
-    // using the same template as the fixture demo.
-    CHAT.value = (ch as unknown as ApiChat[]).map((c): ChatMessage => ({
-      id:     c.id,
-      author: c.author,
-      anchor: c.anchor_segment || '',
-      t:      (c.sent_at_ms ?? 0) / 1000,
-      text:   c.body,
-      placed: c.placed,
-    }));
+    const speakersById = _indexSpeakers(SPEAKERS_API.value);
 
-    // Adapt backend poll shape (total_votes, anchor_segment, opened_at_ms,
-    // options[{seq, votes, label}]) → editor Poll shape (total, anchor, t,
-    // options[{id, label, votes}]). Backend's `metadata.slide_n` is also
-    // surfaced so we can auto-place polls onto the first segment of that
-    // slide (Bug 2 — MIC's polls land on their declared slide; Rounds
-    // wasn't doing that on its own).
-    const slidesByIndex = new Map<number, string>();
-    SLIDES.value.forEach((sl) => slidesByIndex.set(sl.n, sl.id));
-    const firstSegBySlide = new Map<string, string>();
-    SEGMENTS.value.forEach((seg) => {
-      if (seg.slide_id && !firstSegBySlide.has(seg.slide_id)) {
-        firstSegBySlide.set(seg.slide_id, seg.id);
-      }
-    });
-    POLLS.value = (po as unknown as ApiPoll[]).map((p): Poll => ({
-      id:       p.id,
-      anchor:   _inferAnchor(p, slidesByIndex, firstSegBySlide),
-      t:        (p.opened_at_ms ?? 0) / 1000,
-      placed:   p.placed || !!_inferAnchor(p, slidesByIndex, firstSegBySlide),
-      question: p.question,
-      options:  (p.options || []).map((o) => ({ id: o.id, label: o.label, votes: o.votes })),
-      total:    p.total_votes ?? 0,
-      status:   p.status,
-    }));
-    // Pre-populate the placement map so anchored chat/polls render in their
-    // segment positions on first load (otherwise placements is empty and
-    // anchorsBySegment shows nothing).
-    const initialPlacements: Record<string, string | null> = {};
-    CHAT.value.forEach((c) => { if (c.anchor) initialPlacements[c.id] = c.anchor; });
-    POLLS.value.forEach((p) => { if (p.anchor) initialPlacements[p.id] = p.anchor; });
-    placements.value = { ...placements.value, ...initialPlacements };
+    // Segments + slides — must land before _buildSlideAnchorIndex.
+    SEGMENTS.value = _adaptSegments(sg as ApiSegmentRow[], speakersById);
+    SLIDES.value = _adaptSlides(sl as ApiSlideRow[]);
+    CHAT.value = _adaptChat(ch as unknown as ApiChat[]);
 
-    // di is the new envelope {session_id, count, classification_status, classified_count, discrepancies}.
-    // Store the inner array; the envelope's totals are derivable from .length.
-    DISCREPANCIES.value = (di as { discrepancies?: DiscrepancyRow[] }).discrepancies ?? [];
-    CORRECTIONS.value = co as Array<{ id: string; t: string; type: string; actor: string; seg: string; prior?: string | null; next?: string | null; note?: string | null }>;
+    // Polls depend on the (slide-number, first-segment) indexes built from
+    // the just-adapted SLIDES + SEGMENTS — order matters here.
+    const { slidesByIndex, firstSegBySlide } = _buildSlideAnchorIndex(SLIDES.value, SEGMENTS.value);
+    POLLS.value = _adaptPolls(po as unknown as ApiPoll[], slidesByIndex, firstSegBySlide);
 
-    // Group real Google STT words by segment_id so STTPane can render real
-    // per-word tokens with real timestamps + confidences. Empty Map when
-    // stt_background hasn't completed yet — STTPane shows its placeholder.
-    const wordsMap = new Map<string, WordRow[]>();
-    (wd as WordRow[]).forEach((w) => {
-      const arr = wordsMap.get(w.segment_id);
-      if (arr) arr.push(w);
-      else wordsMap.set(w.segment_id, [w]);
-    });
-    WORDS_BY_SEGMENT.value = wordsMap;
+    // Merge backend-anchored placements into whatever was already in the
+    // local store (placements survives across load() invocations from the
+    // WS quiet-refresh path).
+    placements.value = { ...placements.value, ..._initialPlacements(CHAT.value, POLLS.value) };
 
-    // L2 word alignment: convert the {segments: {seg_id: [entries…]}} envelope
-    // to a Map keyed by segment_id. Each segment_id maps to a positional array
-    // where index N is the alignment for the Nth Gemini word (seg.text.split()).
-    const alignmentMap = new Map<string, WordAlignmentEntry[]>();
-    const alSegments = (al as { segments?: Record<string, WordAlignmentEntry[]> }).segments || {};
-    Object.entries(alSegments).forEach(([segId, entries]) => {
-      alignmentMap.set(segId, entries);
-    });
-    ALIGNMENT_BY_SEGMENT.value = alignmentMap;
+    DISCREPANCIES.value = _unwrapDiscrepancies(di as ApiDiscrepancyEnvelope);
+    CORRECTIONS.value = co as unknown as Array<{ id: string; t: string; type: string; actor: string; seg: string; prior?: string | null; next?: string | null; note?: string | null }>;
+    WORDS_BY_SEGMENT.value = _groupWordsBySegment(wd as WordRow[]);
+    ALIGNMENT_BY_SEGMENT.value = _unwrapAlignment(al as ApiAlignmentEnvelope);
   } finally {
     if (!opts.silent) loading.value = false;
   }
@@ -544,10 +635,16 @@ const rightW = ref<number>(Number.parseInt(localStorage.getItem('mic_right_w') ?
 watch(leftW,  (w) => localStorage.setItem('mic_left_w',  String(w)));
 watch(rightW, (w) => localStorage.setItem('mic_right_w', String(w)));
 
-function onResizeLeft(e: MouseEvent): void {
+// Shared column-resizer. Direction = +1 for the left rail (drag right widens
+// it) and -1 for the right rail (drag right shrinks it). Both rails clamp to
+// a 120 px minimum.
+function _attachColResize(e: MouseEvent, widthRef: Ref<number>, direction: 1 | -1): void {
   e.preventDefault();
-  const startX = e.clientX, startW = leftW.value;
-  const onMove = (ev: MouseEvent): void => { leftW.value = Math.max(120, startW + (ev.clientX - startX)); };
+  const startX = e.clientX;
+  const startW = widthRef.value;
+  const onMove = (ev: MouseEvent): void => {
+    widthRef.value = Math.max(120, startW + direction * (ev.clientX - startX));
+  };
   const onUp = (): void => {
     globalThis.removeEventListener('mousemove', onMove);
     globalThis.removeEventListener('mouseup', onUp);
@@ -557,19 +654,8 @@ function onResizeLeft(e: MouseEvent): void {
   globalThis.addEventListener('mouseup', onUp);
   document.body.classList.add('is-col-resizing');
 }
-function onResizeRight(e: MouseEvent): void {
-  e.preventDefault();
-  const startX = e.clientX, startW = rightW.value;
-  const onMove = (ev: MouseEvent): void => { rightW.value = Math.max(120, startW - (ev.clientX - startX)); };
-  const onUp = (): void => {
-    globalThis.removeEventListener('mousemove', onMove);
-    globalThis.removeEventListener('mouseup', onUp);
-    document.body.classList.remove('is-col-resizing');
-  };
-  globalThis.addEventListener('mousemove', onMove);
-  globalThis.addEventListener('mouseup', onUp);
-  document.body.classList.add('is-col-resizing');
-}
+function onResizeLeft(e: MouseEvent): void  { _attachColResize(e, leftW,  1); }
+function onResizeRight(e: MouseEvent): void { _attachColResize(e, rightW, -1); }
 
 const gridStyle = computed(() => ({
   gridTemplateColumns: `${leftW.value}px 6px minmax(0, 1fr) 6px ${rightW.value}px`,
@@ -973,48 +1059,57 @@ onUnmounted(() => { document.body.classList.remove('has-editor'); });
 // inside a focused segment-edit textarea still works. The toolbar's
 // own undo/redo (inline.history / inline.redo) manages the segment
 // draft separately and shouldn't be hijacked by the global handler.
-function onEditorKeydown(e: KeyboardEvent): void {
-  // Let textareas / inputs / contenteditable own their native shortcuts.
-  const target = e.target as HTMLElement | null;
-  if (target) {
-    const tag = target.tagName;
-    if (tag === 'TEXTAREA' || tag === 'INPUT' || target.isContentEditable) return;
+function _isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.isContentEditable;
+}
+
+// J / K / L — YouTube-style video nav. Single-key, no modifier. Returns
+// true when the key was claimed so the outer handler can stop.
+function _handleVideoNavKey(k: string, e: KeyboardEvent): boolean {
+  if (k !== 'j' && k !== 'k' && k !== 'l') return false;
+  e.preventDefault();
+  if (k === 'j') {
+    time.value = Math.max(0, time.value - 10);
+  } else if (k === 'l') {
+    const ceiling = TOTAL_DURATION.value > 0 ? TOTAL_DURATION.value : Number.POSITIVE_INFINITY;
+    time.value = Math.min(ceiling, time.value + 10);
+  } else {
+    // K toggles play/pause.
+    playing.value = !playing.value;
   }
+  return true;
+}
 
-  const mod = e.metaKey || e.ctrlKey;
-  const k = e.key.toLowerCase();
-
-  // Phase 3 (2026-06-05) — YouTube-style J / K / L shortcuts for video
-  // nav (audit E10, E22). Single-key, no modifier. Skipped when a
-  // textarea / input has focus (handled above).
-  if (!mod && (k === 'j' || k === 'k' || k === 'l')) {
-    e.preventDefault();
-    if (k === 'j') {
-      time.value = Math.max(0, time.value - 10);
-    } else if (k === 'l') {
-      time.value = TOTAL_DURATION.value > 0
-        ? Math.min(TOTAL_DURATION.value, time.value + 10)
-        : time.value + 10;
-    } else {
-      // K toggles play/pause.
-      playing.value = !playing.value;
-    }
-    return;
-  }
-
-  // Modifier-required shortcuts (Undo / Redo / Find).
-  if (!mod) return;
+// Cmd/Ctrl+{Z, Shift+Z, Y, F} — Undo / Redo / Find. Returns true when
+// claimed. Async handlers are fire-and-forget (each owns its own toast).
+function _handleModifierShortcut(k: string, e: KeyboardEvent): boolean {
   if (k === 'z' && !e.shiftKey) {
     e.preventDefault();
-    void onUndo();
-  } else if ((k === 'z' && e.shiftKey) || k === 'y') {
+    onUndo();
+    return true;
+  }
+  if ((k === 'z' && e.shiftKey) || k === 'y') {
     // Cmd+Shift+Z (mac convention) OR Ctrl+Y (windows convention) → redo
     e.preventDefault();
-    void onRedo();
-  } else if (k === 'f') {
+    onRedo();
+    return true;
+  }
+  if (k === 'f') {
     e.preventDefault();
     openFind();
+    return true;
   }
+  return false;
+}
+
+function onEditorKeydown(e: KeyboardEvent): void {
+  // Let textareas / inputs / contenteditable own their native shortcuts.
+  if (_isEditableTarget(e.target)) return;
+  const k = e.key.toLowerCase();
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod) _handleModifierShortcut(k, e);
+  else _handleVideoNavKey(k, e);
 }
 
 onMounted(() => { globalThis.addEventListener('keydown', onEditorKeydown); });
