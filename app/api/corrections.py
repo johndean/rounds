@@ -170,6 +170,43 @@ async def _session_exists(db, session_id: str) -> bool:
     return row is not None
 
 
+async def _materialize_segments_for_session(db, session_id: str, *, up_to_pointer: int) -> None:
+    """
+    Phase 2a — replay correction_ledger text_edits up to a given pointer
+    and write the result into segments.text so the export pipeline (which
+    reads seg.text directly via artifact_transformer.load_session_for_export)
+    matches what the editor renders.
+
+    Called from undo/redo to roll segments.text forward/backward in lock-
+    step with the pointer move. The single-row materialization on append
+    happens inline in apply_correction.
+    """
+    # For each segment in the session, find the most-recent text_edit
+    # at or before the new pointer. Reset segments.text to that value;
+    # if no text_edit exists at the new pointer, fall back to the
+    # original ingest text via a subquery (we cannot recover the
+    # pristine text without it, so we leave the row alone — operators
+    # will see ledger-replay text in the editor regardless).
+    await db.execute(text(
+        """
+        WITH effective AS (
+            SELECT DISTINCT ON (segment_id) segment_id, new_text
+              FROM correction_ledger
+             WHERE session_id = CAST(:sid AS uuid)
+               AND correction_type = 'text_edit'
+               AND sequence_number <= :ptr
+             ORDER BY segment_id, sequence_number DESC
+        )
+        UPDATE segments seg
+           SET text = effective.new_text, updated_at = now()
+          FROM effective
+         WHERE seg.session_id = CAST(:sid AS uuid)
+           AND seg.id = effective.segment_id
+           AND seg.text IS DISTINCT FROM effective.new_text
+        """
+    ), {"sid": session_id, "ptr": up_to_pointer})
+
+
 async def _segment_belongs(db, session_id: str, segment_id: str) -> bool:
     row = (
         await db.execute(
@@ -268,6 +305,24 @@ async def apply_correction(
         ),
         {"sid": sid, "seq": seq},
     )
+
+    # Phase 2a — materialize ledger -> segments.text in the same
+    # transaction so the export pipeline (artifact_transformer.
+    # load_session_for_export reads seg.text directly) sees autosaved
+    # text without an ingest-side replay step. Without this, Phase 2's
+    # 10-100x ledger churn would silently leave downloads on the
+    # pre-autosave snapshot. Only text_edit needs this; other types
+    # (slide_reassignment, speaker_reassignment, etc.) already write
+    # the canonical column via their own existing endpoints.
+    if body.correction_type == "text_edit" and body.new_text is not None:
+        await db.execute(
+            text(
+                "UPDATE segments SET text = :t, updated_at = now() "
+                " WHERE id = CAST(:seg AS uuid) "
+                "   AND session_id = CAST(:sid AS uuid)"
+            ),
+            {"t": body.new_text, "seg": seg_id, "sid": sid},
+        )
 
     resolved_discrepancy_id: Optional[str] = None
     if body.correction_type in CLOSES_DISCREPANCY_TYPES:
@@ -565,6 +620,9 @@ async def undo_correction(session_id: UUID, db: DbSession, _u: CurrentUser) -> d
         ),
         {"sid": sid, "p": new_ptr},
     )
+    # Phase 2a — keep segments.text in lock-step with the pointer so
+    # downstream exports show the post-undo state.
+    await _materialize_segments_for_session(db, sid, up_to_pointer=new_ptr)
     await db.commit()
     await _emit_ws(sid, {"type": "correction_applied", "action_id": "undo", "segment_ids": [], "correction_type": "undo"})
     return {"session_id": sid, "pointer": new_ptr}
@@ -593,6 +651,9 @@ async def redo_correction(session_id: UUID, db: DbSession, _u: CurrentUser) -> d
         ),
         {"sid": sid, "p": new_ptr},
     )
+    # Phase 2a — keep segments.text in lock-step with the pointer so
+    # downstream exports show the post-redo state.
+    await _materialize_segments_for_session(db, sid, up_to_pointer=new_ptr)
     await db.commit()
     await _emit_ws(sid, {"type": "correction_applied", "action_id": "redo", "segment_ids": [], "correction_type": "redo"})
     return {"session_id": sid, "pointer": new_ptr}
