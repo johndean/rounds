@@ -123,7 +123,10 @@ async def _redo_split(db, payload: dict) -> None:
                :seq_b, :split_ms, :end_ms, :text_b, s.confidence,
                s.flags, FALSE, NULL,
                (s.metadata || jsonb_build_object('split_from', :orig, 'split_at_ms', :split_ms)),
-               encode(sha256((s.session_id::text || :split_ms::text || :new::text)::bytea), 'hex')
+               -- Bug fix 2026-06-06: was `s.session_id::text` / `:split_ms::text` / `:new::text` / `(...)::bytea`.
+               -- Same SQLAlchemy bind-regex problem as segment_split.py:147 — `:name::cast`
+               -- leaves `:name` literally in the SQL. Use explicit CAST() form throughout.
+               encode(sha256(CAST(CAST(s.session_id AS text) || CAST(:split_ms AS text) || CAST(:new AS text) AS bytea)), 'hex')
           FROM segments s
          WHERE s.id = CAST(:orig AS uuid)
     """), {

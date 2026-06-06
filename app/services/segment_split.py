@@ -144,7 +144,12 @@ async def execute_split(db, session_id: str, body, user) -> dict:
                NULL,
                (CAST(:meta AS jsonb)
                    || jsonb_build_object('split_from', :orig_id, 'split_at_ms', :split_ms)),
-               encode(sha256((:sid || :split_ms::text || new_id.id::text)::bytea), 'hex')
+               -- Bug fix 2026-06-06: was `:split_ms::text` / `new_id.id::text` / `(...)::bytea`.
+               -- SQLAlchemy's text() bind-param regex requires `:name` NOT be followed by `:`,
+               -- so `:split_ms::text` left `:split_ms` literally unsubstituted in the SQL sent
+               -- to asyncpg → PostgresSyntaxError. Rewrite with explicit CAST() form so the
+               -- only `:` characters are real bind markers.
+               encode(sha256(CAST(:sid || CAST(:split_ms AS text) || CAST(new_id.id AS text) AS bytea)), 'hex')
           FROM new_id
         RETURNING id
     """), {
