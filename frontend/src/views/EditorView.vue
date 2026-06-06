@@ -52,8 +52,7 @@ import { useAutosave, AUTOSAVE_STATUS_KEY } from '@/composables/useAutosave';
 import { useEditorPersistence } from '@/composables/useEditorPersistence';
 import { sessions as sessionsApi, segments as segmentsApi, audit as auditApi, corrections as correctionsApi, speakers as speakersApi, words as wordsApi, discrepancies as discrepanciesApi, wordAlignment as wordAlignmentApi, media as mediaApi, placements as placementsApi, type SessionSummary, type WordRow, type DiscrepancyRow, type WordAlignmentEntry } from '@/services/api';
 import { toast } from '@/composables/useToast';
-import { ApiError } from '@/services/http';
-import { http } from '@/services/http';
+import { ApiError, http } from '@/services/http';
 import type { Segment, Slide } from '@/fixtures/transcript';
 import type { ChatMessage, Poll } from '@/fixtures/chat_polls';
 import { SOP_STAGES } from '@/fixtures/sop_stages';
@@ -142,7 +141,7 @@ const loadProgressPct = computed(() => {
   const settled = states.filter((s) => s !== 'pending').length;
   return Math.round((settled / states.length) * 100);
 });
-const loadHasError = computed(() => Object.values(loadStages.value).some((s) => s === 'error'));
+const loadHasError = computed(() => Object.values(loadStages.value).includes('error'));
 
 const TOTAL_DURATION = ref<number>(0);
 const mediaUrl = ref<string | null>(null);
@@ -178,7 +177,7 @@ async function load(opts: { silent?: boolean } = {}): Promise<void> {
     // Fetch playback URL in parallel; failure is non-fatal (poster + scrubber stay static).
     // Request video first — backend's ORDER BY (role = :preferred) DESC falls through
     // to audio for sessions that don't have a video source.
-    void mediaApi.url(props.id, 'video')
+    mediaApi.url(props.id, 'video')
       .then((m) => {
         mediaUrl.value = m.url;
         mediaKind.value = (m.content_type || '').startsWith('video/') ? 'video' : 'audio';
@@ -436,16 +435,18 @@ function onMediaDurationLoaded(t: number): void {
 }
 
 async function reloadSpeakers(): Promise<void> {
-  try {
-    const rows = await speakersApi.list(props.id);
-    SPEAKERS_API.value = rows.map((r) => ({
-      id: r.id,
-      short: r.short ?? null,
-      name: r.name ?? null,
-      role: r.role ?? null,
-      avatar_color: r.avatar_color ?? null,
-    }));
-  } catch (_) { /* non-fatal */ }
+  const rows = await speakersApi.list(props.id).catch((err) => {
+    console.warn('reloadSpeakers: speakersApi.list failed (non-fatal):', err);
+    return null;
+  });
+  if (!rows) return;
+  SPEAKERS_API.value = rows.map((r) => ({
+    id: r.id,
+    short: r.short ?? null,
+    name: r.name ?? null,
+    role: r.role ?? null,
+    avatar_color: r.avatar_color ?? null,
+  }));
 }
 
 // Active segment via O(log n) binary search with VTT-cue-style gap fallback
@@ -527,8 +528,8 @@ const iilSignals = computed(() => null as { cadence_wpm?: number | null; filler_
 // F2 closure — switching tabs clears the slide focus (matches React behavior)
 watch(tab, () => { focusedSlideId.value = null; });
 
-const leftW  = ref<number>(parseInt(localStorage.getItem('mic_left_w')  || '320') || 320);
-const rightW = ref<number>(parseInt(localStorage.getItem('mic_right_w') || '360') || 360);
+const leftW  = ref<number>(Number.parseInt(localStorage.getItem('mic_left_w')  ?? '320', 10) || 320);
+const rightW = ref<number>(Number.parseInt(localStorage.getItem('mic_right_w') ?? '360', 10) || 360);
 watch(leftW,  (w) => localStorage.setItem('mic_left_w',  String(w)));
 watch(rightW, (w) => localStorage.setItem('mic_right_w', String(w)));
 
@@ -537,12 +538,12 @@ function onResizeLeft(e: MouseEvent): void {
   const startX = e.clientX, startW = leftW.value;
   const onMove = (ev: MouseEvent): void => { leftW.value = Math.max(120, startW + (ev.clientX - startX)); };
   const onUp = (): void => {
-    window.removeEventListener('mousemove', onMove);
-    window.removeEventListener('mouseup', onUp);
+    globalThis.removeEventListener('mousemove', onMove);
+    globalThis.removeEventListener('mouseup', onUp);
     document.body.classList.remove('is-col-resizing');
   };
-  window.addEventListener('mousemove', onMove);
-  window.addEventListener('mouseup', onUp);
+  globalThis.addEventListener('mousemove', onMove);
+  globalThis.addEventListener('mouseup', onUp);
   document.body.classList.add('is-col-resizing');
 }
 function onResizeRight(e: MouseEvent): void {
@@ -550,12 +551,12 @@ function onResizeRight(e: MouseEvent): void {
   const startX = e.clientX, startW = rightW.value;
   const onMove = (ev: MouseEvent): void => { rightW.value = Math.max(120, startW - (ev.clientX - startX)); };
   const onUp = (): void => {
-    window.removeEventListener('mousemove', onMove);
-    window.removeEventListener('mouseup', onUp);
+    globalThis.removeEventListener('mousemove', onMove);
+    globalThis.removeEventListener('mouseup', onUp);
     document.body.classList.remove('is-col-resizing');
   };
-  window.addEventListener('mousemove', onMove);
-  window.addEventListener('mouseup', onUp);
+  globalThis.addEventListener('mousemove', onMove);
+  globalThis.addEventListener('mouseup', onUp);
   document.body.classList.add('is-col-resizing');
 }
 
@@ -590,11 +591,11 @@ function handleRemoveAnchor(itemId: string): void {
   const isChat = CHAT.value.some((c) => c.id === itemId);
   const isPoll = POLLS.value.some((p) => p.id === itemId);
   if (isChat) {
-    void placementsApi.chatAnchor(props.id, itemId, null).catch(() => {
+    placementsApi.chatAnchor(props.id, itemId, null).catch(() => {
       toast.push('Could not save chat removal', { tone: 'error' });
     });
   } else if (isPoll) {
-    void placementsApi.pollAnchor(props.id, itemId, null).catch(() => {
+    placementsApi.pollAnchor(props.id, itemId, null).catch(() => {
       toast.push('Could not save poll removal', { tone: 'error' });
     });
   }
@@ -605,11 +606,11 @@ function handleDropOnSegment(itemId: string, segId: string): void {
   const isChat = CHAT.value.some((c) => c.id === itemId);
   const isPoll = POLLS.value.some((p) => p.id === itemId);
   if (isChat) {
-    void placementsApi.chatAnchor(props.id, itemId, segId).catch(() => {
+    placementsApi.chatAnchor(props.id, itemId, segId).catch(() => {
       toast.push('Could not save chat placement', { tone: 'error' });
     });
   } else if (isPoll) {
-    void placementsApi.pollAnchor(props.id, itemId, segId).catch(() => {
+    placementsApi.pollAnchor(props.id, itemId, segId).catch(() => {
       toast.push('Could not save poll placement', { tone: 'error' });
     });
   }
@@ -634,7 +635,7 @@ function handleChatReorder(ids: readonly string[]): void {
     return;
   }
   CHAT.value = next;
-  void placementsApi.chatReorder(props.id, [...ids]).catch(() => {
+  placementsApi.chatReorder(props.id, [...ids]).catch(() => {
     CHAT.value = before;
     toast.push('Could not save chat reorder', { tone: 'error' });
   });
@@ -649,7 +650,7 @@ function handlePollsReorder(ids: readonly string[]): void {
     return;
   }
   POLLS.value = next;
-  void placementsApi.pollsReorder(props.id, [...ids]).catch(() => {
+  placementsApi.pollsReorder(props.id, [...ids]).catch(() => {
     POLLS.value = before;
     toast.push('Could not save polls reorder', { tone: 'error' });
   });
@@ -824,7 +825,7 @@ function onPreview(): void { router.push(`/v/${props.id}`); }
 function onDiscRequestEdit(segId: string): void {
   tab.value = 'ai';
   // Defer the scroll until the AI tab is mounted (next tick).
-  void Promise.resolve().then(() => onSegmentClick(segId));
+  Promise.resolve().then(() => onSegmentClick(segId));
 }
 // onDiscrepancyResolved: optimistic removal of any discrepancy rows tied
 // to this segment from the local DISCREPANCIES array. Backend has already
@@ -834,7 +835,7 @@ function onDiscrepancyResolved(segId: string): void {
   DISCREPANCIES.value = DISCREPANCIES.value.filter((d) => d.segment_id !== segId);
 }
 function openFind(): void {
-  void modal.open(
+  modal.open(
     FindReplaceModal,
     { sessionId: props.id, onApplied: () => { void load(); } },
     { mode: 'ribbon' },
@@ -1005,8 +1006,8 @@ function onEditorKeydown(e: KeyboardEvent): void {
   }
 }
 
-onMounted(() => { window.addEventListener('keydown', onEditorKeydown); });
-onUnmounted(() => { window.removeEventListener('keydown', onEditorKeydown); });
+onMounted(() => { globalThis.addEventListener('keydown', onEditorKeydown); });
+onUnmounted(() => { globalThis.removeEventListener('keydown', onEditorKeydown); });
 </script>
 
 <template>
