@@ -164,7 +164,7 @@ async def list_sessions(
                s.word_count, s.segment_count, s.attendee_count, s.taxonomy,
                s.session_type_id
         FROM sessions s
-        {"JOIN sop_state st ON st.session_id = s.id AND st.stage = :stage" if stage else ""}
+        {"JOIN sop_state st ON st.session_id = s.id AND st.current_stage = :stage" if stage else ""}
         WHERE {' AND '.join(where)}
         ORDER BY s.created_at DESC NULLS LAST, s.code DESC
         LIMIT :limit OFFSET :offset

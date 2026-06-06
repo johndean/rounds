@@ -126,14 +126,20 @@ async def get_captions_vtt(
 ) -> Response:
     """WebVTT captions for the video <track>. ETag-cached on the
     (session_id, max_correction_seq) pair."""
-    # Compute the ETag fingerprint from the corrections ledger BEFORE
+    # Compute the ETag fingerprint from the correction_ledger BEFORE
     # materializing the body. If the client's If-None-Match matches,
     # return 304 with no body — the entire VTT generation is skipped.
+    # Bug fix 2026-06-06: was querying `corrections` (the legacy audit
+    # trail in mig 002, no `sequence_number` column) — should be
+    # `correction_ledger` (the Phase-4 append-only ledger, mig adds the
+    # sequence_number column). The legacy `corrections` table is still
+    # written to by segments.py for the older audit surface; it's a
+    # separate table and is NOT the source for VTT ETag fingerprinting.
     row = (
         await db.execute(
             text(
                 "SELECT COALESCE(MAX(sequence_number), -1) AS max_seq "
-                "FROM corrections WHERE session_id = CAST(:sid AS uuid)"
+                "FROM correction_ledger WHERE session_id = CAST(:sid AS uuid)"
             ),
             {"sid": str(session_id)},
         )
