@@ -18,7 +18,11 @@ At bootstrap, the state list was actively evolving (3 stage names changed betwee
 
 ## Decision
 
-**The FSM is enforced only in Python.** `sessions.status` is a `TEXT NOT NULL DEFAULT 'ingesting'` column with no CHECK and no ENUM type.
+**The FSM _transition_ logic is enforced only in Python.**
+
+> ⚠️ **Correction (2026-06-09):** this ADR's original claim that `sessions.status` has *no CHECK* is **outdated**. Migration 010 (`010_state_machine.sql:21-26`) added the `sessions_status_check` CHECK over the 8 valid statuses — directly contradicting Alternative #2 below ("Postponed"). What remains Python-only is **transition** enforcement: the CHECK guards valid *values*, not legal *moves*. The historical rationale is preserved below.
+
+`sessions.status` is a `TEXT NOT NULL DEFAULT 'ingesting'` column (the legacy default is superseded — 010 normalizes `ingesting → uploading` and the CHECK rejects `ingesting`; inserts set status explicitly).
 
 - Every write to `sessions.status` MUST go through `app/engines/state_machine.py::ensure_can_transition`.
 - Direct SQL updates to `sessions.status` (operator rescue, migration backfills) are tolerated but each is reviewed on a case-by-case basis.
@@ -41,7 +45,7 @@ At bootstrap, the state list was actively evolving (3 stage names changed betwee
 
 - `app/engines/state_machine.py:37–44` — `ALLOWED_TRANSITIONS` map
 - `app/engines/state_machine.py` — `ensure_can_transition`, `current_state`
-- `migrations/` — every `sessions.status` reference is `TEXT`, no CHECK
+- `migrations/010_state_machine.sql:21-26` — `sessions_status_check` CHECK over the 8 valid statuses (added Phase 6b; supersedes this ADR's original "no CHECK" premise)
 
 ## Alternatives considered
 

@@ -134,6 +134,9 @@ The DAG is observable via `/v1/queue` (per-session view) and via Celery's Flower
 
 ### 4.1 State diagram
 
+> ⚠️ **Correction (2026-06-09):** the ASCII diagram below is **outdated** (pre-Phase-6b). The real FSM ([state_machine.py:40](../app/engines/state_machine.py#L40)) is:
+> `uploading → transcribing → normalizing → fusing → aligning → ready → complete`, with any non-terminal status able to go to `failed`. `uploading → ready` is the AI-mode direct path. `failed` and `complete` are **terminal**; operator reingest writes `status = 'uploading'` directly. There is **no** `ingesting`/`processing`/`published`/`archived` status. Values are guarded by `sessions_status_check` (migration 010).
+
 ```
             ┌────── /v1/sessions (POST) ──────┐
             ▼                                  │
@@ -160,7 +163,7 @@ The DAG is observable via `/v1/queue` (per-session view) and via Celery's Flower
                                   └──────────────┘
 ```
 
-The full transition table lives in `app/engines/state_machine.py:37–44` ([BR-007](./BUSINESS_RULES.md#br-007), [ADR-002](./adr/ADR-002-session-lifecycle.md)).
+The full transition table lives in `app/engines/state_machine.py:40` ([BR-007](./BUSINESS_RULES.md#br-007), [ADR-002](./adr/ADR-002-session-lifecycle.md)). The diagram above is superseded by the correction note — trust the table in code.
 
 ### 4.2 Soft-delete + restore + purge
 
@@ -168,7 +171,7 @@ The full transition table lives in `app/engines/state_machine.py:37–44` ([BR-0
 
 ### 4.3 What is NOT enforced at the DB
 
-The FSM lives **only in Python** — `sessions.status` is `TEXT NOT NULL DEFAULT 'ingesting'` with no CHECK constraint. See [ADR-003](./adr/ADR-003-fsm-python-only.md) for why and what hardening would look like.
+The **transition** rules live only in Python (`ensure_can_transition`) — the DB does not enforce legal *moves*. It does, however, enforce legal *values*: migration 010 added the `sessions_status_check` CHECK over the 8 valid statuses. So a hand-written SQL update can still make an illegal *transition* between two otherwise-valid values. See [ADR-003](./adr/ADR-003-fsm-python-only.md).
 
 ### 4.4 Where to look
 

@@ -10,7 +10,7 @@
 A Rounds session is the central domain object — a recorded round + slides + transcript + corrections + exports. The lifecycle has hard requirements:
 
 1. **Audit retention.** A deleted session must remain forensically recoverable for some period (deletes from clinical-adjacent systems are notoriously regretted).
-2. **Single source of truth for state.** A session can be `uploading`, `ingesting`, `processing`, `ready`, `published`, `archived`, or `failed`. Tasks across Celery workers + the API + the editor all need to agree on the current state.
+2. **Single source of truth for state.** A session can be `uploading`, `transcribing`, `normalizing`, `fusing`, `aligning`, `ready`, `complete`, or `failed` (the set enforced by `sessions_status_check`, migration 010). Tasks across Celery workers + the API + the editor all need to agree on the current state.
 3. **Operator escape hatch.** An operator must be able to push a failed session back into the pipeline (`/v1/diag/reingest/*`) without bypassing every safety check downstream.
 
 ## Decision
@@ -22,7 +22,7 @@ A Rounds session is the central domain object — a recorded round + slides + tr
 - Soft-delete + restore + purge are gated to the [BR-002](../BUSINESS_RULES.md#br-002) allow-list (`SESSION_TRASH_ALLOWED`).
 - `sessions.status` is a text column constrained at the application level by `ALLOWED_TRANSITIONS` in `app/engines/state_machine.py` — see [BR-007](../BUSINESS_RULES.md#br-007).
 - Every state move flows through `ensure_can_transition(current, target)` which raises `MICException(STATE_ILLEGAL_TRANSITION)` on a bad move.
-- The `failed → ingesting | processing` escape hatch exists only for the diag routes (operator rescue).
+- `failed` and `complete` are terminal in the FSM — there is no in-FSM escape hatch out of `failed`. The diag routes (operator rescue) re-enter the pipeline by writing `status = 'uploading'` directly, bypassing `ensure_can_transition`.
 
 ## Consequences
 
@@ -31,7 +31,7 @@ A Rounds session is the central domain object — a recorded round + slides + tr
   - Every state move has one chokepoint — easier to audit, easier to extend.
   - Operators can rescue stuck sessions without bypassing alignment / fusion.
 - **Negative.**
-  - `sessions.status` has no DB CHECK constraint, so a hand-written SQL update can land an invalid state (see [ADR-003](./ADR-003-fsm-python-only.md) for why and what would be required to harden).
+  - `sessions.status` has a value-level CHECK (`sessions_status_check`, migration 010) guarding the valid status set, but **transition** rules remain Python-only — so a hand-written SQL update can still land a *valid value via an illegal move* (e.g. `failed → ready`) without going through `ensure_can_transition` (see [ADR-003](./ADR-003-fsm-python-only.md)).
   - `deleted_at` filters add a `WHERE deleted_at IS NULL` to every list query — easy to forget. We have one canonical helper but it is a discipline pattern, not a schema-enforced constraint.
 - **Risks.**
   - Long-retained soft-deleted rows accumulate storage. No retention sweeper exists yet.
@@ -43,7 +43,7 @@ A Rounds session is the central domain object — a recorded round + slides + tr
 - `app/api/sessions.py:611` — soft-delete endpoint, gates on `SESSION_TRASH_ALLOWED`
 - `app/api/sessions.py:36` — `SESSION_TRASH_ALLOWED` definition ([BR-002](../BUSINESS_RULES.md#br-002))
 - `app/api/diagnostics.py:435` — `/v1/diag/reingest/<id>` uses the escape-hatch transition
-- `migrations/` — schema (no CHECK constraint on `sessions.status`; see [ADR-003](./ADR-003-fsm-python-only.md))
+- `migrations/010_state_machine.sql:21-26` — `sessions_status_check` CHECK on `sessions.status` values (transitions remain Python-only; see [ADR-003](./ADR-003-fsm-python-only.md))
 
 ## Alternatives considered
 

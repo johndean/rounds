@@ -124,23 +124,23 @@
 
 ## BR-007 — Session state-machine allowed transitions
 
-- **Purpose.** A session may move only between explicitly enumerated states. The `ALLOWED_TRANSITIONS` map is the **single source of truth** for legal session moves — neither the database (no CHECK constraint) nor any individual API route is allowed to bypass it without going through `app/engines/state_machine.py::ensure_can_transition`.
-- **Location.** `app/engines/state_machine.py:37`
+- **Purpose.** A session may move only between explicitly enumerated states. The `ALLOWED_TRANSITIONS` map is the **single source of truth** for legal session *transitions*. Values are *additionally* guarded at the schema level by the `sessions_status_check` CHECK constraint (migration 010) — two enforcement layers, not zero.
+- **Location.** `app/engines/state_machine.py:40` (transition map); `migrations/010_state_machine.sql:21-26` (value CHECK).
 - **Code reference.**
   ```python
   ALLOWED_TRANSITIONS: dict[str, set[str]] = {
-      "uploading":  {"ingesting", "failed"},
-      "ingesting":  {"processing", "failed"},
-      "processing": {"ready", "failed"},
-      "ready":      {"published", "archived"},
-      "published":  {"archived"},
-      "archived":   set(),
-      "failed":     {"ingesting", "processing"},  # escape-hatch for diag/reingest
+      "uploading":    {"transcribing", "ready", "failed"},  # uploading→ready = AI-mode direct path
+      "transcribing": {"normalizing",  "failed"},
+      "normalizing":  {"fusing",       "failed"},
+      "fusing":       {"aligning",     "failed"},
+      "aligning":     {"ready",        "failed"},
+      "ready":        {"complete",     "failed"},
   }
+  TERMINAL_STATES = {"failed", "complete"}  # no transitions out
   ```
-- **Stakeholder impact.** Operators (via `/v1/diag/reingest/*`) can re-enter the pipeline from `failed`. All other moves are gated.
+- **Stakeholder impact.** `failed` and `complete` are **terminal** — there is no in-FSM transition out of `failed`. Operator reingest (`/v1/diag/reingest/*`) re-enters the pipeline by writing `status = 'uploading'` **directly** (a raw update outside the FSM), not via an `ALLOWED_TRANSITIONS` edge.
 - **Dependencies.** [ADR-002](./adr/ADR-002-session-lifecycle.md), [ADR-003](./adr/ADR-003-fsm-python-only.md).
-- **Risk if changed.** Adding a transition opens a new lifecycle path; verify every downstream task tolerates the new origin state. The FSM has **no schema-level enforcement** — `sessions.status` is `TEXT NOT NULL DEFAULT 'ingesting'`. See [ADR-003](./adr/ADR-003-fsm-python-only.md) for why and what would be required to harden it.
+- **Risk if changed.** Adding a transition opens a new lifecycle path; verify every downstream task tolerates the new origin state. Two layers enforce status: the Python FSM guards *transitions*; the `sessions_status_check` CHECK (migration 010) guards *values*. The legacy names `ingesting`/`processing`/`published`/`archived` are in **neither** — migration 010 normalized `ingesting → uploading` and the CHECK rejects them. (`sessions.status` still carries a legacy `DEFAULT 'ingesting'` from migration 001, but it is superseded and never fires — inserts set status explicitly.) See [ADR-003](./adr/ADR-003-fsm-python-only.md).
 
 ## BR-008 — Locked fusion weights (visual / anchor / semantic)
 
