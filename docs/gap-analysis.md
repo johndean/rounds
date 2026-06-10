@@ -58,7 +58,7 @@ These are deliberate kill-switches, not bugs — but a demo or QA pass will see
 
 ---
 
-## 4. Data-layer gaps (from the verified data dictionary)
+## 4. Data-layer gaps (from the verified data dictionary) — ✅ Resolved 2026-06-10 (zero-risk)
 
 | # | Finding | Evidence |
 |---|---|---|
@@ -68,6 +68,15 @@ These are deliberate kill-switches, not bugs — but a demo or QA pass will see
 | G4 | **Dead legacy schemas** — `prompt_templates` & `email_templates` 006 definitions were DROP+CREATE-reshaped by 047/048; the 006 versions are dead. | migrations 006/047/048 |
 | G5 | **Parallel tables (confusion risk)** — `corrections` (002) vs `correction_ledger` (029); `discrepancies` (002) vs `transcription_discrepancies` (017); `speakers` (001) vs `session_speakers` (011). | data-dictionary.md |
 | G6 | **`validation_results` ambiguity** — exists as a table (014) AND a JSONB column on `normalization_results` (012); string matches not disambiguated. | data-dictionary.md |
+
+> ✅ **Resolved 2026-06-10 (zero-risk, Tracks A+B+C1).** G3/G4/G5/G6 closed by
+> documentation (see [data-dictionary "Migration numbering & resolved gaps"](data/data-dictionary.md)).
+> G1 (`sop_approvals`) labeled RESERVED/UNUSED; G2 (`session_locks` FK)
+> accepted-with-rationale (ephemeral, TTL-swept). DB-side mirror: migration
+> [`058_schema_comments.sql`](../migrations/058_schema_comments.sql) (COMMENT-only,
+> metadata, reversible). Optional structural hardening — FK add (C2), table drop
+> (C3) — **deferred, not applied.** Plan:
+> [2026-06-10-001-zero-risk-gap-remediation.md](plans/2026-06-10-001-zero-risk-gap-remediation.md).
 
 ---
 

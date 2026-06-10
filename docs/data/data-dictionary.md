@@ -8,6 +8,19 @@ Permission reality (verified, applies to every "Used By APIs" row below): author
 
 ---
 
+## Migration numbering & resolved gaps (2026-06-10)
+
+These resolve [`docs/gap-analysis.md`](../gap-analysis.md) §4 at the documentation level (zero risk). Plan: [`docs/plans/2026-06-10-001-zero-risk-gap-remediation.md`](../plans/2026-06-10-001-zero-risk-gap-remediation.md). DB-side mirror: migration `058_schema_comments.sql` (COMMENT-only).
+
+- **Migration numbering is non-contiguous by design.** There is no `007_*.sql` (the sequence runs 006 → 008). The runner keys on slug, not ordinal, so the gap is cosmetic — **never renumber** an applied migration.
+- **Legacy `006` `email_templates` / `prompt_templates` are superseded.** `006` still runs on a fresh DB, then `048`/`047` DROP+CREATE the live schema. Read the 047/048 schema as authoritative (see those table sections). Never edit `006`.
+- **"Twin" tables are all live and distinct — none is a duplicate to drop:** `corrections` (002) + `correction_ledger` (029); `discrepancies` (002) + `transcription_discrepancies` (017); `speakers` (001) + `session_speakers` (011). See Cross-cutting notes and each section.
+- **`validation_results` is two distinct things, both used:** the `validation_results` **table** (014, keyed by `alignment_id`) and the `normalization_results.validation_results` **JSONB column** (012). Naming collision only.
+- **`sop_approvals` (003) is RESERVED/UNUSED:** created with a CASCADE FK but zero `app/` readers/writers — empty in every environment. Retained for the planned per-stage sign-off feature.
+- **`session_locks.session_id` has no FK by current design (accepted):** lock rows are ephemeral (90s TTL, swept) and the app only writes existing `session_id`s, so the worst case is a stale row that ages out. Optional CASCADE-FK hardening is the plan's Track C2 and is **not** applied here.
+
+---
+
 ## Table catalog
 
 | Table | Created in | Domain area |
@@ -360,6 +373,8 @@ Permission reality (verified, applies to every "Used By APIs" row below): author
 **Indexes:** `sop_approvals_session_idx`. **Constraints:** none beyond PK/FK.
 
 **Used By Screens:** NOT VERIFIED IN CODE — no `api/`, `tasks/`, or `services/` file references this table in the grep sweep. Table is created but no read/write path was found.
+
+> **RESERVED/UNUSED — resolved 2026-06-10.** Confirmed orphan (zero `app/` references; empty in all environments). Retained for the planned per-stage sign-off feature; labeled in-DB by migration `058`. Do not drop without product sign-off (plan Track C3).
 **Used By APIs:** IMPLEMENTATION NOT FOUND — no source reference located.
 
 ---
@@ -1330,6 +1345,8 @@ Permission reality (verified, applies to every "Used By APIs" row below): author
 
 **Indexes:** `idx_session_locks_expires_at` (stale-lock sweep helper, not UNIQUE).
 **Constraints:** PK on `session_id`. Note: `session_id` has **no foreign key** to `sessions` in this migration (verified — only PK declared).
+
+> **Accepted by design — resolved 2026-06-10.** The missing FK is low-impact: lock rows are ephemeral (90s TTL, swept) and the app only writes existing session IDs, so the worst case is a stale row that self-expires. Every sibling SOP table cascades, so optional CASCADE-FK hardening (`DELETE` orphans → `NOT VALID` → `VALIDATE`) is available as plan Track C2 — **opt-in, not applied.**
 
 **Used By Screens:** Editor (concurrent-edit lock banner).
 **Used By APIs:** `api/locks.py`.
