@@ -19,6 +19,10 @@ import {
 } from '@/fixtures/transcript';
 import type { ChatMessage, Poll } from '@/fixtures/chat_polls';
 import { fmtTime } from '@/utils/editorHelpers';
+import { useFeatureFlagsStore } from '@/stores/featureFlags';
+import { segments as segmentsApi } from '@/services/api';
+import { toast } from '@/composables/useToast';
+import { ApiError } from '@/services/http';
 
 type AnchorEntry = (ChatMessage & { kind: 'chat' }) | (Poll & { kind: 'poll' });
 
@@ -145,6 +149,93 @@ const visible = computed<readonly Segment[]>(() => {
   }
   return props.segments;
 });
+
+// ── Bulk reassign (speaker / slide) — gated by BULK_REASSIGN_ENABLED ──────
+// Net-new feature: select many segments (checkbox + shift-range) and reassign
+// speaker or slide in one set-based call. Self-contained here; on success we
+// emit('segmentsChanged') so EditorView reloads and the new speaker/slide
+// shows. Batches > UNDO_MAX are not undoable (user is warned first).
+const featureFlags = useFeatureFlagsStore();
+const bulkEnabled = computed(() => featureFlags.bulkReassignEnabled && !!props.sessionId);
+const selected = ref<Set<string>>(new Set());
+const lastBatch = ref<{ id: string; undoable: boolean; count: number } | null>(null);
+const bulkBusy = ref(false);
+let lastToggledIdx = -1;
+const UNDO_MAX = 10;  // mirrors backend BULK_REASSIGN_UNDO_MAX_SEGMENTS
+
+function isSelected(id: string): boolean { return selected.value.has(id); }
+
+function toggleSelect(seg: Segment, idx: number, ev: MouseEvent): void {
+  const next = new Set(selected.value);
+  if (ev.shiftKey && lastToggledIdx >= 0) {
+    const [lo, hi] = idx < lastToggledIdx ? [idx, lastToggledIdx] : [lastToggledIdx, idx];
+    for (let i = lo; i <= hi; i++) {
+      const s = visible.value[i];
+      if (s) next.add(s.id);
+    }
+  } else if (next.has(seg.id)) {
+    next.delete(seg.id);
+  } else {
+    next.add(seg.id);
+  }
+  selected.value = next;
+  lastToggledIdx = idx;
+}
+
+function clearSelection(): void { selected.value = new Set(); lastToggledIdx = -1; }
+
+async function doBulkReassign(target: { speaker_id?: string; slide_id?: string }): Promise<void> {
+  const ids = [...selected.value];
+  if (!props.sessionId || ids.length === 0) return;
+  if (ids.length > UNDO_MAX) {
+    const what = target.speaker_id ? 'speaker' : 'slide';
+    if (!window.confirm(`Reassign ${what} for ${ids.length} segments? This CANNOT be undone.`)) return;
+  }
+  bulkBusy.value = true;
+  try {
+    const res = await segmentsApi.bulkReassign(props.sessionId, ids, target);
+    lastBatch.value = { id: res.batch_id, undoable: res.undoable, count: res.reassigned };
+    toast.push(
+      `Reassigned ${res.reassigned} segment${res.reassigned === 1 ? '' : 's'}${res.undoable ? '' : ' (cannot be undone)'}`,
+      { tone: 'success' },
+    );
+    clearSelection();
+    emit('segmentsChanged');
+  } catch (e) {
+    toast.push(e instanceof ApiError ? `${e.status} — ${e.message}` : 'Bulk reassign failed', { tone: 'error' });
+  } finally {
+    bulkBusy.value = false;
+  }
+}
+
+function onBulkPickSpeaker(ev: Event): void {
+  const el = ev.target as HTMLSelectElement;
+  const id = el.value;
+  el.value = '';
+  if (id) void doBulkReassign({ speaker_id: id });
+}
+function onBulkPickSlide(ev: Event): void {
+  const el = ev.target as HTMLSelectElement;
+  const id = el.value;
+  el.value = '';
+  if (id) void doBulkReassign({ slide_id: id });
+}
+
+async function undoLastBulk(): Promise<void> {
+  const b = lastBatch.value;
+  if (!props.sessionId || !b?.undoable) return;
+  bulkBusy.value = true;
+  try {
+    const res = await segmentsApi.bulkReassignUndo(props.sessionId, b.id);
+    toast.push(`Undid bulk reassign — ${res.restored} segment${res.restored === 1 ? '' : 's'} restored`, { tone: 'info' });
+    lastBatch.value = null;
+    emit('segmentsChanged');
+  } catch (e) {
+    toast.push(e instanceof ApiError ? `${e.status} — ${e.message}` : 'Undo failed', { tone: 'error' });
+  } finally {
+    bulkBusy.value = false;
+  }
+}
 
 // Phase 3 (2026-06-05) — guard auto-scroll so manual scroll is not
 // fought by reverse-jump. Updated on wheel / touchmove; checked in
@@ -466,6 +557,39 @@ watch(() => props.activeSegmentId, (id, prev) => {
       <button class="btn btn--tertiary btn--sm" @click="emit('clearFocus')">Clear filter</button>
     </div>
 
+    <div
+      v-if="bulkEnabled && (selected.size > 0 || lastBatch)"
+      class="transcript__bulkbar"
+      role="region"
+      aria-label="Bulk reassign"
+      data-test-id="bulk-bar"
+    >
+      <template v-if="selected.size > 0">
+        <strong>{{ selected.size }} selected</strong>
+        <select class="transcript__bulkpick" :disabled="bulkBusy" data-test-id="bulk-speaker" @change="onBulkPickSpeaker" @click.stop>
+          <option value="">Reassign speaker…</option>
+          <option v-for="row in speakersList()" :key="row.key" :value="row.key">
+            {{ row.name }}{{ row.role ? ` (${row.role})` : '' }}
+          </option>
+        </select>
+        <select class="transcript__bulkpick" :disabled="bulkBusy" data-test-id="bulk-slide" @change="onBulkPickSlide" @click.stop>
+          <option value="">Reassign slide…</option>
+          <option v-for="sl in slidesForReassign" :key="sl.id" :value="sl.id">
+            {{ String(sl.n).padStart(2, '0') }} · {{ sl.title }}
+          </option>
+        </select>
+        <span v-if="selected.size > UNDO_MAX" class="transcript__bulkwarn">cannot be undone</span>
+        <button class="btn btn--tertiary btn--sm" :disabled="bulkBusy" @click.stop="clearSelection">Clear</button>
+      </template>
+      <button
+        v-if="lastBatch?.undoable"
+        class="btn btn--secondary btn--sm"
+        :disabled="bulkBusy"
+        data-test-id="bulk-undo"
+        @click.stop="undoLastBulk"
+      >Undo last reassign ({{ lastBatch.count }})</button>
+    </div>
+
     <template v-for="(seg, segIdx) in visible" :key="seg.id">
       <article
         :data-seg-id="seg.id"
@@ -477,6 +601,15 @@ watch(() => props.activeSegmentId, (id, prev) => {
         @drop="(e) => onDrop(e as DragEvent, seg.id)"
       >
         <header class="segment__header">
+          <input
+            v-if="bulkEnabled"
+            type="checkbox"
+            class="segment__select"
+            :checked="isSelected(seg.id)"
+            :aria-label="`Select segment ${segIdx + 1}`"
+            data-test-id="seg-select"
+            @click.stop.prevent="(e) => toggleSelect(seg, segIdx, e as MouseEvent)"
+          />
           <span class="segment__slide-chip">
             <span :style="{ width: '8px', height: '8px', borderRadius: '50%', background: slideAccent(seg.slide_id) }" />
             <strong>{{ slideById(seg.slide_id || '') ? String(slideById(seg.slide_id || '')!.n).padStart(2, '0') : '—' }}</strong>
@@ -659,3 +792,38 @@ watch(() => props.activeSegmentId, (id, prev) => {
     </div>
   </section>
 </template>
+
+<style scoped>
+.transcript__bulkbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: var(--surface-card, #fff);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.transcript__bulkpick {
+  font-size: 12px;
+  padding: 4px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-bg);
+  color: var(--fg1);
+}
+.transcript__bulkwarn {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-amber);
+}
+.segment__select {
+  margin-right: 8px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+</style>
