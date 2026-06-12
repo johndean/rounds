@@ -626,7 +626,11 @@ async def reorder_segments(
         # Set-based seq rewrite over the changed rows. seq is non-unique
         # (migration 022) so no interim-collision constraint exists; the
         # permutation guarantees the final state is a clean 0..N-1.
-        values_sql = ", ".join(f"(CAST(:cid{i} AS uuid), :csq{i})" for i in range(len(changed)))
+        # csq must be CAST to integer: in a (VALUES ...) derived table the column
+        # type is inferred from the expression itself, and asyncpg sends untyped
+        # binds as text — without the cast Postgres types v.new_seq as text and
+        # rejects "seq = v.new_seq" (integer) with a DatatypeMismatchError.
+        values_sql = ", ".join(f"(CAST(:cid{i} AS uuid), CAST(:csq{i} AS integer))" for i in range(len(changed)))
         params: dict[str, object] = {"sid": sid}
         for i, (seg_id, new_seq) in enumerate(changed):
             params[f"cid{i}"] = seg_id
