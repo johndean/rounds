@@ -903,10 +903,45 @@ watch(() => props.activeSegmentId, (id, prev) => {
   letter-spacing: 0.04em;
   color: var(--color-amber);
 }
+/* Custom-drawn checkbox. A native checkbox with @click.prevent suffers a
+   paint desync (the browser reverts el.checked during canceled-activation, and
+   the programmatic re-check doesn't always repaint the native widget). CSS
+   :checked keys off the IDL state, which IS correct, so we draw it ourselves. */
 .segment__select {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
   margin-right: 8px;
+  border: 1.5px solid var(--fg2, #94a3b8);
+  border-radius: 3px;
+  background: transparent;
   cursor: pointer;
   flex: 0 0 auto;
+  position: relative;
+  box-sizing: border-box;
+  transition: background 0.12s, border-color 0.12s;
+}
+.segment__select:hover { border-color: var(--color-steel, #2563eb); }
+.segment__select:checked {
+  background: var(--color-steel, #2563eb);
+  border-color: var(--color-steel, #2563eb);
+}
+.segment__select:checked::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+  box-sizing: border-box;
+}
+.segment__select:focus-visible {
+  outline: 2px solid var(--color-steel, #2563eb);
+  outline-offset: 1px;
 }
 .segment__drag {
   cursor: grab;
