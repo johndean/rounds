@@ -29,6 +29,7 @@ Railway pre-deploy command: ``python scripts/migrate.py``.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from glob import glob
 from pathlib import Path
@@ -111,6 +112,84 @@ def _bootstrap_from_existing_db(cur, files: list[str]) -> int:
     return len(names)
 
 
+def _strip_sql_comments(sql: str) -> str:
+    """Remove ``--`` line comments and ``/* */`` block comments. Only used to
+    scan for keywords (e.g. CONCURRENTLY) — NOT for execution."""
+    no_block = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
+    return re.sub(r"--[^\n]*", "", no_block)
+
+
+def _needs_no_transaction(sql: str) -> bool:
+    """True if the migration must run OUTSIDE a transaction. CREATE/DROP INDEX
+    CONCURRENTLY is the only such statement Postgres has; it raises "cannot run
+    inside a transaction block" otherwise. The connection is autocommit, but a
+    multi-statement execute() is sent as one simple query, which Postgres wraps
+    in an IMPLICIT transaction — so such files must be executed one statement at
+    a time. (This is the fresh-DB failure that kept CI's pytest job from ever
+    running; prod was unaffected because 052 was already in the ledger.)"""
+    return "CONCURRENTLY" in _strip_sql_comments(sql).upper()
+
+
+def _split_statements(sql: str) -> list[str]:
+    """Split SQL into top-level statements on semicolons, respecting line/block
+    comments, single/double-quoted strings, and dollar-quoted bodies ($$...$$ /
+    $tag$...$tag$). Used only for the no-transaction path so each statement is
+    sent to Postgres separately (no implicit multi-statement transaction)."""
+    stmts: list[str] = []
+    buf: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        two = sql[i:i + 2]
+        if two == "--":                                   # line comment
+            j = sql.find("\n", i)
+            i = n if j == -1 else j + 1
+            continue
+        if two == "/*":                                   # block comment
+            j = sql.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+            continue
+        if ch in ("'", '"'):                              # quoted string
+            buf.append(ch)
+            i += 1
+            while i < n:
+                buf.append(sql[i])
+                if sql[i] == ch:
+                    if i + 1 < n and sql[i + 1] == ch:    # doubled-quote escape
+                        buf.append(sql[i + 1])
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == "$":                                     # dollar-quoted body
+            m = re.match(r"\$[A-Za-z0-9_]*\$", sql[i:])
+            if m:
+                tag = m.group(0)
+                end = sql.find(tag, i + len(tag))
+                if end == -1:
+                    buf.append(sql[i:])
+                    i = n
+                else:
+                    buf.append(sql[i:end + len(tag)])
+                    i = end + len(tag)
+                continue
+        if ch == ";":                                     # statement boundary
+            stmt = "".join(buf).strip()
+            if stmt:
+                stmts.append(stmt)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        stmts.append(tail)
+    return stmts
+
+
 def _apply_one(cur, path: str) -> bool:
     """Apply a single migration if not yet recorded. Returns True if
     applied, False if skipped."""
@@ -122,7 +201,16 @@ def _apply_one(cur, path: str) -> bool:
     print(f"  → {name}")
     with open(path, encoding="utf-8") as fh:
         sql = fh.read()
-    cur.execute(sql)
+    if _needs_no_transaction(sql):
+        # Run statement-by-statement so CONCURRENTLY isn't trapped in the
+        # implicit transaction a multi-statement simple query creates. The
+        # connection is autocommit, so each statement commits on its own. These
+        # files are expected to be idempotent (IF [NOT] EXISTS) since a mid-file
+        # failure can't roll back the statements already committed.
+        for stmt in _split_statements(sql):
+            cur.execute(stmt)
+    else:
+        cur.execute(sql)
     cur.execute(
         "INSERT INTO schema_migrations (name) VALUES (%s) ON CONFLICT DO NOTHING",
         (name,),
