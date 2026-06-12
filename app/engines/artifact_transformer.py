@@ -436,6 +436,47 @@ def _format_poll_block(poll: PollForExport) -> str:
     return "\n".join(lines)
 
 
+def _polls_from_table(poll_rows: list, option_rows: list) -> list[PollForExport]:
+    """Build PollForExport list from the editor-owned polls + poll_options
+    tables (CMS_POLLS_FROM_TABLE path). Pure function — unit-tested without a DB.
+
+    poll_rows items: (id, question, total_votes, anchor_slide_index, meta_slide_n).
+    option_rows items: (poll_id, label, votes).
+
+    slide_index resolution (drives the ``++N*+`` injection point): the anchored
+    segment's slide first, then the manifest ``metadata.slide_n``, else slide 0.
+    """
+    opts_by_poll: dict[str, list] = {}
+    for pid, label, votes in option_rows:
+        opts_by_poll.setdefault(str(pid), []).append((label, int(votes or 0)))
+    out: list[PollForExport] = []
+    for r in poll_rows:
+        pid = str(r[0])
+        question = r[1] or ""
+        total = int(r[2] or 0)
+        anchor_slide = r[3]
+        meta_slide_n = r[4]
+        if anchor_slide is not None:
+            slide_index = int(anchor_slide)
+        elif meta_slide_n not in (None, ""):
+            try:
+                slide_index = int(meta_slide_n) - 1
+            except (TypeError, ValueError):
+                slide_index = 0
+        else:
+            slide_index = 0
+        options = [
+            {
+                "label": label,
+                "count": votes,
+                "percent": round((votes / total) * 100) if total else 0,
+            }
+            for label, votes in opts_by_poll.get(pid, [])
+        ]
+        out.append(PollForExport(slide_index=slide_index, question=question, options=options))
+    return out
+
+
 def to_cms_html(session: SessionForExport) -> bytes:
     """
     Publish-ready CMS output: marked transcript → CMS macro → light HTML.
@@ -603,6 +644,42 @@ def load_session_for_export(session_id: str) -> SessionForExport:
                 {"sid": session_id},
             ).fetchone()
 
+            # CMS_POLLS_FROM_TABLE (2026-06-12): prefer the editor-owned polls
+            # table (anchored placement) over the manifest JSONB. Read inside
+            # this connection; assembled after the block. Falls back to
+            # polls_parsed below when the table has no rows for this session.
+            table_poll_rows: list = []
+            table_opt_rows: list = []
+            if settings.CMS_POLLS_FROM_TABLE:
+                table_poll_rows = conn.execute(
+                    text(
+                        """
+                        SELECT p.id, p.question, p.total_votes,
+                               sl.slide_index AS anchor_slide_index,
+                               (p.metadata->>'slide_n') AS meta_slide_n
+                          FROM polls p
+                          LEFT JOIN segments seg ON seg.id = p.anchor_segment
+                          LEFT JOIN slides   sl  ON sl.id  = seg.slide_id
+                         WHERE p.session_id = CAST(:sid AS uuid)
+                         ORDER BY COALESCE(sl.slide_index, 9999), p.created_at
+                        """
+                    ),
+                    {"sid": session_id},
+                ).fetchall()
+                if table_poll_rows:
+                    table_opt_rows = conn.execute(
+                        text(
+                            """
+                            SELECT po.poll_id, po.label, po.votes
+                              FROM poll_options po
+                              JOIN polls p ON p.id = po.poll_id
+                             WHERE p.session_id = CAST(:sid AS uuid)
+                             ORDER BY po.poll_id, po.seq
+                            """
+                        ),
+                        {"sid": session_id},
+                    ).fetchall()
+
             chat_rows = conn.execute(
                 text(
                     """
@@ -641,20 +718,27 @@ def load_session_for_export(session_id: str) -> SessionForExport:
         except json.JSONDecodeError:
             publishing_links = {}
 
-    return SessionForExport(
-        code=sess[0],
-        title=sess[1] or sess[0],
-        presenter=sess[2],
-        duration_sec=sess[3],
-        publishing_links=publishing_links,
-        polls=[
+    # Prefer the editor-owned polls table when the flag is on AND it has rows;
+    # otherwise fall back to the manifest JSONB (byte-identical to legacy).
+    if settings.CMS_POLLS_FROM_TABLE and table_poll_rows:
+        assembled_polls = _polls_from_table(table_poll_rows, table_opt_rows)
+    else:
+        assembled_polls = [
             PollForExport(
                 slide_index=(p.get("slide_n") or 1) - 1,
                 question=p.get("question", ""),
                 options=p.get("options", []),
             )
             for p in (parsed_polls or [])
-        ],
+        ]
+
+    return SessionForExport(
+        code=sess[0],
+        title=sess[1] or sess[0],
+        presenter=sess[2],
+        duration_sec=sess[3],
+        publishing_links=publishing_links,
+        polls=assembled_polls,
         chat=[
             ChatForExport(
                 author=r[0], body=r[1], sent_at_ms=r[2] or 0,

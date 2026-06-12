@@ -50,7 +50,7 @@ onMounted(async () => {
     // the browser even when the backend had them on. Bug fix: read from
     // envelope.data.
     const env = await r.json().catch(() => null) as
-      | { data?: { commit?: string; help_ask_ai_enabled?: boolean; split_merge_enabled?: boolean } }
+      | { data?: { commit?: string; help_ask_ai_enabled?: boolean; split_merge_enabled?: boolean; bulk_reassign_enabled?: boolean } }
       | null;
     const data = env?.data;
     apiSha.value = data?.commit || '';
@@ -60,6 +60,8 @@ onMounted(async () => {
     }
     // Phase 3.5 + 4 — split/merge UI gating (backend SSOT).
     featureFlags.setSplitMergeEnabled(data?.split_merge_enabled ?? false);
+    // Bulk reassign UI gating (backend SSOT).
+    featureFlags.setBulkReassignEnabled(data?.bulk_reassign_enabled ?? false);
   } catch {
     /* silent — version chip is non-essential */
   }

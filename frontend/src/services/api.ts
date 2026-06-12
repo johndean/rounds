@@ -622,6 +622,23 @@ export const segments = {
     http<SegmentRow>(`/v1/sessions/${sessionId}/segments/${segmentId}`, { body: patch, method: 'PATCH' }),
   reassign: (sessionId: string, segmentId: string, slideId: string) =>
     http<SegmentRow>(`/v1/sessions/${sessionId}/segments/${segmentId}/reassign`, { body: { slide_id: slideId }, method: 'POST' }),
+  // Bulk reassign speaker and/or slide across many selected segments in one
+  // set-based call. Batches of <= undo_max snapshot prior values and return
+  // undoable:true; larger batches return undoable:false (UI warns first).
+  bulkReassign: (
+    sessionId: string,
+    segmentIds: string[],
+    opts: { speaker_id?: string; slide_id?: string },
+  ) =>
+    http<{ batch_id: string; reassigned: number; kind: string; undoable: boolean; undo_max: number }>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/segments/bulk-reassign`,
+      { body: { segment_ids: segmentIds, ...opts }, method: 'POST' },
+    ),
+  bulkReassignUndo: (sessionId: string, batchId: string) =>
+    http<{ batch_id: string; restored: number }>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/segments/bulk-reassign/${encodeURIComponent(batchId)}/undo`,
+      { method: 'POST' },
+    ),
 };
 
 // ─── SOP ─────────────────────────────────────────────────────────────────

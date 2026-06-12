@@ -133,6 +133,27 @@ class Settings(BaseSettings):
     # SPLIT_MERGE_DISABLED so a stale UI cannot silently no-op.
     SPLIT_MERGE_ENABLED: bool = False
 
+    # ── Bulk reassign + CMS polls (2026-06-12) ───────────────────────────
+    # Both default OFF so the deploy itself is zero behavioural change —
+    # flip in Railway api + worker env vars to activate. See the plan in
+    # docs/plans/2026-06-11-001-polls-cms-publish-and-bulk-speaker-reassign.md.
+    #
+    # BULK_REASSIGN_ENABLED gates POST /v1/sessions/{id}/segments/bulk-reassign
+    # (+ its /undo). With the flag off the endpoint returns 503
+    # BULK_REASSIGN_DISABLED so a stale UI cannot silently no-op.
+    BULK_REASSIGN_ENABLED: bool = False
+    # Hard cap on a single bulk-reassign selection (safety + perf bound).
+    BULK_REASSIGN_MAX_SEGMENTS: int = 500
+    # Batches at or below this size snapshot prior values and are undoable;
+    # larger batches warn-and-cannot-undo (user requirement).
+    BULK_REASSIGN_UNDO_MAX_SEGMENTS: int = 10
+    #
+    # CMS_POLLS_FROM_TABLE makes the CMS/HTML export read polls from the
+    # editor-owned polls + poll_options tables (anchored placement), falling
+    # back to sessions.polls_parsed when the table has no rows. Off = the
+    # legacy polls_parsed-only behaviour, byte-identical to today.
+    CMS_POLLS_FROM_TABLE: bool = False
+
     # ── Validators ─────────────────────────────────────────────────────
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

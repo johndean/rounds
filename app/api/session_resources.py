@@ -8,12 +8,14 @@ the UI.
 """
 from __future__ import annotations
 
+import json
+import uuid
 from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Body, HTTPException
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from app.auth import CurrentUser
 from app.db import DbSession
@@ -364,6 +366,198 @@ async def reassign_segment_speaker(
     )
     await db.commit()
     return dict(speaker)
+
+
+# ─── bulk reassign (speaker and/or slide) ───────────────────────────────
+# Net-new feature (not in the React SSOT): reassign the speaker and/or slide
+# for many selected segments in one set-based action instead of one-by-one.
+# Deliberately decoupled from the correction_ledger pointer-undo (which reverts
+# text edits + split/merge only, never speaker/slide). Batches of <= the undo
+# cap snapshot prior (speaker_id, slide_id) into bulk_reassign_batches (mig 059)
+# so a dedicated /undo can restore them; larger batches are not undoable and the
+# UI warns first. Gated by BULK_REASSIGN_ENABLED (default off → 503).
+class BulkReassignRequest(BaseModel):
+    segment_ids: list[UUID]
+    speaker_id: Optional[UUID] = None
+    slide_id: Optional[UUID] = None
+
+
+@router.post("/segments/bulk-reassign")
+async def bulk_reassign_segments(
+    session_id: UUID, body: BulkReassignRequest, db: DbSession, user: CurrentUser,
+) -> dict:
+    from app.config import settings
+    if not settings.BULK_REASSIGN_ENABLED:
+        raise HTTPException(status_code=503, detail={"code": "BULK_REASSIGN_DISABLED"})
+    if body.speaker_id is None and body.slide_id is None:
+        raise HTTPException(status_code=400, detail="speaker_id or slide_id is required")
+
+    sid = str(session_id)
+    ids = list(dict.fromkeys(str(s) for s in body.segment_ids))  # de-dupe, keep order
+    if not ids:
+        raise HTTPException(status_code=400, detail="segment_ids must be non-empty")
+    if len(ids) > settings.BULK_REASSIGN_MAX_SEGMENTS:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "BULK_REASSIGN_TOO_MANY", "max": settings.BULK_REASSIGN_MAX_SEGMENTS},
+        )
+
+    # Targets must belong to this session (no cross-session moves).
+    if body.speaker_id is not None:
+        ok = (await db.execute(
+            text("SELECT 1 FROM speakers WHERE id = CAST(:sp AS uuid) AND session_id = CAST(:sid AS uuid)"),
+            {"sp": str(body.speaker_id), "sid": sid},
+        )).first()
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"Speaker {body.speaker_id} not in session {session_id}")
+    if body.slide_id is not None:
+        ok = (await db.execute(
+            text("SELECT 1 FROM slides WHERE id = CAST(:sl AS uuid) AND session_id = CAST(:sid AS uuid)"),
+            {"sl": str(body.slide_id), "sid": sid},
+        )).first()
+        if not ok:
+            raise HTTPException(status_code=404, detail=f"Slide {body.slide_id} not in session {session_id}")
+
+    id_uuids = [uuid.UUID(x) for x in ids]
+    # Restrict to segments that actually belong to this session; capture prior state.
+    rows = (await db.execute(
+        text(
+            "SELECT id, speaker_id, slide_id FROM segments "
+            "WHERE session_id = CAST(:sid AS uuid) AND id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True)),
+        {"sid": sid, "ids": id_uuids},
+    )).mappings().all()
+    if not rows:
+        raise HTTPException(status_code=404, detail="No matching segments in this session")
+
+    matched_uuids = [r["id"] if isinstance(r["id"], uuid.UUID) else uuid.UUID(str(r["id"])) for r in rows]
+    undoable = len(rows) <= settings.BULK_REASSIGN_UNDO_MAX_SEGMENTS
+    prior_values = (
+        [
+            {
+                "segment_id": str(r["id"]),
+                "prior_speaker_id": str(r["speaker_id"]) if r["speaker_id"] else None,
+                "prior_slide_id": str(r["slide_id"]) if r["slide_id"] else None,
+            }
+            for r in rows
+        ]
+        if undoable
+        else None
+    )
+
+    set_sp = body.speaker_id is not None
+    set_sl = body.slide_id is not None
+    await db.execute(
+        text(
+            "UPDATE segments SET "
+            "  speaker_id = CASE WHEN :set_sp THEN CAST(:sp AS uuid) ELSE speaker_id END, "
+            "  slide_id   = CASE WHEN :set_sl THEN CAST(:sl AS uuid) ELSE slide_id END, "
+            "  updated_at = now() "
+            "WHERE session_id = CAST(:sid AS uuid) AND id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True)),
+        {
+            "set_sp": set_sp, "sp": str(body.speaker_id) if set_sp else None,
+            "set_sl": set_sl, "sl": str(body.slide_id) if set_sl else None,
+            "sid": sid, "ids": matched_uuids,
+        },
+    )
+
+    kind = "+".join(k for k, on in (("speaker", set_sp), ("slide", set_sl)) if on)
+    batch = (await db.execute(
+        text(
+            "INSERT INTO bulk_reassign_batches "
+            "  (session_id, actor_email, kind, target_speaker_id, target_slide_id, "
+            "   segment_count, undoable, prior_values) "
+            "VALUES (CAST(:sid AS uuid), :actor, :kind, CAST(:tsp AS uuid), CAST(:tsl AS uuid), "
+            "        :cnt, :undoable, CAST(:pv AS jsonb)) "
+            "RETURNING id"
+        ),
+        {
+            "sid": sid, "actor": user.email, "kind": kind,
+            "tsp": str(body.speaker_id) if set_sp else None,
+            "tsl": str(body.slide_id) if set_sl else None,
+            "cnt": len(rows), "undoable": undoable,
+            "pv": json.dumps(prior_values) if prior_values is not None else None,
+        },
+    )).first()
+    batch_id = str(batch[0])
+
+    await db.execute(
+        text(
+            "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
+            "VALUES (CAST(:sid AS uuid), :actor, 'segment.bulk_reassign', :sum, CAST(:d AS jsonb))"
+        ),
+        {
+            "sid": sid, "actor": user.email,
+            "sum": f"bulk {kind} reassign of {len(rows)} segments",
+            "d": json.dumps({"batch_id": batch_id, "kind": kind, "count": len(rows), "undoable": undoable}),
+        },
+    )
+    await db.commit()
+    return {
+        "batch_id": batch_id,
+        "reassigned": len(rows),
+        "kind": kind,
+        "undoable": undoable,
+        "undo_max": settings.BULK_REASSIGN_UNDO_MAX_SEGMENTS,
+    }
+
+
+@router.post("/segments/bulk-reassign/{batch_id}/undo")
+async def undo_bulk_reassign(
+    session_id: UUID, batch_id: UUID, db: DbSession, user: CurrentUser,
+) -> dict:
+    from app.config import settings
+    if not settings.BULK_REASSIGN_ENABLED:
+        raise HTTPException(status_code=503, detail={"code": "BULK_REASSIGN_DISABLED"})
+    sid = str(session_id)
+    batch = (await db.execute(
+        text(
+            "SELECT id, undoable, undone, prior_values FROM bulk_reassign_batches "
+            "WHERE id = CAST(:b AS uuid) AND session_id = CAST(:sid AS uuid)"
+        ),
+        {"b": str(batch_id), "sid": sid},
+    )).mappings().first()
+    if not batch:
+        raise HTTPException(status_code=404, detail=f"Bulk reassign batch {batch_id} not found")
+    if not batch["undoable"]:
+        raise HTTPException(status_code=409, detail={"code": "BULK_REASSIGN_NOT_UNDOABLE"})
+    if batch["undone"]:
+        raise HTTPException(status_code=409, detail={"code": "BULK_REASSIGN_ALREADY_UNDONE"})
+
+    prior = batch["prior_values"]
+    if isinstance(prior, str):
+        prior = json.loads(prior)
+    restored = 0
+    for entry in (prior or []):
+        # Restore both columns to their pre-batch values (a no-op for the
+        # column the batch didn't change, since prior captured both).
+        await db.execute(
+            text(
+                "UPDATE segments SET speaker_id = CAST(:sp AS uuid), "
+                "  slide_id = CAST(:sl AS uuid), updated_at = now() "
+                "WHERE id = CAST(:seg AS uuid) AND session_id = CAST(:sid AS uuid)"
+            ),
+            {"sp": entry.get("prior_speaker_id"), "sl": entry.get("prior_slide_id"),
+             "seg": entry["segment_id"], "sid": sid},
+        )
+        restored += 1
+
+    await db.execute(
+        text("UPDATE bulk_reassign_batches SET undone = TRUE, undone_at = now() WHERE id = CAST(:b AS uuid)"),
+        {"b": str(batch_id)},
+    )
+    await db.execute(
+        text(
+            "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
+            "VALUES (CAST(:sid AS uuid), :actor, 'segment.bulk_reassign_undo', :sum, CAST(:d AS jsonb))"
+        ),
+        {"sid": sid, "actor": user.email,
+         "sum": f"undo bulk reassign batch {batch_id} ({restored} segments)",
+         "d": json.dumps({"batch_id": str(batch_id), "restored": restored})},
+    )
+    await db.commit()
+    return {"batch_id": str(batch_id), "restored": restored}
 
 
 # ─── sources (uploaded files) ──────────────────────────────────────────

@@ -186,6 +186,10 @@ async def version() -> JSONResponse:
         # merge-up keystroke when false. SSOT lives on the backend
         # (settings.SPLIT_MERGE_ENABLED).
         "split_merge_enabled": settings.SPLIT_MERGE_ENABLED,
+        # Bulk reassign (2026-06-12): the editor reads this at app mount and
+        # shows the multi-select + "Reassign selected" bar only when true.
+        # SSOT lives on the backend (settings.BULK_REASSIGN_ENABLED).
+        "bulk_reassign_enabled": settings.BULK_REASSIGN_ENABLED,
     })
 
 

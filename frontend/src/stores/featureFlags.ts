@@ -25,5 +25,13 @@ export const useFeatureFlagsStore = defineStore('featureFlags', () => {
     splitMergeEnabled.value = v;
   }
 
-  return { splitMergeEnabled, setSplitMergeEnabled };
+  /** Bulk speaker/slide reassign (2026-06-12). Gates the editor multi-select
+   *  + "Reassign selected" bar. Backend SSOT: BULK_REASSIGN_ENABLED. */
+  const bulkReassignEnabled = ref(false);
+
+  function setBulkReassignEnabled(v: boolean): void {
+    bulkReassignEnabled.value = v;
+  }
+
+  return { splitMergeEnabled, setSplitMergeEnabled, bulkReassignEnabled, setBulkReassignEnabled };
 });
