@@ -623,25 +623,24 @@ async def reorder_segments(
     async with db_locks.try_advisory_lock_async(db, session_id=sid, stage="split_merge") as acquired:
         if not acquired:
             raise HTTPException(status_code=409, detail={"code": "SPLIT_MERGE_BUSY"})
-        # Set-based seq rewrite over the changed rows. seq is non-unique
-        # (migration 022) so no interim-collision constraint exists; the
-        # permutation guarantees the final state is a clean 0..N-1.
-        # csq must be CAST to integer: in a (VALUES ...) derived table the column
-        # type is inferred from the expression itself, and asyncpg sends untyped
-        # binds as text — without the cast Postgres types v.new_seq as text and
-        # rejects "seq = v.new_seq" (integer) with a DatatypeMismatchError.
-        values_sql = ", ".join(f"(CAST(:cid{i} AS uuid), CAST(:csq{i} AS integer))" for i in range(len(changed)))
-        params: dict[str, object] = {"sid": sid}
-        for i, (seg_id, new_seq) in enumerate(changed):
-            params[f"cid{i}"] = seg_id
-            params[f"csq{i}"] = new_seq
+        # Single-statement seq rewrite via jsonb_to_recordset with DECLARED
+        # column types (id uuid, new_seq int). Declaring the types is the whole
+        # safety property: a bare (VALUES ...) derived table infers each column's
+        # type from its bind expression, and asyncpg sends untyped binds as text,
+        # so v.new_seq came out text and Postgres rejected "seq = v.new_seq"
+        # (integer) with a DatatypeMismatchError — the original 500. Mirrors
+        # reorder_chat / reorder_polls. seq is non-unique (migration 022) so no
+        # interim-collision constraint exists; the permutation guarantees the
+        # final state is a clean 0..N-1. One jsonb payload, not N binds.
+        pairs = [{"id": seg_id, "new_seq": new_seq} for seg_id, new_seq in changed]
         await db.execute(
             text(
-                f"UPDATE segments AS s SET seq = v.new_seq, updated_at = now() "
-                f"FROM (VALUES {values_sql}) AS v(id, new_seq) "
-                f"WHERE s.id = v.id AND s.session_id = CAST(:sid AS uuid)"
+                "UPDATE segments AS s SET seq = v.new_seq, updated_at = now() "
+                "FROM (SELECT * FROM jsonb_to_recordset(CAST(:pairs AS jsonb)) "
+                "      AS x(id uuid, new_seq int)) AS v "
+                "WHERE s.id = v.id AND s.session_id = CAST(:sid AS uuid)"
             ),
-            params,
+            {"sid": sid, "pairs": json.dumps(pairs)},
         )
         batch = (await db.execute(
             text(
