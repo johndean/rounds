@@ -33,5 +33,17 @@ export const useFeatureFlagsStore = defineStore('featureFlags', () => {
     bulkReassignEnabled.value = v;
   }
 
-  return { splitMergeEnabled, setSplitMergeEnabled, bulkReassignEnabled, setBulkReassignEnabled };
+  /** Segment drag-drop reorder (2026-06-12). Gates the transcript drag handles.
+   *  Backend SSOT: SEGMENT_REORDER_ENABLED. */
+  const segmentReorderEnabled = ref(false);
+
+  function setSegmentReorderEnabled(v: boolean): void {
+    segmentReorderEnabled.value = v;
+  }
+
+  return {
+    splitMergeEnabled, setSplitMergeEnabled,
+    bulkReassignEnabled, setBulkReassignEnabled,
+    segmentReorderEnabled, setSegmentReorderEnabled,
+  };
 });

@@ -639,6 +639,14 @@ export const segments = {
       `/v1/sessions/${encodeURIComponent(sessionId)}/segments/bulk-reassign/${encodeURIComponent(batchId)}/undo`,
       { method: 'POST' },
     ),
+  // Vertical drag-drop reorder: send the FULL new order of the session's
+  // segment IDs. seq-only rewrite; always undoable (undo via bulkReassignUndo,
+  // which restores prior seq for reorder batches).
+  reorder: (sessionId: string, orderedSegmentIds: string[]) =>
+    http<{ batch_id: string | null; reordered: number; kind: string; undoable: boolean }>(
+      `/v1/sessions/${encodeURIComponent(sessionId)}/segments/reorder`,
+      { body: { ordered_segment_ids: orderedSegmentIds }, method: 'POST' },
+    ),
 };
 
 // ─── SOP ─────────────────────────────────────────────────────────────────

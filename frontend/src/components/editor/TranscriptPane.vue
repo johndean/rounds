@@ -158,7 +158,13 @@ const visible = computed<readonly Segment[]>(() => {
 const featureFlags = useFeatureFlagsStore();
 const bulkEnabled = computed(() => featureFlags.bulkReassignEnabled && !!props.sessionId);
 const selected = ref<Set<string>>(new Set());
-const lastBatch = ref<{ id: string; undoable: boolean; count: number } | null>(null);
+const lastBatch = ref<{ id: string; undoable: boolean; count: number; kind: string } | null>(null);
+// Reorder (drag-drop) — gated by SEGMENT_REORDER_ENABLED. Disabled while
+// slide-filtering (a partial view would make a full-order reorder confusing).
+const reorderEnabled = computed(() =>
+  featureFlags.segmentReorderEnabled && !!props.sessionId && props.slideRailMode !== 'filter',
+);
+const draggingIds = ref<string[]>([]);
 const bulkBusy = ref(false);
 let lastToggledIdx = -1;
 const UNDO_MAX = 10;  // mirrors backend BULK_REASSIGN_UNDO_MAX_SEGMENTS
@@ -194,7 +200,7 @@ async function doBulkReassign(target: { speaker_id?: string; slide_id?: string }
   bulkBusy.value = true;
   try {
     const res = await segmentsApi.bulkReassign(props.sessionId, ids, target);
-    lastBatch.value = { id: res.batch_id, undoable: res.undoable, count: res.reassigned };
+    lastBatch.value = { id: res.batch_id, undoable: res.undoable, count: res.reassigned, kind: res.kind };
     toast.push(
       `Reassigned ${res.reassigned} segment${res.reassigned === 1 ? '' : 's'}${res.undoable ? '' : ' (cannot be undone)'}`,
       { tone: 'success' },
@@ -235,6 +241,61 @@ async function undoLastBulk(): Promise<void> {
   } finally {
     bulkBusy.value = false;
   }
+}
+
+// ── Drag-drop reorder ─────────────────────────────────────────────────────
+// Dragging a segment (or, when it's part of a multi-selection, the whole
+// selected group) to a new position rewrites seq via segments.reorder. Order
+// is computed from the FULL props.segments list; the drop target says "insert
+// before me" (or null = move to end).
+function reorderGroupIds(seedId: string): string[] {
+  if (selected.value.size > 0 && selected.value.has(seedId)) {
+    return props.segments.filter((s) => selected.value.has(s.id)).map((s) => s.id);
+  }
+  return [seedId];
+}
+function onReorderStart(seg: Segment, ev: DragEvent): void {
+  draggingIds.value = reorderGroupIds(seg.id);
+  if (ev.dataTransfer) {
+    ev.dataTransfer.effectAllowed = 'move';
+    ev.dataTransfer.setData('application/vnd.rounds.segreorder', seg.id);
+  }
+}
+function onReorderEnd(): void { draggingIds.value = []; }
+
+async function doReorder(targetId: string | null): Promise<void> {
+  const group = draggingIds.value.slice();
+  onReorderEnd();
+  if (!props.sessionId || group.length === 0) return;
+  const groupSet = new Set(group);
+  if (targetId && groupSet.has(targetId)) return;  // dropped onto itself
+  const fullIds = props.segments.map((s) => s.id);
+  const without = fullIds.filter((id) => !groupSet.has(id));
+  let at = targetId ? without.indexOf(targetId) : without.length;
+  if (at < 0) at = without.length;
+  const newOrder = [...without.slice(0, at), ...group, ...without.slice(at)];
+  if (newOrder.length === fullIds.length && newOrder.every((id, i) => id === fullIds[i])) return;
+  bulkBusy.value = true;
+  try {
+    const res = await segmentsApi.reorder(props.sessionId, newOrder);
+    lastBatch.value = res.batch_id
+      ? { id: res.batch_id, undoable: res.undoable, count: res.reordered, kind: 'reorder' }
+      : null;
+    if (res.reordered > 0) {
+      toast.push(`Reordered ${res.reordered} segment${res.reordered === 1 ? '' : 's'}`, { tone: 'success' });
+    }
+    clearSelection();
+    emit('segmentsChanged');
+  } catch (e) {
+    toast.push(e instanceof ApiError ? `${e.status} — ${e.message}` : 'Reorder failed', { tone: 'error' });
+  } finally {
+    bulkBusy.value = false;
+  }
+}
+function onEndDrop(ev: DragEvent): void {
+  if (!reorderEnabled.value || !ev.dataTransfer?.types.includes('application/vnd.rounds.segreorder')) return;
+  ev.preventDefault();
+  void doReorder(null);
 }
 
 // Phase 3 (2026-06-05) — guard auto-scroll so manual scroll is not
@@ -448,6 +509,11 @@ function onDragLeave(e: DragEvent): void {
 function onDrop(e: DragEvent, segId: string): void {
   e.preventDefault();
   (e.currentTarget as HTMLElement).classList.remove('is-drop-target');
+  // Reorder drag takes precedence over anchor drop (distinct dataTransfer type).
+  if (e.dataTransfer?.types.includes('application/vnd.rounds.segreorder')) {
+    void doReorder(segId);
+    return;
+  }
   const data = e.dataTransfer?.getData('application/vnd.mic.anchor');
   if (data) emit('dropOnSegment', data, segId);
 }
@@ -587,7 +653,7 @@ watch(() => props.activeSegmentId, (id, prev) => {
         :disabled="bulkBusy"
         data-test-id="bulk-undo"
         @click.stop="undoLastBulk"
-      >Undo last reassign ({{ lastBatch.count }})</button>
+      >Undo last {{ lastBatch.kind }} ({{ lastBatch.count }})</button>
     </div>
 
     <template v-for="(seg, segIdx) in visible" :key="seg.id">
@@ -610,6 +676,17 @@ watch(() => props.activeSegmentId, (id, prev) => {
             data-test-id="seg-select"
             @click.stop.prevent="(e) => toggleSelect(seg, segIdx, e as MouseEvent)"
           />
+          <span
+            v-if="reorderEnabled"
+            class="segment__drag"
+            draggable="true"
+            title="Drag to reorder"
+            aria-label="Drag to reorder segment"
+            data-test-id="seg-drag"
+            @dragstart="(e) => onReorderStart(seg, e as DragEvent)"
+            @dragend="onReorderEnd"
+            @click.stop
+          >⠿</span>
           <span class="segment__slide-chip">
             <span :style="{ width: '8px', height: '8px', borderRadius: '50%', background: slideAccent(seg.slide_id) }" />
             <strong>{{ slideById(seg.slide_id || '') ? String(slideById(seg.slide_id || '')!.n).padStart(2, '0') : '—' }}</strong>
@@ -787,8 +864,13 @@ watch(() => props.activeSegmentId, (id, prev) => {
         @remove="(id) => emit('removeAnchor', id)"
       />
     </template>
-    <div :style="{ padding: '24px 12px', textAlign: 'center', color: 'var(--fg2)', fontSize: '12px' }">
-      End of transcript · {{ visible.length }} segments rendered (virtualized)
+    <div
+      :style="{ padding: '24px 12px', textAlign: 'center', color: 'var(--fg2)', fontSize: '12px' }"
+      :class="{ 'transcript__end-drop': reorderEnabled && draggingIds.length > 0 }"
+      @dragover.prevent
+      @drop="(e) => onEndDrop(e as DragEvent)"
+    >
+      {{ reorderEnabled && draggingIds.length > 0 ? 'Drop here to move to end' : `End of transcript · ${visible.length} segments rendered (virtualized)` }}
     </div>
   </section>
 </template>
@@ -825,5 +907,23 @@ watch(() => props.activeSegmentId, (id, prev) => {
   margin-right: 8px;
   cursor: pointer;
   flex: 0 0 auto;
+}
+.segment__drag {
+  cursor: grab;
+  user-select: none;
+  color: var(--fg2);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 4px;
+  margin-right: 2px;
+  flex: 0 0 auto;
+}
+.segment__drag:active { cursor: grabbing; }
+.transcript__end-drop {
+  outline: 2px dashed var(--color-steel, #2563eb);
+  outline-offset: -6px;
+  border-radius: 8px;
+  color: var(--color-steel, #2563eb) !important;
+  font-weight: 700;
 }
 </style>

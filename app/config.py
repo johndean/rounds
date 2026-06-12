@@ -154,6 +154,12 @@ class Settings(BaseSettings):
     # legacy polls_parsed-only behaviour, byte-identical to today.
     CMS_POLLS_FROM_TABLE: bool = False
 
+    # Segment drag-drop reorder (2026-06-12). Gates POST .../segments/reorder
+    # (+ the transcript drag handles). Off by default → 503 when disabled.
+    # seq-only rewrite; always undoable (cheap seq snapshot). Plan:
+    # docs/plans/2026-06-12-001-segment-drag-drop-reorder.md.
+    SEGMENT_REORDER_ENABLED: bool = False
+
     # ── Validators ─────────────────────────────────────────────────────
     @field_validator("DATABASE_URL", mode="before")
     @classmethod

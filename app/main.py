@@ -190,6 +190,9 @@ async def version() -> JSONResponse:
         # shows the multi-select + "Reassign selected" bar only when true.
         # SSOT lives on the backend (settings.BULK_REASSIGN_ENABLED).
         "bulk_reassign_enabled": settings.BULK_REASSIGN_ENABLED,
+        # Segment drag-drop reorder (2026-06-12) — gates the transcript drag
+        # handles. SSOT: settings.SEGMENT_REORDER_ENABLED.
+        "segment_reorder_enabled": settings.SEGMENT_REORDER_ENABLED,
     })
 
 

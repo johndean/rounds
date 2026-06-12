@@ -508,18 +508,21 @@ async def undo_bulk_reassign(
     session_id: UUID, batch_id: UUID, db: DbSession, user: CurrentUser,
 ) -> dict:
     from app.config import settings
-    if not settings.BULK_REASSIGN_ENABLED:
+    # Shared undo for both bulk reassign and reorder batches — allowed when
+    # either feature is enabled (undo is inherently safe; it only restores
+    # snapshotted prior values).
+    if not (settings.BULK_REASSIGN_ENABLED or settings.SEGMENT_REORDER_ENABLED):
         raise HTTPException(status_code=503, detail={"code": "BULK_REASSIGN_DISABLED"})
     sid = str(session_id)
     batch = (await db.execute(
         text(
-            "SELECT id, undoable, undone, prior_values FROM bulk_reassign_batches "
+            "SELECT id, kind, undoable, undone, prior_values FROM bulk_reassign_batches "
             "WHERE id = CAST(:b AS uuid) AND session_id = CAST(:sid AS uuid)"
         ),
         {"b": str(batch_id), "sid": sid},
     )).mappings().first()
     if not batch:
-        raise HTTPException(status_code=404, detail=f"Bulk reassign batch {batch_id} not found")
+        raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
     if not batch["undoable"]:
         raise HTTPException(status_code=409, detail={"code": "BULK_REASSIGN_NOT_UNDOABLE"})
     if batch["undone"]:
@@ -530,16 +533,26 @@ async def undo_bulk_reassign(
         prior = json.loads(prior)
     restored = 0
     for entry in (prior or []):
-        # Restore both columns to their pre-batch values (a no-op for the
-        # column the batch didn't change, since prior captured both).
+        # Restore ONLY the columns this batch snapshotted. A reorder batch
+        # carries prior_seq only (so it never NULLs speaker_id/slide_id); a
+        # reassign batch carries prior_speaker_id + prior_slide_id (so it never
+        # touches seq). Column fragments are fixed literals; values are bound.
+        sets: list[str] = []
+        params: dict[str, object] = {"seg": entry["segment_id"], "sid": sid}
+        if "prior_speaker_id" in entry:
+            sets.append("speaker_id = CAST(:sp AS uuid)"); params["sp"] = entry["prior_speaker_id"]
+        if "prior_slide_id" in entry:
+            sets.append("slide_id = CAST(:sl AS uuid)"); params["sl"] = entry["prior_slide_id"]
+        if "prior_seq" in entry:
+            sets.append("seq = :sq"); params["sq"] = entry["prior_seq"]
+        if not sets:
+            continue
         await db.execute(
             text(
-                "UPDATE segments SET speaker_id = CAST(:sp AS uuid), "
-                "  slide_id = CAST(:sl AS uuid), updated_at = now() "
+                f"UPDATE segments SET {', '.join(sets)}, updated_at = now() "
                 "WHERE id = CAST(:seg AS uuid) AND session_id = CAST(:sid AS uuid)"
             ),
-            {"sp": entry.get("prior_speaker_id"), "sl": entry.get("prior_slide_id"),
-             "seg": entry["segment_id"], "sid": sid},
+            params,
         )
         restored += 1
 
@@ -553,11 +566,100 @@ async def undo_bulk_reassign(
             "VALUES (CAST(:sid AS uuid), :actor, 'segment.bulk_reassign_undo', :sum, CAST(:d AS jsonb))"
         ),
         {"sid": sid, "actor": user.email,
-         "sum": f"undo bulk reassign batch {batch_id} ({restored} segments)",
-         "d": json.dumps({"batch_id": str(batch_id), "restored": restored})},
+         "sum": f"undo {batch['kind']} batch {batch_id} ({restored} segments)",
+         "d": json.dumps({"batch_id": str(batch_id), "kind": batch["kind"], "restored": restored})},
     )
     await db.commit()
     return {"batch_id": str(batch_id), "restored": restored}
+
+
+# ─── bulk reorder (vertical drag-drop) — gated by SEGMENT_REORDER_ENABLED ──
+# Rewrites segments.seq to match a client-supplied FULL permutation of the
+# session's segment IDs. seq-only: never touches timing, slide, speaker, text,
+# or the corrections ledger. Always undoable via a cheap prior-seq snapshot
+# reused into bulk_reassign_batches (kind='reorder'). Plan:
+# docs/plans/2026-06-12-001-segment-drag-drop-reorder.md.
+def _reorder_changes(current_seq: dict[str, int], ordered_ids: list[str]) -> list[tuple[str, int]]:
+    """Pure: given current {segment_id: seq} and the desired full order, return
+    the (segment_id, new_seq) pairs whose seq actually changes. Caller must have
+    validated that ordered_ids is an exact permutation of current_seq.keys().
+    Unit-tested without a DB (tests/test_segment_reorder.py)."""
+    return [(sid, i) for i, sid in enumerate(ordered_ids) if current_seq.get(sid) != i]
+
+
+class SegmentReorderRequest(BaseModel):
+    ordered_segment_ids: list[UUID]
+
+
+@router.post("/segments/reorder")
+async def reorder_segments(
+    session_id: UUID, body: SegmentReorderRequest, db: DbSession, user: CurrentUser,
+) -> dict:
+    from app.config import settings
+    if not settings.SEGMENT_REORDER_ENABLED:
+        raise HTTPException(status_code=503, detail={"code": "SEGMENT_REORDER_DISABLED"})
+    sid = str(session_id)
+    ordered = [str(s) for s in body.ordered_segment_ids]
+    if len(ordered) != len(set(ordered)):
+        raise HTTPException(status_code=400, detail="ordered_segment_ids contains duplicates")
+
+    rows = (await db.execute(
+        text("SELECT id, seq FROM segments WHERE session_id = CAST(:sid AS uuid)"),
+        {"sid": sid},
+    )).mappings().all()
+    current = {str(r["id"]): r["seq"] for r in rows}
+    # Must be an EXACT permutation of the session's segments — guarantees no
+    # segment is lost, added, or duplicated (the core safety property).
+    if set(ordered) != set(current.keys()):
+        raise HTTPException(status_code=409, detail={"code": "REORDER_STALE"})
+
+    # Only rows whose seq actually changes are touched / snapshotted.
+    changed = _reorder_changes(current, ordered)
+    if not changed:
+        return {"batch_id": None, "reordered": 0, "kind": "reorder", "undoable": True}
+    prior_values = [{"segment_id": seg_id, "prior_seq": current[seg_id]} for seg_id, _ in changed]
+
+    from app.services import db_locks
+    async with db_locks.try_advisory_lock_async(db, session_id=sid, stage="split_merge") as acquired:
+        if not acquired:
+            raise HTTPException(status_code=409, detail={"code": "SPLIT_MERGE_BUSY"})
+        # Set-based seq rewrite over the changed rows. seq is non-unique
+        # (migration 022) so no interim-collision constraint exists; the
+        # permutation guarantees the final state is a clean 0..N-1.
+        values_sql = ", ".join(f"(CAST(:cid{i} AS uuid), :csq{i})" for i in range(len(changed)))
+        params: dict[str, object] = {"sid": sid}
+        for i, (seg_id, new_seq) in enumerate(changed):
+            params[f"cid{i}"] = seg_id
+            params[f"csq{i}"] = new_seq
+        await db.execute(
+            text(
+                f"UPDATE segments AS s SET seq = v.new_seq, updated_at = now() "
+                f"FROM (VALUES {values_sql}) AS v(id, new_seq) "
+                f"WHERE s.id = v.id AND s.session_id = CAST(:sid AS uuid)"
+            ),
+            params,
+        )
+        batch = (await db.execute(
+            text(
+                "INSERT INTO bulk_reassign_batches "
+                "  (session_id, actor_email, kind, segment_count, undoable, prior_values) "
+                "VALUES (CAST(:sid AS uuid), :actor, 'reorder', :cnt, TRUE, CAST(:pv AS jsonb)) "
+                "RETURNING id"
+            ),
+            {"sid": sid, "actor": user.email, "cnt": len(changed), "pv": json.dumps(prior_values)},
+        )).first()
+        batch_id = str(batch[0])
+        await db.execute(
+            text(
+                "INSERT INTO audit_events (session_id, actor_email, kind, summary, details) "
+                "VALUES (CAST(:sid AS uuid), :actor, 'segment.reorder', :sum, CAST(:d AS jsonb))"
+            ),
+            {"sid": sid, "actor": user.email,
+             "sum": f"reordered {len(changed)} segments",
+             "d": json.dumps({"batch_id": batch_id, "changed": len(changed)})},
+        )
+        await db.commit()
+    return {"batch_id": batch_id, "reordered": len(changed), "kind": "reorder", "undoable": True}
 
 
 # ─── sources (uploaded files) ──────────────────────────────────────────
