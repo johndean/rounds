@@ -74,16 +74,17 @@ async def test_reorder_and_undo_roundtrip(monkeypatch):
             ids = []
             for s in seqs:
                 # content_hash is NOT NULL (mig 020); reorder never reads it, so
-                # any per-row deterministic hash satisfies the constraint.
+                # any per-row deterministic hash satisfies the constraint. Hash
+                # off :txt (unique per seq) — reusing :txt keeps the param's
+                # deduced type consistently text, avoiding AmbiguousParameterError.
                 seg_id = (await db.execute(
                     sa.text(
                         "INSERT INTO segments (session_id, seq, start_ms, end_ms, text, content_hash) "
-                        "VALUES (:sid, :seq, :a, :b, :txt, "
-                        "        encode(sha256((:c || CAST(:seq AS text))::bytea), 'hex')) "
+                        "VALUES (:sid, :seq, :a, :b, :txt, encode(sha256(:txt::bytea), 'hex')) "
                         "RETURNING id"
                     ),
                     {"sid": session_id, "seq": s, "a": s * 1000, "b": s * 1000 + 500,
-                     "txt": f"seg {s}", "c": code},
+                     "txt": f"seg {s}"},
                 )).scalar_one()
                 ids.append(str(seg_id))
             await db.commit()
