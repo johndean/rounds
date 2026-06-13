@@ -76,6 +76,18 @@ def _new_app_with_overrides():
     return app
 
 
+def _auth_header() -> dict[str, str]:
+    """A real Bearer token for an AUTH_USERS email. The dependency_overrides
+    path proved unreliable here, so we exercise the genuine auth path instead:
+    get_current_user decodes the JWT and, when auth_users has no row (this
+    harness doesn't run lifespan, so the seed never fires), falls back to the
+    AUTH_USERS env CSV — which contains this email. Robust in both local and CI
+    (CI sets AUTH_USERS=ci@vin.com)."""
+    from app.auth import _ENV_FALLBACK_DB, create_access_token
+    email = next(iter(_ENV_FALLBACK_DB), "test@vin.com")
+    return {"Authorization": f"Bearer {create_access_token(email).access_token}"}
+
+
 def _hash(session_id: str, ms: int) -> str:
     """Match app/services/segment_split.py recipe: sha256(session_id||split_ms)."""
     payload = f"{session_id}{ms}".encode("utf-8")
@@ -220,6 +232,7 @@ async def _post_split(
     return await client.post(
         f"/v1/sessions/{session_id}/corrections",
         json=body,
+        headers=_auth_header(),
     )
 
 
