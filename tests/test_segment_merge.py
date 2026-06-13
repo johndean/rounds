@@ -510,7 +510,11 @@ async def test_metadata_breadcrumb_merged_from_and_merged_at_ms():
     )
     sql_u, params_u = update_left
     # The breadcrumb keys appear in the SQL (composed via jsonb_build_object).
-    assert "jsonb_build_object('merged_from', :rid, 'merged_at_ms', :rstart)" in sql_u
+    # Binds may be wrapped in CAST(...) for asyncpg type inference, so assert on
+    # the keys + that the binds are referenced, not the exact pre-CAST text.
+    assert "jsonb_build_object(" in sql_u
+    assert "'merged_from'" in sql_u and "'merged_at_ms'" in sql_u
+    assert ":rid" in sql_u and ":rstart" in sql_u
     assert params_u["rid"] == str(RIGHT_ID)
     assert params_u["rstart"] == 2000
     # Pre-existing left.metadata is preserved alongside (the SQL uses `||`).

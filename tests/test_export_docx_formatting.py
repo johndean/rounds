@@ -28,6 +28,7 @@ class _Seg:
     start_ms:      int = 0
     end_ms:        int = 1000
     speaker_name:  Optional[str] = None
+    speaker_role:  Optional[str] = None
     slide_index:   Optional[int] = None
     slide_title:   Optional[str] = None
 

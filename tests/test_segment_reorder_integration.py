@@ -32,7 +32,8 @@ async def _engine_or_skip():
     try:
         async with eng.connect() as conn:
             await conn.execute(sa.text("SELECT 1"))
-    except Exception as exc:  # noqa: BLE001 — no local DB → skip, don't fail
+    # No DB reachable locally: skip rather than fail (matches project posture).
+    except Exception as exc:  # noqa: BLE001
         await eng.dispose()
         pytest.skip(f"no database reachable for integration test: {exc}")
     return eng
@@ -61,8 +62,13 @@ async def test_reorder_and_undo_roundtrip(monkeypatch):
         #    from the rewrite). ──
         seqs = [1, 2, 9, 10, 11]
         async with sm() as db:
+            # status must be a valid FSM state — the 001_init default 'ingesting'
+            # is rejected by sessions_status_check (migration 010).
             session_id = (await db.execute(
-                sa.text("INSERT INTO sessions (code, title) VALUES (:c, :t) RETURNING id"),
+                sa.text(
+                    "INSERT INTO sessions (code, title, status) "
+                    "VALUES (:c, :t, 'ready') RETURNING id"
+                ),
                 {"c": code, "t": "reorder integration test"},
             )).scalar_one()
             ids = []

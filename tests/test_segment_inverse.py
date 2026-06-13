@@ -315,7 +315,7 @@ async def test_split_then_undo_restores_pre_split_state(db_session, seeded_sessi
     mid = await _snapshot_session(db_session, sid)
     assert len(mid["segments"]) == 2, "split did not produce 2 segments"
 
-    await _undo(db_session)
+    await _undo(db_session, sid)
 
     post = await _snapshot_session(db_session, sid)
     assert post == pre, (
@@ -333,8 +333,8 @@ async def test_split_then_undo_then_redo_matches_first_split(db_session, seeded_
     await _apply_split(db_session, sid, seg_id, after_word_index=1)
     after_first_split = await _snapshot_session(db_session, sid)
 
-    await _undo(db_session)
-    await _redo(db_session)
+    await _undo(db_session, sid)
+    await _redo(db_session, sid)
 
     after_redo = await _snapshot_session(db_session, sid)
     assert after_redo == after_first_split, (
@@ -361,7 +361,7 @@ async def test_merge_then_undo_restores_pre_merge_state(db_session, seeded_sessi
     mid = await _snapshot_session(db_session, sid)
     assert len(mid["segments"]) == 1, "merge did not collapse to 1 segment"
 
-    await _undo(db_session)
+    await _undo(db_session, sid)
 
     post = await _snapshot_session(db_session, sid)
     assert post == pre_merge, (
@@ -383,8 +383,8 @@ async def test_merge_then_undo_then_redo_matches_first_merge(db_session, seeded_
     await _apply_merge(db_session, sid, left_id, right_id)
     after_first_merge = await _snapshot_session(db_session, sid)
 
-    await _undo(db_session)
-    await _redo(db_session)
+    await _undo(db_session, sid)
+    await _redo(db_session, sid)
 
     after_redo = await _snapshot_session(db_session, sid)
     assert after_redo == after_first_merge, (
@@ -419,14 +419,14 @@ async def test_split_then_text_edit_then_undo_undo_restores_original(
 
     # First undo: rolls back the text_edit only. The split is still
     # in effect — should still see 2 segments.
-    await _undo(db_session)
+    await _undo(db_session, sid)
     after_first_undo = await _snapshot_session(db_session, sid)
     assert len(after_first_undo["segments"]) == 2, (
         "first undo collapsed the split; should only roll back text_edit"
     )
 
     # Second undo: rolls back the split. Original state recovered.
-    await _undo(db_session)
+    await _undo(db_session, sid)
     post = await _snapshot_session(db_session, sid)
     assert post == pre, (
         f"Two-step undo did not restore the original state.\n"
@@ -499,7 +499,7 @@ async def test_three_splits_three_undos_recovers_at_each_step(db_session, seeded
     await _apply_split(db_session, sid, right_1, after_word_index=1)
 
     # Undo #1 → state should match snap_before_3.
-    await _undo(db_session)
+    await _undo(db_session, sid)
     after_undo_1 = await _snapshot_session(db_session, sid)
     assert after_undo_1 == snap_before_3, (
         f"After 1st undo, state does not match snap_before_3.\n"
@@ -507,7 +507,7 @@ async def test_three_splits_three_undos_recovers_at_each_step(db_session, seeded
     )
 
     # Undo #2 → state should match snap_before_2.
-    await _undo(db_session)
+    await _undo(db_session, sid)
     after_undo_2 = await _snapshot_session(db_session, sid)
     assert after_undo_2 == snap_before_2, (
         f"After 2nd undo, state does not match snap_before_2.\n"
@@ -515,7 +515,7 @@ async def test_three_splits_three_undos_recovers_at_each_step(db_session, seeded
     )
 
     # Undo #3 → state should match snap_before_1 (original 1-segment).
-    await _undo(db_session)
+    await _undo(db_session, sid)
     after_undo_3 = await _snapshot_session(db_session, sid)
     assert after_undo_3 == snap_before_1, (
         f"After 3rd undo, state does not match snap_before_1.\n"
