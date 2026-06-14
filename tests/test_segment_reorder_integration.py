@@ -14,6 +14,7 @@ project's existing DB-test posture (see tests/test_chat_polls_reorder.py).
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 
 import pytest
@@ -74,18 +75,17 @@ async def test_reorder_and_undo_roundtrip(monkeypatch):
             ids = []
             for s in seqs:
                 # content_hash is NOT NULL (mig 020); reorder never reads it, so
-                # any per-row deterministic hash satisfies the constraint. Hash
-                # off :txt (unique per seq) — reusing :txt keeps the param's
-                # deduced type consistently text, avoiding AmbiguousParameterError.
+                # any per-row unique value satisfies the constraint. Compute it
+                # in Python and bind as plain text — doing sha256/cast in SQL
+                # forces a single param to serve two types (AmbiguousParameter).
+                chash = hashlib.sha256(f"reorder-{code}-{s}".encode("utf-8")).hexdigest()
                 seg_id = (await db.execute(
                     sa.text(
                         "INSERT INTO segments (session_id, seq, start_ms, end_ms, text, content_hash) "
-                        "VALUES (:sid, :seq, :a, :b, :txt, "
-                        "        encode(sha256(CAST(:txt AS bytea)), 'hex')) "
-                        "RETURNING id"
+                        "VALUES (:sid, :seq, :a, :b, :txt, :chash) RETURNING id"
                     ),
                     {"sid": session_id, "seq": s, "a": s * 1000, "b": s * 1000 + 500,
-                     "txt": f"seg {s}"},
+                     "txt": f"seg {s}", "chash": chash},
                 )).scalar_one()
                 ids.append(str(seg_id))
             await db.commit()
