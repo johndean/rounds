@@ -80,7 +80,8 @@ async def test_reorder_and_undo_roundtrip(monkeypatch):
                 seg_id = (await db.execute(
                     sa.text(
                         "INSERT INTO segments (session_id, seq, start_ms, end_ms, text, content_hash) "
-                        "VALUES (:sid, :seq, :a, :b, :txt, encode(sha256(:txt::bytea), 'hex')) "
+                        "VALUES (:sid, :seq, :a, :b, :txt, "
+                        "        encode(sha256(CAST(:txt AS bytea)), 'hex')) "
                         "RETURNING id"
                     ),
                     {"sid": session_id, "seq": s, "a": s * 1000, "b": s * 1000 + 500,
