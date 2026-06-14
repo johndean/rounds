@@ -671,7 +671,9 @@ watch(() => props.activeSegmentId, (id, prev) => {
             v-if="bulkEnabled"
             type="checkbox"
             class="segment__select"
+            :class="{ 'is-selected': isSelected(seg.id) }"
             :checked="isSelected(seg.id)"
+            :aria-checked="isSelected(seg.id)"
             :aria-label="`Select segment ${segIdx + 1}`"
             data-test-id="seg-select"
             @click.stop.prevent="(e) => toggleSelect(seg, segIdx, e as MouseEvent)"
@@ -904,9 +906,13 @@ watch(() => props.activeSegmentId, (id, prev) => {
   color: var(--color-amber);
 }
 /* Custom-drawn checkbox. A native checkbox with @click.prevent suffers a
-   paint desync (the browser reverts el.checked during canceled-activation, and
-   the programmatic re-check doesn't always repaint the native widget). CSS
-   :checked keys off the IDL state, which IS correct, so we draw it ourselves. */
+   paint desync: preventDefault cancels the activation, so the browser leaves
+   el.checked at false, and Vue's one-way :checked binding does NOT reliably
+   re-set the IDL property on the next render (unlike React's controlled input).
+   So CSS keyed off :checked stayed unchecked even though `selected` updated.
+   Fix: drive the visual from the reactive .is-selected class (a class binding
+   Vue patches every render, immune to the IDL revert). :checked/:aria-checked
+   stay for form + screen-reader semantics; .is-selected is the visual truth. */
 .segment__select {
   appearance: none;
   -webkit-appearance: none;
@@ -923,11 +929,11 @@ watch(() => props.activeSegmentId, (id, prev) => {
   transition: background 0.12s, border-color 0.12s;
 }
 .segment__select:hover { border-color: var(--color-steel, #2563eb); }
-.segment__select:checked {
+.segment__select.is-selected {
   background: var(--color-steel, #2563eb);
   border-color: var(--color-steel, #2563eb);
 }
-.segment__select:checked::after {
+.segment__select.is-selected::after {
   content: "";
   position: absolute;
   left: 4px;
