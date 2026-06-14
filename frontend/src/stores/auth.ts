@@ -20,6 +20,20 @@ function writePersistedEmail(v: string | null): void {
   } catch { /* private mode */ }
 }
 
+/** Read the `sub` (email) claim from a JWT without verifying. The server just
+ * issued the token on a successful POST /login, so the login path can take the
+ * email from here instead of a second GET /me round-trip — one less request to
+ * hang on during a backend restart. bootstrap() still validates persisted
+ * tokens via /me on app start. */
+function jwtSub(token: string): string | null {
+  try {
+    const part = token.split('.')[1];
+    if (!part) return null;
+    const payload = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/'))) as { sub?: string };
+    return typeof payload.sub === 'string' ? payload.sub : null;
+  } catch { return null; }
+}
+
 export const useAuthStore = defineStore('auth', () => {
   const email = ref<string | null>(readPersistedEmail());
   const isLoading = ref(false);
@@ -47,9 +61,12 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const resp = await authApi.login(emailInput.trim().toLowerCase(), password);
       setToken(resp.access_token);
-      const me = await authApi.me();
-      email.value = me.email;
-      writePersistedEmail(me.email);
+      // Take the email from the JWT the server just issued — no redundant
+      // GET /me on the login hot path (removes a request that could hang
+      // during a backend restart and freeze the post-login redirect).
+      const who = jwtSub(resp.access_token) ?? emailInput.trim().toLowerCase();
+      email.value = who;
+      writePersistedEmail(who);
       return true;
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {

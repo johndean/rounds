@@ -35,7 +35,21 @@ interface RequestOpts {
   signal?: AbortSignal;
   /** When true, omit the Authorization header even if a token is stored. */
   anonymous?: boolean;
+  /**
+   * Per-request timeout in ms. Defaults to DEFAULT_TIMEOUT_MS. Pass 0 to
+   * disable (e.g. long-running exports). On timeout the request is aborted
+   * and the call rejects with ApiError(0, {code:'TIMEOUT'}).
+   */
+  timeoutMs?: number;
 }
+
+// Time-box every request. Without this, a hung backend — a Railway api
+// restart / cold-start window, a dropped connection — leaves fetch pending
+// forever, freezing any view that awaits it on a spinner until the user
+// manually refreshes (the "login lands on a blank dashboard" report). A
+// timeout converts an infinite hang into a normal rejection the caller's
+// catch can handle (e.g. DashboardView renders empty instead of spinning).
+const DEFAULT_TIMEOUT_MS = 20000;
 
 export async function http<T = unknown>(path: string, opts: RequestOpts = {}): Promise<T> {
   const headers: Record<string, string> = { ...opts.headers };
@@ -51,12 +65,34 @@ export async function http<T = unknown>(path: string, opts: RequestOpts = {}): P
     headers['Content-Type'] = 'application/json';
   }
 
-  const resp = await fetch(`${API_BASE}${path}`, {
-    method: opts.method ?? (body ? 'POST' : 'GET'),
-    headers,
-    body,
-    signal: opts.signal,
-  });
+  // Abort on timeout; also chain the caller's signal so either can cancel.
+  const controller = new AbortController();
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timer = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  if (opts.signal) {
+    if (opts.signal.aborted) controller.abort();
+    else opts.signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
+
+  let resp: Response;
+  try {
+    resp = await fetch(`${API_BASE}${path}`, {
+      method: opts.method ?? (body ? 'POST' : 'GET'),
+      headers,
+      body,
+      signal: controller.signal,
+    });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      // Caller-initiated abort → propagate as-is; our timeout → typed ApiError.
+      if (opts.signal?.aborted) throw e;
+      throw new ApiError(0, { code: 'TIMEOUT' }, `Request to ${path} timed out after ${timeoutMs}ms`);
+    }
+    // Network error: offline, DNS failure, connection refused/reset.
+    throw new ApiError(0, { code: 'NETWORK_ERROR' }, e instanceof Error ? e.message : 'Network error');
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 
   const isJson = resp.headers.get('content-type')?.includes('application/json');
   const payload = isJson ? await resp.json().catch(() => undefined) : await resp.text().catch(() => '');
