@@ -40,15 +40,17 @@ async def _engine_or_skip():
     return eng
 
 
-async def test_reorder_and_undo_roundtrip(monkeypatch):
+async def test_reorder_and_undo_roundtrip():
     from app.api.session_resources import (
         SegmentReorderRequest,
         reorder_segments,
         undo_bulk_reassign,
     )
 
-    # The endpoint is flag-gated (default off); enable it for the test.
-    monkeypatch.setattr(settings, "SEGMENT_REORDER_ENABLED", True, raising=False)
+    # The endpoint is flag-gated (default off). Enable via direct assignment —
+    # the proven pattern from test_segment_split; restored in the finally.
+    _prev_reorder_flag = settings.SEGMENT_REORDER_ENABLED
+    settings.SEGMENT_REORDER_ENABLED = True
 
     eng = await _engine_or_skip()
     sm = async_sessionmaker(eng, expire_on_commit=False, autoflush=False)
@@ -133,6 +135,7 @@ async def test_reorder_and_undo_roundtrip(monkeypatch):
         assert {str(r[0]): r[1] for r in rows} == original_seqs, \
             "undo did not restore the exact prior seq values"
     finally:
+        settings.SEGMENT_REORDER_ENABLED = _prev_reorder_flag
         # session delete cascades to segments + bulk_reassign_batches (FKs are
         # ON DELETE CASCADE); audit_events is cleared explicitly.
         if session_id is not None:

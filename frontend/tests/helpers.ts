@@ -42,6 +42,9 @@ export function collectConsoleErrors(page: Page): string[] {
     if (/the server responded with a status of 4\d\d/i.test(text)) return;
     if (/net::ERR_/i.test(text)) return;
     if (/HMR/i.test(text)) return;
+    // The session WebSocket (wsConnectionPool) can't connect in the no-backend
+    // preview env; that failure is environmental, not a render bug.
+    if (/WebSocket connection to .* failed/i.test(text)) return;
     errors.push(text);
   });
   page.on('pageerror', (err) => {
