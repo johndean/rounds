@@ -176,12 +176,22 @@ async def _redo_merge(db, payload: dict) -> None:
     merged_text = (left_text_before or "").rstrip() + " " + (right_full.get("text") or "").lstrip()
     merged_end_ms = int(right_full["end_ms"])
 
-    # Re-apply UPDATE left.
+    # Re-apply UPDATE left — including the merged_from / merged_at_ms breadcrumb
+    # the forward merge writes (execute_merge step 5). Without this, redo
+    # restored text + end_ms but dropped the breadcrumb, so redo diverged from
+    # the first merge. left.metadata is the restored pre-merge metadata here
+    # (invert_merge rolled it back), so `metadata || breadcrumb` reproduces the
+    # first-merge value byte-for-byte.
     await db.execute(text("""
         UPDATE segments
-           SET text = :t, end_ms = :end_ms, updated_at = now()
+           SET text = :t,
+               end_ms = :end_ms,
+               metadata = (metadata
+                   || jsonb_build_object('merged_from', CAST(:rid AS text), 'merged_at_ms', CAST(:rstart AS bigint))),
+               updated_at = now()
          WHERE id = CAST(:lid AS uuid)
-    """), {"t": merged_text, "end_ms": merged_end_ms, "lid": left_id})
+    """), {"t": merged_text, "end_ms": merged_end_ms, "lid": left_id,
+           "rid": right_id, "rstart": int(right_full["start_ms"])})
 
     # Re-reparent word_alignment rows from right to left.
     await db.execute(text("""

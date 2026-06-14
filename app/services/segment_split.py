@@ -224,6 +224,14 @@ async def invert_split(db, payload: dict) -> None:
     original_end_ms_before = int(payload["original_end_ms_before"])
     moved_count = int(payload.get("moved_word_alignment_count", 0))
 
+    # Capture the original segment's seq + session up front (unchanged by the
+    # steps below) so we can reverse the forward split's seq bump once the new
+    # segment is gone.
+    orig_pos = (await db.execute(text("""
+        SELECT seq, session_id::text AS sid
+          FROM segments WHERE id = CAST(:seg AS uuid)
+    """), {"seg": orig_id})).mappings().one()
+
     # 1. Restore original segment text + end_ms.
     await db.execute(text("""
         UPDATE segments
@@ -256,5 +264,18 @@ async def invert_split(db, payload: dict) -> None:
     await db.execute(text("""
         DELETE FROM segments WHERE id = CAST(:new AS uuid)
     """), {"new": new_id})
+
+    # 5. Reverse the forward split's seq bump. execute_split shifted every
+    #    later segment up by one (seq = seq + 1 WHERE seq > orig_seq) before
+    #    inserting the new segment at orig_seq + 1. With the new segment now
+    #    deleted, shift the later segments back down so seq numbering is
+    #    restored exactly (the byte-identical undo contract; seq is non-unique
+    #    since mig 022, so no interim-collision constraint applies).
+    await db.execute(text("""
+        UPDATE segments
+           SET seq = seq - 1, updated_at = now()
+         WHERE session_id = CAST(:sid AS uuid)
+           AND seq > :orig_seq
+    """), {"sid": orig_pos["sid"], "orig_seq": int(orig_pos["seq"])})
     # moved_count retained in payload for diagnostics; not used here.
     _ = moved_count
