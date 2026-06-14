@@ -266,15 +266,26 @@ class EnvelopeMiddleware(BaseHTTPMiddleware):
         ):
             detail = body.get("detail")
             if isinstance(detail, dict):
-                code = detail.get("code") or "INTERNAL_ERROR"
-                message = detail.get("message") or str(detail)
+                raw_code = detail.get("code")
+                message = detail.get("message") or raw_code or str(detail)
                 details = {k: v for k, v in detail.items() if k not in ("code", "message")}
+                if raw_code in ERROR_HTTP_MAP:
+                    code = raw_code
+                else:
+                    # Domain-specific code outside the locked enum (e.g.
+                    # SPLIT_INVALID_WORD_INDEX, SPLIT_MERGE_BUSY): keep the
+                    # top-level error.code within the locked enum (status-derived)
+                    # but PRESERVE the precise reason in details.code so clients
+                    # can branch on it. Without this the specific code was lost.
+                    code = _status_to_code(response.status_code)
+                    if raw_code:
+                        details["code"] = raw_code
             else:
                 code = _status_to_code(response.status_code)
                 message = str(detail) if detail else _status_to_code(response.status_code)
                 details = {}
             return error_response(
-                code=code if code in ERROR_HTTP_MAP else _status_to_code(response.status_code),
+                code=code,
                 message=message,
                 http_status=response.status_code,
                 details=details,

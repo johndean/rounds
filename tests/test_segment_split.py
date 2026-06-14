@@ -256,7 +256,7 @@ async def test_split_happy_path_4_word_after_1():
         ) as client:
             resp = await _post_split(client, sid, seg_id, after_word_index=1)
         assert resp.status_code == 200, resp.text
-        body = resp.json()
+        body = resp.json()["data"]  # unwrap MIC §9.1 envelope
         assert body["correction_type"] == "split"
         assert len(body["affected_segment_ids"]) == 2
         new_seg_ids = body["affected_segment_ids"]
@@ -378,7 +378,7 @@ async def test_split_after_word_index_n_minus_1_rejected():
             # n=4 words, after_word_index=3 leaves right with 0 words.
             resp = await _post_split(client, sid, seg_id, after_word_index=3)
         assert resp.status_code == 400, resp.text
-        assert resp.json()["detail"]["code"] == "SPLIT_INVALID_WORD_INDEX"
+        assert resp.json()["error"]["details"]["code"] == "SPLIT_INVALID_WORD_INDEX"
 
         async with SessionLocal() as db:
             count = (
@@ -416,7 +416,7 @@ async def test_split_after_word_index_negative_rejected():
         # acceptable so long as it's a client-error and no row was inserted.
         assert resp.status_code in (400, 422), resp.text
         if resp.status_code == 400:
-            assert resp.json()["detail"]["code"] == "SPLIT_INVALID_WORD_INDEX"
+            assert resp.json()["error"]["details"]["code"] == "SPLIT_INVALID_WORD_INDEX"
 
         async with SessionLocal() as db:
             count = (
@@ -457,7 +457,7 @@ async def test_split_after_word_index_way_past_end_rejected():
         ) as client:
             resp = await _post_split(client, sid, seg_id, after_word_index=99)
         assert resp.status_code == 400, resp.text
-        assert resp.json()["detail"]["code"] == "SPLIT_INVALID_WORD_INDEX"
+        assert resp.json()["error"]["details"]["code"] == "SPLIT_INVALID_WORD_INDEX"
     finally:
         async with SessionLocal() as db:
             await _cleanup_session(db, sid)
@@ -486,7 +486,7 @@ async def test_split_anchor_segment_rejected():
         ) as client:
             resp = await _post_split(client, sid, seg_id, after_word_index=1)
         assert resp.status_code == 400, resp.text
-        assert resp.json()["detail"]["code"] == "SPLIT_ANCHOR_SEGMENT"
+        assert resp.json()["error"]["details"]["code"] == "SPLIT_ANCHOR_SEGMENT"
 
         async with SessionLocal() as db:
             count = (
@@ -521,7 +521,7 @@ async def test_split_no_word_alignment_rejected():
         ) as client:
             resp = await _post_split(client, sid, seg_id, after_word_index=1)
         assert resp.status_code == 422, resp.text
-        assert resp.json()["detail"]["code"] == "SPLIT_NO_WORD_ALIGNMENT"
+        assert resp.json()["error"]["details"]["code"] == "SPLIT_NO_WORD_ALIGNMENT"
     finally:
         async with SessionLocal() as db:
             await _cleanup_session(db, sid)
@@ -794,8 +794,14 @@ async def test_split_content_hash_recomputed_for_new_segment():
             # Original (start_ms=0) hash unchanged.
             assert left["id"] == seg_id
             assert left["content_hash"] == orig_hash_before
-            # New segment's hash = sha256(session_id || split_ms) hex.
-            expected_new = _hash(sid, right["start_ms"])
+            # New segment's hash = sha256(session_id || split_ms || new_seg_id)
+            # hex. The H2 fix (2026-06-06) mixes the new row's UUID into the
+            # recipe so a repeated split_ms can't collide on the UNIQUE
+            # (session_id, content_hash) constraint (mig 020). split_ms equals
+            # the new segment's start_ms.
+            expected_new = hashlib.sha256(
+                f"{sid}{right['start_ms']}{right['id']}".encode("utf-8")
+            ).hexdigest()
             assert right["content_hash"] == expected_new
             assert right["content_hash"] != orig_hash_before
     finally:
@@ -827,7 +833,7 @@ async def test_split_idempotent_with_action_id():
                 client, sid, seg_id, after_word_index=1, action_id=action_id
             )
             assert r2.status_code == 200, r2.text
-            assert r2.json().get("deduped") is True
+            assert r2.json()["data"].get("deduped") is True  # unwrap envelope
 
         async with SessionLocal() as db:
             # Still exactly 2 segments (1 original split into 2) — not 3.
@@ -912,7 +918,7 @@ async def test_split_concurrent_same_session_returns_busy():
         ) as client:
             resp = await _post_split(client, sid, seg2, after_word_index=1)
         assert resp.status_code == 409, resp.text
-        assert resp.json()["detail"]["code"] == "SPLIT_MERGE_BUSY"
+        assert resp.json()["error"]["details"]["code"] == "SPLIT_MERGE_BUSY"
 
         async with SessionLocal() as db:
             count = (
