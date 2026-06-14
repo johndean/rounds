@@ -173,6 +173,7 @@ type ApiSegmentRow = {
   id: string; seq: number; start_ms: number; end_ms: number; text: string;
   confidence: number | null; flags: string[];
   slide_id: string | null; speaker_id: string | null;
+  content_hash: string | null;
 };
 type ApiSlideRow = { id: string; slide_index: number; title: string | null };
 type ApiCorrectionRow = {
@@ -227,6 +228,7 @@ function _adaptSegments(rows: ApiSegmentRow[], speakersById: Map<string, ApiSpea
       speaker_short: sp?.short ?? null,
       speaker_role: sp?.role ?? null,
       speaker_color: sp?.avatar_color ?? null,
+      content_hash: row.content_hash ?? null,
     };
   });
 }
@@ -942,9 +944,13 @@ function openFind(): void {
 // ── Inline-save handlers (Phase C.3) ─────────────────────────────────
 async function onEditSegment(segId: string, before: string, after: string): Promise<void> {
   try {
+    // Ship the segment's content_hash so a split/merge that rewrote this row
+    // server-side drops the stale write instead of clobbering the new text.
+    const hash = SEGMENTS.value.find((s) => s.id === segId)?.content_hash ?? undefined;
     await correctionsApi.apply(props.id, {
       segment_id: segId, correction_type: 'text_edit',
       old_text: before, new_text: after,
+      ...(hash ? { expected_content_hash: hash } : {}),
     });
     const idx = SEGMENTS.value.findIndex((s) => s.id === segId);
     if (idx >= 0) {
@@ -965,10 +971,13 @@ async function onEditSegment(segId: string, before: string, after: string): Prom
 function onAutosaveSegment(segId: string, before: string, after: string): void {
   if (before === after) return;
   const idx = SEGMENTS.value.findIndex((s) => s.id === segId);
+  // Capture content_hash BEFORE the optimistic text update (text_edit never
+  // changes content_hash, so order is moot, but read from the committed row).
+  const hash = idx >= 0 ? (SEGMENTS.value[idx]!.content_hash ?? undefined) : undefined;
   if (idx >= 0) {
     SEGMENTS.value[idx] = { ...SEGMENTS.value[idx]!, text: after, has_user_override: true };
   }
-  autosave.schedule(segId, before, after);
+  autosave.schedule(segId, before, after, hash);
 }
 function onFlushAutosave(segId?: string): void {
   autosave.flush(segId);

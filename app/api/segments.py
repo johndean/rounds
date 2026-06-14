@@ -32,6 +32,12 @@ class SegmentOut(BaseModel):
     anchor_kind: Optional[str]
     slide_id: Optional[UUID]
     speaker_id: Optional[UUID]
+    # Structural identity hash (set at ingest, rewritten by split/merge — NOT
+    # by text_edit). The editor ships this back as `expected_content_hash` on
+    # autosave so a stale write can't clobber text a concurrent split/merge
+    # just rewrote (corrections.apply C6 guard). Optional/default-None so
+    # endpoints whose RETURNING omits it still validate.
+    content_hash: Optional[str] = None
 
 
 class SegmentPatch(BaseModel):
@@ -104,7 +110,7 @@ async def list_segments(session_id: UUID, db: DbSession, _u: CurrentUser) -> lis
 
     rows = (await db.execute(text(
         "SELECT id, seq, start_ms, end_ms, text, confidence, flags, is_anchor, anchor_kind, "
-        "       slide_id, speaker_id "
+        "       slide_id, speaker_id, content_hash "
         "FROM segments WHERE session_id = :s ORDER BY seq"
     ), {"s": sid})).mappings().all()
 
@@ -177,7 +183,7 @@ async def edit_segment(session_id: UUID, segment_id: UUID, payload: SegmentPatch
     row = (await db.execute(text(
         f"UPDATE segments SET {', '.join(sets)} "
         "WHERE id = :id AND session_id = :s "
-        "RETURNING id, seq, start_ms, end_ms, text, confidence, flags, is_anchor, anchor_kind, slide_id, speaker_id"
+        "RETURNING id, seq, start_ms, end_ms, text, confidence, flags, is_anchor, anchor_kind, slide_id, speaker_id, content_hash"
     ), params)).mappings().one()
 
     # Correction ledger + audit event. Phase 4 (2026-06-05): when the
@@ -233,7 +239,7 @@ async def reassign_segment(session_id: UUID, segment_id: UUID, payload: Reassign
     row = (await db.execute(text(
         "UPDATE segments SET slide_id = :sl, updated_at = now() "
         "WHERE id = :id AND session_id = :s "
-        "RETURNING id, seq, start_ms, end_ms, text, confidence, flags, is_anchor, anchor_kind, slide_id, speaker_id"
+        "RETURNING id, seq, start_ms, end_ms, text, confidence, flags, is_anchor, anchor_kind, slide_id, speaker_id, content_hash"
     ), {"sl": str(payload.slide_id), "id": str(segment_id), "s": str(session_id)})).mappings().one()
 
     await db.execute(text(

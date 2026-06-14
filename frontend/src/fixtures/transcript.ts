@@ -148,6 +148,10 @@ export interface Segment {
   speaker_short?: string | null;
   speaker_color?: string | null;
   speaker_role?: string | null;
+  // Structural identity hash from the backend. Shipped back as
+  // expected_content_hash on autosave so a stale text_edit can't clobber
+  // text a concurrent split/merge just rewrote. Changes only on split/merge.
+  content_hash?: string | null;
 }
 
 export interface SpeakerDisplay {

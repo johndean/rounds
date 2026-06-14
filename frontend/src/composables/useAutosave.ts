@@ -61,6 +61,10 @@ const COMPACTION_MS = 3000;  // reviewer-requested: prevent correction_ledger ex
 interface PendingWrite {
   oldText: string;
   newText: string;
+  // The segment's content_hash as the client last knew it. Sent as
+  // expected_content_hash so a stale autosave is dropped server-side when a
+  // split/merge rewrote the row. undefined => legacy unconditional write.
+  contentHash: string | undefined;
   timer: ReturnType<typeof setTimeout> | null;
   lastFlushedAt: number;
 }
@@ -89,7 +93,7 @@ export function useAutosave(
     pending.delete(segId);
   }
 
-  async function _writeOnce(segId: string, oldText: string, newText: string): Promise<void> {
+  async function _writeOnce(segId: string, oldText: string, newText: string, contentHash: string | undefined): Promise<void> {
     _setStatus(segId, 'saving');
     try {
       await correctionsApi.apply(sessionId, {
@@ -97,6 +101,7 @@ export function useAutosave(
         correction_type: 'text_edit',
         old_text:        oldText,
         new_text:        newText,
+        ...(contentHash ? { expected_content_hash: contentHash } : {}),
       });
       _setStatus(segId, 'saved');
       // Fade the "Saved" badge to idle after 2s. Re-render only the
@@ -127,7 +132,7 @@ export function useAutosave(
    * the next save waits the remaining window so we don't explode
    * correction_ledger row count on rapid typing.
    */
-  function schedule(segId: string, oldText: string, newText: string): void {
+  function schedule(segId: string, oldText: string, newText: string, contentHash?: string): void {
     if (!isEnabled.value) return;
     const existing = pending.get(segId);
     if (existing?.timer) clearTimeout(existing.timer);
@@ -142,6 +147,7 @@ export function useAutosave(
     const entry: PendingWrite = {
       oldText,
       newText,
+      contentHash,
       timer: null,
       lastFlushedAt,
     };
@@ -150,7 +156,7 @@ export function useAutosave(
       if (!p) return;
       p.timer = null;
       p.lastFlushedAt = Date.now();
-      void _writeOnce(segId, p.oldText, p.newText);
+      void _writeOnce(segId, p.oldText, p.newText, p.contentHash);
     }, debounce);
     pending.set(segId, entry);
   }
@@ -175,7 +181,7 @@ export function useAutosave(
       if (!p) continue;
       if (p.timer) clearTimeout(p.timer);
       pending.delete(id);
-      void _writeOnce(id, p.oldText, p.newText);
+      void _writeOnce(id, p.oldText, p.newText, p.contentHash);
     }
   }
 

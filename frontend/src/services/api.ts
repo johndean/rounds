@@ -516,6 +516,11 @@ export const corrections = {
       old_text?: string | null;
       new_text?: string | null;
       action_id?: string | null;
+      // Autosave-vs-split race guard (backend C6). When set on a text_edit,
+      // the write is conditional on the segment's content_hash still matching;
+      // a stale autosave (a split/merge rewrote the row) is dropped server-side
+      // instead of clobbering the post-split text.
+      expected_content_hash?: string | null;
     },
   ) =>
     http<CorrectionApplied>(
@@ -613,6 +618,7 @@ export interface SegmentRow {
   anchor_kind: string | null;
   slide_id: string | null;
   speaker_id: string | null;
+  content_hash: string | null;
 }
 
 export const segments = {
