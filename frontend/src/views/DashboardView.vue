@@ -30,8 +30,11 @@ onMounted(async () => {
       sessionsApi.list({}).catch(() => [] as SessionSummary[]),
       sopApi.dashboardSummary().catch(() => [] as Array<{ stage: string; count: number; overdue_count: number }>),
     ]);
-    allSessions.value = sessions;
-    sopSummary.value = sop;
+    // Guard against a non-array response (e.g. a misproxied 200 returning SPA
+    // HTML, or a malformed payload) — the computeds below call .find/.filter
+    // and would throw a pageerror otherwise.
+    allSessions.value = Array.isArray(sessions) ? sessions : [];
+    sopSummary.value = Array.isArray(sop) ? sop : [];
   } finally {
     loading.value = false;
   }
