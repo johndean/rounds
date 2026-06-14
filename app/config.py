@@ -175,5 +175,37 @@ class Settings(BaseSettings):
             return "postgresql+asyncpg://" + v[len("postgresql://"):]
         return v
 
+    def production_flag_drift(self) -> list[str]:
+        """Expected-on production flags that are currently OFF.
+
+        These flags default to False in code (dark-ship pattern) and are
+        flipped True via Railway env once ramped — so the ON state lives only
+        in the environment. If that env is lost/reset, the feature silently
+        returns 503 with no signal. This detector reports any expected-on flag
+        that is not True so the startup hook can log a CRITICAL and /v1/version
+        can surface it: a lost env var becomes loud instead of silent.
+
+        Environment-independent (pure function of this instance). The caller
+        gates on ENVIRONMENT == 'production'. Empty list == healthy.
+        """
+        return [name for name in EXPECTED_PRODUCTION_FLAGS if getattr(self, name) is not True]
+
+
+# SSOT contract: "these feature flags are live in production." Each defaults to
+# False above (dark-ship) and is set True in the Railway api + worker env. Add a
+# flag here ONLY after it has been ramped to ON in production; remove it if a
+# feature is intentionally turned back off. Pinned by
+# tests/test_production_flag_drift.py so this list can't silently drift from the
+# actual Settings fields. UPLOAD_WATCHDOG_ENABLED + SOP_DEADLINE_EMAIL_ENABLED
+# are intentionally absent — they are dark by design today.
+EXPECTED_PRODUCTION_FLAGS: tuple[str, ...] = (
+    "SPLIT_MERGE_ENABLED",
+    "BULK_REASSIGN_ENABLED",
+    "SEGMENT_REORDER_ENABLED",
+    "CMS_POLLS_FROM_TABLE",
+    "VERTEX_AI_CLASSIFY_ENABLED",
+    "HELP_ASK_AI_ENABLED",
+)
+
 
 settings = Settings()  # type: ignore[call-arg]

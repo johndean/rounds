@@ -61,6 +61,21 @@ _ws_bridge_task = None
 async def lifespan(_app: FastAPI):
     global _ws_manager, _ws_bridge_task
 
+    # Production feature-flag drift guard. The live features (split/merge,
+    # reorder, bulk, CMS-polls, Vertex, Help-AI) are ON only because the Railway
+    # env sets them; their code default is False. If an env var is lost/reset,
+    # the feature silently returns 503. Surface that loudly at boot so a missing
+    # flag is a log line, not a mystery support ticket. Also on /v1/version.
+    if settings.ENVIRONMENT == "production":
+        drift = settings.production_flag_drift()
+        if drift:
+            print(
+                f"[boot][CRITICAL] expected-on production feature flags are OFF: "
+                f"{', '.join(drift)}. Set them in the Railway api + worker env. "
+                f"Affected endpoints will return 503 until restored.",
+                flush=True,
+            )
+
     if settings.GOOGLE_APPLICATION_CREDENTIALS:
         creds_path = Path(settings.GOOGLE_APPLICATION_CREDENTIALS)
         if not creds_path.exists():
@@ -193,6 +208,11 @@ async def version() -> JSONResponse:
         # Segment drag-drop reorder (2026-06-12) — gates the transcript drag
         # handles. SSOT: settings.SEGMENT_REORDER_ENABLED.
         "segment_reorder_enabled": settings.SEGMENT_REORDER_ENABLED,
+        # Production flag-drift guard: expected-on flags currently OFF. Empty []
+        # is healthy. Non-empty means an env var was lost/reset and those
+        # features are 503ing — monitor this from uptime checks. SSOT list:
+        # config.EXPECTED_PRODUCTION_FLAGS.
+        "flag_drift": settings.production_flag_drift() if settings.ENVIRONMENT == "production" else [],
     })
 
 
