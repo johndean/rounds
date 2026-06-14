@@ -47,10 +47,15 @@ async def test_reorder_and_undo_roundtrip():
         undo_bulk_reassign,
     )
 
-    # The endpoint is flag-gated (default off). Enable via direct assignment —
-    # the proven pattern from test_segment_split; restored in the finally.
-    _prev_reorder_flag = settings.SEGMENT_REORDER_ENABLED
-    settings.SEGMENT_REORDER_ENABLED = True
+    # The endpoint is flag-gated (default off). Enable it on the LIVE settings
+    # the endpoint actually reads: test_gcs_scope importlib.reload()s app.config,
+    # which rebinds app.config.settings to a NEW instance, so the module-top
+    # `settings` alias is stale by the time this test runs (it ran before us
+    # alphabetically). Re-import fresh here to get the current object; restore in
+    # the finally.
+    from app.config import settings as live_settings
+    _prev_reorder_flag = live_settings.SEGMENT_REORDER_ENABLED
+    live_settings.SEGMENT_REORDER_ENABLED = True
 
     eng = await _engine_or_skip()
     sm = async_sessionmaker(eng, expire_on_commit=False, autoflush=False)
@@ -135,7 +140,7 @@ async def test_reorder_and_undo_roundtrip():
         assert {str(r[0]): r[1] for r in rows} == original_seqs, \
             "undo did not restore the exact prior seq values"
     finally:
-        settings.SEGMENT_REORDER_ENABLED = _prev_reorder_flag
+        live_settings.SEGMENT_REORDER_ENABLED = _prev_reorder_flag
         # session delete cascades to segments + bulk_reassign_batches (FKs are
         # ON DELETE CASCADE); audit_events is cleared explicitly.
         if session_id is not None:
